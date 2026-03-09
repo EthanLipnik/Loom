@@ -1,0 +1,52 @@
+# ``Loom``
+
+Loom is a product-agnostic networking package for Apple platforms that handles discovery, identity, trust, session establishment, remote reachability, and bootstrap workflows between peers.
+
+## Overview
+
+Use Loom when your app needs to find another Apple device, decide whether to trust it, and establish a session without baking product-specific assumptions into the transport layer.
+
+Loom owns the peer relationship and connectivity infrastructure:
+
+- discovery over Bonjour and peer-to-peer transports
+- stable device identity and signing
+- trust-policy integration and persistence
+- direct and relay-backed session coordination
+- Wake-on-LAN, SSH, and control-channel bootstrap flows
+- diagnostics and instrumentation for the networking layer
+
+Your app still owns payload schemas, user experience, and product policy.
+
+## Topics
+
+### Essentials
+
+- <doc:GettingStarted>
+- ``LoomNode``
+- ``LoomSession``
+- ``LoomPeer``
+- ``LoomPeerAdvertisement``
+- ``LoomNetworkConfiguration``
+
+### Identity And Trust
+
+- ``LoomIdentityManager``
+- ``LoomTrustProvider``
+- ``LoomTrustStore``
+
+### Remote Connectivity
+
+- ``LoomRelayClient``
+- ``LoomSTUNProbe``
+
+### Bootstrap
+
+- ``LoomBootstrapEndpointResolver``
+- ``LoomBootstrapControlClient``
+- ``LoomWakeOnLANClient``
+- ``LoomSSHBootstrapClient``
+
+### Diagnostics
+
+- ``LoomDiagnostics``
+- ``LoomInstrumentation``
