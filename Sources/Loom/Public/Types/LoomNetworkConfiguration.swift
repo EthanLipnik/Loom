@@ -17,6 +17,7 @@ public struct LoomNetworkConfiguration: Sendable {
     public var enablePeerToPeer: Bool
     public var requireEncryptedMediaOnLocalNetwork: Bool
     public var enabledDirectTransports: Set<LoomTransportKind>
+    public var directConnectionPolicy: LoomDirectConnectionPolicy
 
     public init(
         serviceType: String = Loom.serviceType,
@@ -26,7 +27,8 @@ public struct LoomNetworkConfiguration: Sendable {
         maxPacketSize: Int = Loom.defaultMaxPacketSize,
         enablePeerToPeer: Bool = true,
         requireEncryptedMediaOnLocalNetwork: Bool = false,
-        enabledDirectTransports: Set<LoomTransportKind> = Set(LoomTransportKind.allCases)
+        enabledDirectTransports: Set<LoomTransportKind> = Set(LoomTransportKind.allCases),
+        directConnectionPolicy: LoomDirectConnectionPolicy = .default
     ) {
         self.serviceType = serviceType
         self.controlPort = controlPort
@@ -36,6 +38,30 @@ public struct LoomNetworkConfiguration: Sendable {
         self.enablePeerToPeer = enablePeerToPeer
         self.requireEncryptedMediaOnLocalNetwork = requireEncryptedMediaOnLocalNetwork
         self.enabledDirectTransports = enabledDirectTransports
+        self.directConnectionPolicy = directConnectionPolicy
+    }
+
+    public init(
+        serviceType: String = Loom.serviceType,
+        controlPort: UInt16 = 0,
+        dataPort: UInt16 = 0,
+        quicPort: UInt16 = 0,
+        maxPacketSize: Int = Loom.defaultMaxPacketSize,
+        enablePeerToPeer: Bool = true,
+        requireEncryptedMediaOnLocalNetwork: Bool = false,
+        enabledDirectTransports: Set<LoomTransportKind>
+    ) {
+        self.init(
+            serviceType: serviceType,
+            controlPort: controlPort,
+            dataPort: dataPort,
+            quicPort: quicPort,
+            maxPacketSize: maxPacketSize,
+            enablePeerToPeer: enablePeerToPeer,
+            requireEncryptedMediaOnLocalNetwork: requireEncryptedMediaOnLocalNetwork,
+            enabledDirectTransports: enabledDirectTransports,
+            directConnectionPolicy: .default
+        )
     }
 
     public static let `default` = LoomNetworkConfiguration()

@@ -222,6 +222,11 @@ actor LoomDiagnosticsStore {
         diagnosticsSinkRegistryState.setSinkCount(0)
     }
 
+    func removeAllContextProviders() {
+        contextProviders.removeAll()
+        contextProviderOrder.removeAll()
+    }
+
     func registerContextProvider(_ provider: @escaping LoomDiagnosticsContextProvider) -> LoomDiagnosticsContextProviderToken {
         let token = LoomDiagnosticsContextProviderToken()
         contextProviders[token] = provider
@@ -290,6 +295,11 @@ public enum LoomDiagnostics {
 
     public static func snapshotContext() async -> LoomDiagnosticsContext {
         await LoomDiagnosticsStore.shared.snapshotContext()
+    }
+
+    static func resetForTesting() async {
+        await LoomDiagnosticsStore.shared.removeAllSinks()
+        await LoomDiagnosticsStore.shared.removeAllContextProviders()
     }
 
     public static func report(

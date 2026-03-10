@@ -123,6 +123,10 @@ public enum LoomInstrumentation {
         await LoomInstrumentationStore.shared.removeAllSinks()
     }
 
+    static func resetForTesting() async {
+        await LoomInstrumentationStore.shared.removeAllSinks()
+    }
+
     public static func record(_ step: @autoclosure () -> LoomStepEvent) {
         guard instrumentationSinkRegistryState.hasRegisteredSinks else { return }
 

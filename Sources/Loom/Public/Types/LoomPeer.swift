@@ -48,6 +48,26 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
     }
 }
 
+/// Direct transport advertisement published by a Loom peer.
+public struct LoomDirectTransportAdvertisement: Codable, Hashable, Sendable {
+    /// Direct transport protocol used to accept Loom sessions.
+    public let transportKind: LoomTransportKind
+    /// Listening port for the transport.
+    public let port: UInt16
+    /// Broad local-network path hint associated with the transport, when known.
+    public let pathKind: LoomDirectPathKind?
+
+    public init(
+        transportKind: LoomTransportKind,
+        port: UInt16,
+        pathKind: LoomDirectPathKind? = nil
+    ) {
+        self.transportKind = transportKind
+        self.port = port
+        self.pathKind = pathKind
+    }
+}
+
 /// Device type enumeration.
 public enum DeviceType: String, Codable, Sendable {
     case mac
@@ -89,6 +109,7 @@ public struct LoomPeerAdvertisement: Codable, Hashable, Sendable {
     public let modelIdentifier: String?
     public let iconName: String?
     public let machineFamily: String?
+    public let directTransports: [LoomDirectTransportAdvertisement]
     public let metadata: [String: String]
 
     public init(
@@ -99,6 +120,7 @@ public struct LoomPeerAdvertisement: Codable, Hashable, Sendable {
         modelIdentifier: String? = nil,
         iconName: String? = nil,
         machineFamily: String? = nil,
+        directTransports: [LoomDirectTransportAdvertisement] = [],
         metadata: [String: String] = [:]
     ) {
         self.protocolVersion = protocolVersion
@@ -108,6 +130,7 @@ public struct LoomPeerAdvertisement: Codable, Hashable, Sendable {
         self.modelIdentifier = modelIdentifier
         self.iconName = iconName
         self.machineFamily = machineFamily
+        self.directTransports = directTransports
         self.metadata = metadata
     }
 
@@ -135,6 +158,12 @@ public struct LoomPeerAdvertisement: Codable, Hashable, Sendable {
         if let machineFamily {
             record[Self.machineFamilyKey] = machineFamily
         }
+        for transport in directTransports {
+            record[Self.directTransportKey(for: transport.transportKind)] = String(transport.port)
+            if let pathKind = transport.pathKind {
+                record[Self.directTransportPathKey(for: transport.transportKind)] = pathKind.rawValue
+            }
+        }
 
         for (key, value) in metadata where Self.reservedKeys.contains(key) == false {
             record[key] = value
@@ -152,6 +181,20 @@ public struct LoomPeerAdvertisement: Codable, Hashable, Sendable {
         }
 
         let deviceType = sanitizedTXTValue(txtRecord[deviceTypeKey]).flatMap(DeviceType.init(rawValue:))
+        let directTransports: [LoomDirectTransportAdvertisement] = LoomTransportKind.allCases.compactMap { transportKind in
+            guard let rawPort = sanitizedTXTValue(txtRecord[directTransportKey(for: transportKind)]),
+                  let port = UInt16(rawPort),
+                  port > 0 else {
+                return nil
+            }
+            let pathKind = sanitizedTXTValue(txtRecord[directTransportPathKey(for: transportKind)])
+                .flatMap(LoomDirectPathKind.init(rawValue:))
+            return LoomDirectTransportAdvertisement(
+                transportKind: transportKind,
+                port: port,
+                pathKind: pathKind
+            )
+        }
 
         return LoomPeerAdvertisement(
             protocolVersion: Int(sanitizedTXTValue(txtRecord[protocolVersionKey]) ?? "1") ?? 1,
@@ -161,6 +204,7 @@ public struct LoomPeerAdvertisement: Codable, Hashable, Sendable {
             modelIdentifier: sanitizedTXTValue(txtRecord[modelIdentifierKey]),
             iconName: sanitizedTXTValue(txtRecord[iconNameKey]),
             machineFamily: sanitizedTXTValue(txtRecord[machineFamilyKey]),
+            directTransports: directTransports,
             metadata: metadata
         )
     }
@@ -172,6 +216,10 @@ public struct LoomPeerAdvertisement: Codable, Hashable, Sendable {
     private static let modelIdentifierKey = "model"
     private static let iconNameKey = "icon"
     private static let machineFamilyKey = "family"
+    private static let tcpPortKey = "tcp"
+    private static let tcpPathKey = "tcp-path"
+    private static let quicPortKey = "quic"
+    private static let quicPathKey = "quic-path"
     private static let reservedKeys: Set<String> = [
         protocolVersionKey,
         deviceIDKey,
@@ -180,7 +228,29 @@ public struct LoomPeerAdvertisement: Codable, Hashable, Sendable {
         modelIdentifierKey,
         iconNameKey,
         machineFamilyKey,
+        tcpPortKey,
+        tcpPathKey,
+        quicPortKey,
+        quicPathKey,
     ]
+
+    private static func directTransportKey(for transportKind: LoomTransportKind) -> String {
+        switch transportKind {
+        case .tcp:
+            tcpPortKey
+        case .quic:
+            quicPortKey
+        }
+    }
+
+    private static func directTransportPathKey(for transportKind: LoomTransportKind) -> String {
+        switch transportKind {
+        case .tcp:
+            tcpPathKey
+        case .quic:
+            quicPathKey
+        }
+    }
 
     private static func sanitizedTXTValue(_ value: String?) -> String? {
         guard let value else {

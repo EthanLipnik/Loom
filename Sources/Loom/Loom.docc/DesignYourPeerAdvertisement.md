@@ -19,6 +19,7 @@ These fields are worth filling when you have them:
 - `modelIdentifier`
 - `iconName`
 - `machineFamily`
+- `directTransports` when you need Loom-owned TCP or QUIC listener hints
 
 Those values are useful across discovery, trust evaluation, and CloudKit registration.
 
@@ -38,6 +39,8 @@ let advertisement = LoomPeerAdvertisement(
     ]
 )
 ```
+
+Do not push direct listener ports into app metadata. Loom has a first-class `directTransports` field for that, and ``LoomNode/startAuthenticatedAdvertising(serviceName:helloProvider:onSession:)`` updates it automatically for the listeners Loom owns.
 
 ## Centralize product metadata
 

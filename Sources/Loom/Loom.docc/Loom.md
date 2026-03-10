@@ -37,8 +37,12 @@ Your app still owns payload schemas, user experience, and product policy.
 - <doc:AddTrustAndApproval>
 - <doc:SharePeersWithCloudKit>
 - <doc:AddRemoteReachabilityAndBootstrap>
+- <doc:TransferLargeObjects>
 - ``LoomNode``
 - ``LoomSession``
+- ``LoomAuthenticatedSession``
+- ``LoomConnectionCoordinator``
+- ``LoomTransferEngine``
 - ``LoomPeer``
 - ``LoomPeerAdvertisement``
 - ``LoomNetworkConfiguration``

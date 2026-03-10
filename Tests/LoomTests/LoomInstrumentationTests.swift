@@ -20,89 +20,99 @@ struct LoomInstrumentationTests {
 
     @Test("Multi-sink fanout delivers every step event")
     func multiSinkFanoutDeliversEvents() async {
-        await LoomInstrumentation.removeAllSinks()
+        await LoomGlobalSinkTestLock.shared.run(reset: {
+            await LoomInstrumentation.resetForTesting()
+        }) {
+            let sinkOne = TestInstrumentationSink()
+            let sinkTwo = TestInstrumentationSink()
+            _ = await LoomInstrumentation.addSink(sinkOne)
+            _ = await LoomInstrumentation.addSink(sinkTwo)
 
-        let sinkOne = TestInstrumentationSink()
-        let sinkTwo = TestInstrumentationSink()
-        _ = await LoomInstrumentation.addSink(sinkOne)
-        _ = await LoomInstrumentation.addSink(sinkTwo)
+            LoomInstrumentation.record(Self.connectionRequested)
 
-        LoomInstrumentation.record(Self.connectionRequested)
-
-        #expect(await waitUntil {
-            let firstCount = await sinkOne.eventCount()
-            let secondCount = await sinkTwo.eventCount()
-            return firstCount >= 1 && secondCount >= 1
-        })
+            #expect(await waitUntil {
+                let firstCount = await sinkOne.eventCount()
+                let secondCount = await sinkTwo.eventCount()
+                return firstCount >= 1 && secondCount >= 1
+            })
+        }
     }
 
     @Test("Sink removal stops future instrumentation delivery")
     func sinkRemovalStopsFutureDeliveries() async {
-        await LoomInstrumentation.removeAllSinks()
+        await LoomGlobalSinkTestLock.shared.run(reset: {
+            await LoomInstrumentation.resetForTesting()
+        }) {
+            let sink = TestInstrumentationSink()
+            let sinkToken = await LoomInstrumentation.addSink(sink)
 
-        let sink = TestInstrumentationSink()
-        let sinkToken = await LoomInstrumentation.addSink(sink)
+            LoomInstrumentation.record(Self.connectionRequested)
+            #expect(await waitUntil { await sink.eventCount() >= 1 })
+            let baselineCount = await sink.eventCount()
 
-        LoomInstrumentation.record(Self.connectionRequested)
-        #expect(await waitUntil { await sink.eventCount() >= 1 })
-        let baselineCount = await sink.eventCount()
+            await LoomInstrumentation.removeSink(sinkToken)
+            LoomInstrumentation.record(Self.connectionEstablished)
+            try? await Task.sleep(for: .milliseconds(50))
 
-        await LoomInstrumentation.removeSink(sinkToken)
-        LoomInstrumentation.record(Self.connectionEstablished)
-        try? await Task.sleep(for: .milliseconds(50))
-
-        #expect(await sink.eventCount() == baselineCount)
+            #expect(await sink.eventCount() == baselineCount)
+        }
     }
 
     @Test("removeAllSinks clears all instrumentation recipients")
     func removeAllSinksStopsAllDeliveries() async {
-        await LoomInstrumentation.removeAllSinks()
+        await LoomGlobalSinkTestLock.shared.run(reset: {
+            await LoomInstrumentation.resetForTesting()
+        }) {
+            let sinkOne = TestInstrumentationSink()
+            let sinkTwo = TestInstrumentationSink()
+            _ = await LoomInstrumentation.addSink(sinkOne)
+            _ = await LoomInstrumentation.addSink(sinkTwo)
 
-        let sinkOne = TestInstrumentationSink()
-        let sinkTwo = TestInstrumentationSink()
-        _ = await LoomInstrumentation.addSink(sinkOne)
-        _ = await LoomInstrumentation.addSink(sinkTwo)
+            LoomInstrumentation.record(Self.connectionRequested)
+            #expect(await waitUntil {
+                let firstCount = await sinkOne.eventCount()
+                let secondCount = await sinkTwo.eventCount()
+                return firstCount >= 1 && secondCount >= 1
+            })
 
-        LoomInstrumentation.record(Self.connectionRequested)
-        #expect(await waitUntil {
-            let firstCount = await sinkOne.eventCount()
-            let secondCount = await sinkTwo.eventCount()
-            return firstCount >= 1 && secondCount >= 1
-        })
+            let sinkOneBaseline = await sinkOne.eventCount()
+            let sinkTwoBaseline = await sinkTwo.eventCount()
 
-        let sinkOneBaseline = await sinkOne.eventCount()
-        let sinkTwoBaseline = await sinkTwo.eventCount()
+            await LoomInstrumentation.removeAllSinks()
+            LoomInstrumentation.record(Self.connectionFailed)
+            try? await Task.sleep(for: .milliseconds(50))
 
-        await LoomInstrumentation.removeAllSinks()
-        LoomInstrumentation.record(Self.connectionFailed)
-        try? await Task.sleep(for: .milliseconds(50))
-
-        #expect(await sinkOne.eventCount() == sinkOneBaseline)
-        #expect(await sinkTwo.eventCount() == sinkTwoBaseline)
+            #expect(await sinkOne.eventCount() == sinkOneBaseline)
+            #expect(await sinkTwo.eventCount() == sinkTwoBaseline)
+        }
     }
 
     @Test("No sinks skip step construction")
     func noSinksSkipStepConstruction() async {
-        await LoomInstrumentation.removeAllSinks()
+        await LoomGlobalSinkTestLock.shared.run(reset: {
+            await LoomInstrumentation.resetForTesting()
+        }) {
+            let probe = StepProbe()
+            LoomInstrumentation.record(probe.nextStep())
 
-        let probe = StepProbe()
-        LoomInstrumentation.record(probe.nextStep())
-
-        #expect(probe.callCount == 0)
+            #expect(probe.callCount == 0)
+        }
     }
 
     @Test("Dispatch keeps step event identity")
     func dispatchKeepsStepIdentity() async {
-        await LoomInstrumentation.removeAllSinks()
+        await LoomGlobalSinkTestLock.shared.run(reset: {
+            await LoomInstrumentation.resetForTesting()
+        }) {
+            let sink = TestInstrumentationSink()
+            _ = await LoomInstrumentation.addSink(sink)
+            let expectedStep = Self.renderPipelineStarted
+            LoomInstrumentation.record(expectedStep)
 
-        let sink = TestInstrumentationSink()
-        _ = await LoomInstrumentation.addSink(sink)
-        let expectedStep = Self.renderPipelineStarted
-        LoomInstrumentation.record(expectedStep)
-
-        #expect(await waitUntil { await sink.eventCount() >= 1 })
-        let event = await sink.latestEvent()
-        #expect(event?.step == expectedStep)
+            #expect(await waitUntil { await sink.eventCount() >= 1 })
+            let event = await sink.latestEvent()
+            #expect(event?.step == expectedStep)
+        }
     }
 
     private func waitUntil(

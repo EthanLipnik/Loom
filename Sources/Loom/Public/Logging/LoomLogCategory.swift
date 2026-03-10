@@ -35,6 +35,7 @@ public extension LoomLogCategory {
     static let session: Self = "session"
     static let discovery: Self = "discovery"
     static let transport: Self = "transport"
+    static let transfer: Self = "transfer"
     static let relay: Self = "relay"
     static let identity: Self = "identity"
     static let security: Self = "security"
@@ -48,6 +49,7 @@ public extension LoomLogCategory {
         .session,
         .discovery,
         .transport,
+        .transfer,
         .relay,
         .identity,
         .security,
@@ -61,6 +63,7 @@ public extension LoomLogCategory {
     static let defaultEnabledCategories: Set<Self> = [
         .discovery,
         .transport,
+        .transfer,
         .relay,
         .trust,
         .cloud,

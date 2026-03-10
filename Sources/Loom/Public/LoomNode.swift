@@ -153,6 +153,12 @@ public final class LoomNode {
         }
 
         var ports: [LoomTransportKind: UInt16] = [.tcp: port]
+        await updateAdvertisement(
+            Self.advertisement(
+                baseHello.advertisement,
+                withDirectTransportPorts: ports
+            )
+        )
         guard configuration.enabledDirectTransports.contains(.quic) else {
             return ports
         }
@@ -161,7 +167,8 @@ public final class LoomNode {
             transportKind: .quic,
             enablePeerToPeer: configuration.enablePeerToPeer
         )
-        let quicPort = try await quicListener.start(port: configuration.quicPort) { [weak self] connection in
+        let requestedQUICPort = configuration.quicPort == 0 ? port : configuration.quicPort
+        let quicPort = try await quicListener.start(port: requestedQUICPort) { [weak self] connection in
             guard let self else { return }
             let session = LoomAuthenticatedSession(
                 rawSession: LoomSession(connection: connection),
@@ -184,7 +191,44 @@ public final class LoomNode {
         }
         directListeners[.quic] = quicListener
         ports[.quic] = quicPort
+        await updateAdvertisement(
+            Self.advertisement(
+                baseHello.advertisement,
+                withDirectTransportPorts: ports
+            )
+        )
         return ports
+    }
+
+    private static func advertisement(
+        _ base: LoomPeerAdvertisement,
+        withDirectTransportPorts ports: [LoomTransportKind: UInt16]
+    ) -> LoomPeerAdvertisement {
+        let pathKindsByTransport = base.directTransports.reduce(into: [LoomTransportKind: LoomDirectPathKind?]()) { partialResult, transport in
+            partialResult[transport.transportKind] = transport.pathKind
+        }
+        let directTransports: [LoomDirectTransportAdvertisement] = LoomTransportKind.allCases.compactMap { transportKind in
+            guard let port = ports[transportKind], port > 0 else {
+                return nil
+            }
+            return LoomDirectTransportAdvertisement(
+                transportKind: transportKind,
+                port: port,
+                pathKind: pathKindsByTransport[transportKind] ?? nil
+            )
+        }
+
+        return LoomPeerAdvertisement(
+            protocolVersion: base.protocolVersion,
+            deviceID: base.deviceID,
+            identityKeyID: base.identityKeyID,
+            deviceType: base.deviceType,
+            modelIdentifier: base.modelIdentifier,
+            iconName: base.iconName,
+            machineFamily: base.machineFamily,
+            directTransports: directTransports,
+            metadata: base.metadata
+        )
     }
 }
 

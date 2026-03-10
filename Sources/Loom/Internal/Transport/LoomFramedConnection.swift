@@ -47,9 +47,11 @@ package actor LoomFramedConnection {
             try await appendChunk()
         }
 
-        let length = receiveBuffer.withUnsafeBytes { bytes in
-            bytes.load(as: UInt32.self).bigEndian
-        }
+        let length =
+            (UInt32(receiveBuffer[0]) << 24) |
+            (UInt32(receiveBuffer[1]) << 16) |
+            (UInt32(receiveBuffer[2]) << 8) |
+            UInt32(receiveBuffer[3])
         guard length <= UInt32(maxBytes) else {
             throw LoomError.protocolError("Received Loom frame larger than \(maxBytes) bytes.")
         }
@@ -129,4 +131,3 @@ private final class LoomReadyContinuationBox: @unchecked Sendable {
         }
     }
 }
-

@@ -123,6 +123,7 @@ public actor LoomAuthenticatedSession {
     private var streams: [UInt16: LoomMultiplexedStream] = [:]
     private var nextOutgoingStreamID: UInt16
     private var readTask: Task<Void, Never>?
+    private var securityContext: LoomSessionSecurityContext?
 
     public init(
         rawSession: LoomSession,
@@ -162,23 +163,34 @@ public actor LoomAuthenticatedSession {
         rawSession.start(queue: queue)
         try await framedConnection.awaitReady()
 
-        let hello = try await MainActor.run {
-            try LoomSessionHelloValidator.makeSignedHello(
+        let preparedHello = try await MainActor.run {
+            try LoomSessionHelloValidator.makePreparedSignedHello(
                 from: localHello,
                 identityManager: identityManager
             )
         }
-        let helloData = try JSONEncoder().encode(hello)
+        let helloData = try JSONEncoder().encode(preparedHello.hello)
         try await framedConnection.sendFrame(helloData)
 
         let remoteHelloData = try await framedConnection.readFrame(
-            maxBytes: LoomMessageLimits.maxBootstrapControlLineBytes
+            maxBytes: LoomMessageLimits.maxHelloFrameBytes
         )
         let remoteHello = try JSONDecoder().decode(LoomSessionHello.self, from: remoteHelloData)
-        let peerIdentity = try await helloValidator.validate(
+        let validatedHello = try await helloValidator.validateDetailed(
             remoteHello,
             endpointDescription: rawSession.endpoint.debugDescription
         )
+        let peerIdentity = validatedHello.peerIdentity
+
+        let negotiatedFeatures = Array(
+            Set(localHello.supportedFeatures).intersection(remoteHello.supportedFeatures)
+        )
+        .sorted()
+        guard negotiatedFeatures.contains("loom.session-encryption.v1") else {
+            state = .failed("missing-session-encryption")
+            rawSession.cancel()
+            throw LoomError.protocolError("Peer does not support Loom authenticated session encryption.")
+        }
 
         let trustEvaluation = await resolveTrustEvaluation(
             for: peerIdentity,
@@ -190,10 +202,12 @@ public actor LoomAuthenticatedSession {
             throw LoomError.authenticationFailed
         }
 
-        let negotiatedFeatures = Array(
-            Set(localHello.supportedFeatures).intersection(remoteHello.supportedFeatures)
+        securityContext = try LoomSessionSecurityContext(
+            role: role,
+            localHello: preparedHello.hello,
+            remoteHello: validatedHello.hello,
+            localEphemeralPrivateKey: preparedHello.ephemeralPrivateKey
         )
-        .sorted()
         let context = LoomAuthenticatedSessionContext(
             peerIdentity: peerIdentity,
             trustEvaluation: trustEvaluation,
@@ -241,8 +255,10 @@ public actor LoomAuthenticatedSession {
     private func runReadLoop() async {
         do {
             while !Task.isCancelled {
-                let data = try await framedConnection.readFrame()
-                let envelope = try JSONDecoder().decode(LoomSessionStreamEnvelope.self, from: data)
+                let data = try await framedConnection.readFrame(
+                    maxBytes: LoomMessageLimits.maxFrameBytes
+                )
+                let envelope = try decryptEnvelope(data)
                 try await handleEnvelope(envelope)
             }
         } catch {
@@ -295,8 +311,38 @@ public actor LoomAuthenticatedSession {
     }
 
     private func sendEnvelope(_ envelope: LoomSessionStreamEnvelope) async throws {
-        let data = try JSONEncoder().encode(envelope)
-        try await framedConnection.sendFrame(data)
+        let trafficClass = envelope.kind == .data ? LoomSessionTrafficClass.data : .control
+        let encodedEnvelope = try envelope.encode()
+        guard var securityContext else {
+            throw LoomError.protocolError("Authenticated Loom session encryption context is unavailable.")
+        }
+        let encryptedPayload = try securityContext.seal(
+            encodedEnvelope,
+            trafficClass: trafficClass
+        )
+        self.securityContext = securityContext
+
+        var wireFrame = Data(capacity: encryptedPayload.count + 1)
+        wireFrame.append(trafficClass.rawValue)
+        wireFrame.append(encryptedPayload)
+        try await framedConnection.sendFrame(wireFrame)
+    }
+
+    private func decryptEnvelope(_ wireFrame: Data) throws -> LoomSessionStreamEnvelope {
+        guard let trafficClassRaw = wireFrame.first,
+              let trafficClass = LoomSessionTrafficClass(rawValue: trafficClassRaw) else {
+            throw LoomError.protocolError("Received Loom session frame with invalid traffic class.")
+        }
+        guard var securityContext else {
+            throw LoomError.protocolError("Authenticated Loom session encryption context is unavailable.")
+        }
+        let encryptedPayload = Data(wireFrame.dropFirst())
+        let plaintext = try securityContext.open(
+            encryptedPayload,
+            trafficClass: trafficClass
+        )
+        self.securityContext = securityContext
+        return try LoomSessionStreamEnvelope.decode(from: plaintext)
     }
 
     private func resolveTrustEvaluation(
@@ -313,15 +359,103 @@ public actor LoomAuthenticatedSession {
     }
 }
 
-private enum LoomSessionStreamEnvelopeKind: String, Codable {
+private enum LoomSessionStreamEnvelopeKind: UInt8 {
     case open
     case data
     case close
 }
 
-private struct LoomSessionStreamEnvelope: Codable, Sendable {
+private struct LoomSessionStreamEnvelope: Sendable {
     let kind: LoomSessionStreamEnvelopeKind
     let streamID: UInt16
     let label: String?
     let payload: Data?
+
+    func encode() throws -> Data {
+        let labelBytes = label?.data(using: .utf8) ?? Data()
+        let payloadBytes = payload ?? Data()
+        let labelLength = UInt16(clamping: labelBytes.count)
+        let payloadLength = UInt32(clamping: payloadBytes.count)
+
+        var data = Data(capacity: 1 + 2 + 2 + 4 + labelBytes.count + payloadBytes.count)
+        data.append(kind.rawValue)
+        data.append(contentsOf: streamID.littleEndianBytes)
+        data.append(contentsOf: labelLength.littleEndianBytes)
+        data.append(contentsOf: payloadLength.littleEndianBytes)
+        data.append(labelBytes)
+        data.append(payloadBytes)
+        return data
+    }
+
+    static func decode(from data: Data) throws -> LoomSessionStreamEnvelope {
+        var cursor = 0
+        guard data.count >= 9,
+              let kind = LoomSessionStreamEnvelopeKind(rawValue: data[cursor]) else {
+            throw LoomError.protocolError("Received invalid Loom stream envelope header.")
+        }
+        cursor += 1
+
+        let streamID = try readUInt16(from: data, cursor: &cursor)
+        let labelLength = Int(try readUInt16(from: data, cursor: &cursor))
+        let payloadLength = Int(try readUInt32(from: data, cursor: &cursor))
+        let requiredLength = cursor + labelLength + payloadLength
+        guard data.count == requiredLength else {
+            throw LoomError.protocolError("Received malformed Loom stream envelope length.")
+        }
+
+        let label: String?
+        if labelLength > 0 {
+            let labelData = data[cursor..<(cursor + labelLength)]
+            label = String(data: labelData, encoding: .utf8)
+            cursor += labelLength
+        } else {
+            label = nil
+        }
+
+        let payload: Data?
+        if payloadLength > 0 {
+            payload = Data(data[cursor..<(cursor + payloadLength)])
+        } else {
+            payload = nil
+        }
+
+        return LoomSessionStreamEnvelope(
+            kind: kind,
+            streamID: streamID,
+            label: label,
+            payload: payload
+        )
+    }
+
+    private static func readUInt16(from data: Data, cursor: inout Int) throws -> UInt16 {
+        let length = MemoryLayout<UInt16>.size
+        guard data.count >= cursor + length else {
+            throw LoomError.protocolError("Received truncated Loom stream envelope.")
+        }
+        let value =
+            UInt16(data[cursor]) |
+            (UInt16(data[cursor + 1]) << 8)
+        cursor += length
+        return value
+    }
+
+    private static func readUInt32(from data: Data, cursor: inout Int) throws -> UInt32 {
+        let length = MemoryLayout<UInt32>.size
+        guard data.count >= cursor + length else {
+            throw LoomError.protocolError("Received truncated Loom stream envelope.")
+        }
+        let value =
+            UInt32(data[cursor]) |
+            (UInt32(data[cursor + 1]) << 8) |
+            (UInt32(data[cursor + 2]) << 16) |
+            (UInt32(data[cursor + 3]) << 24)
+        cursor += length
+        return value
+    }
+}
+
+private extension FixedWidthInteger {
+    var littleEndianBytes: [UInt8] {
+        withUnsafeBytes(of: littleEndian) { Array($0) }
+    }
 }

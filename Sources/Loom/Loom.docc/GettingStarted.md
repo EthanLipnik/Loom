@@ -5,7 +5,7 @@ Use this guide to get a real Loom integration off the ground. The short version 
 1. create an app-owned `LoomNode`
 2. publish an app-owned `LoomPeerAdvertisement`
 3. discover peers
-4. connect with `NWConnection`
+4. connect with an authenticated Loom session
 5. keep your protocol, approval UX, and product policy above Loom
 
 That is the same boundary `MirageKit` uses. Its host and client services both own a ``LoomNode``, but the handshake schema, stream model, CloudKit policy, and UI all live above Loom.
@@ -86,6 +86,23 @@ print("Advertising on port \\(port)")
 
 `LoomSession` is a thin wrapper around the accepted `NWConnection`. Start it on the queue you use for your networking runtime, then hand control to your own handshake or message layer.
 
+If you want Loom to own the signed hello and encrypted post-handshake session, prefer authenticated advertising instead:
+
+```swift
+let ports = try await node.startAuthenticatedAdvertising(
+    serviceName: "My Mac",
+    helloProvider: {
+        try await makeHelloRequest()
+    }
+) { session in
+    print("Authenticated session ready over \\(session.transportKind)")
+}
+
+print("Direct transports:", ports)
+```
+
+`LoomAuthenticatedSession` requires the `loom.session-encryption.v1` feature and encrypts post-handshake control and data frames automatically. `startAuthenticatedAdvertising` also republishes Loom-owned direct transport hints so nearby peers do not need to carry direct listener ports in app metadata.
+
 ## Discover peers
 
 ```swift
@@ -102,19 +119,14 @@ discovery.startDiscovery()
 
 Discovery only tells you that another peer exists and provides its `NWEndpoint` plus advertisement payload. It does not decide whether the peer is trusted or compatible with your product protocol.
 
-## Connect and wrap the session
+## Connect with an authenticated session
 
 ```swift
-import Network
-
-let connection = NWConnection(to: peer.endpoint, using: .tcp)
-let session = node.makeSession(connection: connection)
-
-session.setStateUpdateHandler { state in
-    print("Session state:", state)
-}
-
-session.start(queue: .main)
+let session = try await node.connect(
+    to: peer.endpoint,
+    using: .tcp,
+    hello: try await makeHelloRequest()
+)
 ```
 
 After that point, your app owns the rest:
@@ -124,6 +136,8 @@ After that point, your app owns the rest:
 - approval UI
 - reconnection policy
 - stream, document, or UI semantics
+
+If you publish multiple local or remote direct candidates, use ``LoomConnectionCoordinator`` with a ``LoomDirectConnectionPolicy`` so path ranking, transport preference, and bounded candidate racing stay in Loom instead of getting hardcoded in app code.
 
 That split is the main thing to get right. If a type starts carrying app-specific naming, product roles, or CloudKit record assumptions, it probably belongs above Loom.
 

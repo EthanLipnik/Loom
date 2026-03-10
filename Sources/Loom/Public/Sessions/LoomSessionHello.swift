@@ -5,6 +5,7 @@
 //  Created by Codex on 3/9/26.
 //
 
+import CryptoKit
 import Foundation
 
 /// Connection role used by authenticated Loom sessions.
@@ -18,6 +19,7 @@ public struct LoomSessionHello: Codable, Sendable, Equatable {
     public struct Identity: Codable, Sendable, Equatable {
         public let keyID: String
         public let publicKey: Data
+        public let ephemeralPublicKey: Data
         public let timestampMs: Int64
         public let nonce: String
         public let signature: Data
@@ -25,12 +27,14 @@ public struct LoomSessionHello: Codable, Sendable, Equatable {
         public init(
             keyID: String,
             publicKey: Data,
+            ephemeralPublicKey: Data,
             timestampMs: Int64,
             nonce: String,
             signature: Data
         ) {
             self.keyID = keyID
             self.publicKey = publicKey
+            self.ephemeralPublicKey = ephemeralPublicKey
             self.timestampMs = timestampMs
             self.nonce = nonce
             self.signature = signature
@@ -94,6 +98,7 @@ public struct LoomSessionHelloRequest: Sendable, Equatable {
 
     public static let defaultFeatures: [String] = [
         "loom.handshake.v1",
+        "loom.session-encryption.v1",
         "loom.streams.v1",
         "loom.bootstrap.v1",
     ]
@@ -130,8 +135,19 @@ private struct LoomCanonicalHelloPayload: Codable {
     let iCloudUserID: String?
     let keyID: String
     let publicKey: Data
+    let ephemeralPublicKey: Data
     let timestampMs: Int64
     let nonce: String
+}
+
+package struct LoomPreparedSessionHello {
+    package let hello: LoomSessionHello
+    package let ephemeralPrivateKey: P256.KeyAgreement.PrivateKey
+}
+
+package struct LoomValidatedSessionHello {
+    package let peerIdentity: LoomPeerIdentity
+    package let hello: LoomSessionHello
 }
 
 /// Builds and validates signed Loom session hellos.
@@ -147,7 +163,21 @@ public actor LoomSessionHelloValidator {
         from request: LoomSessionHelloRequest,
         identityManager: LoomIdentityManager = .shared
     ) throws -> LoomSessionHello {
+        try makePreparedSignedHello(
+            from: request,
+            identityManager: identityManager
+        )
+        .hello
+    }
+
+    @MainActor
+    package static func makePreparedSignedHello(
+        from request: LoomSessionHelloRequest,
+        identityManager: LoomIdentityManager = .shared
+    ) throws -> LoomPreparedSessionHello {
         let identity = try identityManager.currentIdentity()
+        let ephemeralPrivateKey = P256.KeyAgreement.PrivateKey()
+        let ephemeralPublicKey = ephemeralPrivateKey.publicKey.x963Representation
         let timestampMs = Int64(Date().timeIntervalSince1970 * 1000)
         let nonce = UUID().uuidString.lowercased()
         let canonical = LoomCanonicalHelloPayload(
@@ -160,12 +190,13 @@ public actor LoomSessionHelloValidator {
             iCloudUserID: request.iCloudUserID,
             keyID: identity.keyID,
             publicKey: identity.publicKey,
+            ephemeralPublicKey: ephemeralPublicKey,
             timestampMs: timestampMs,
             nonce: nonce
         )
         let payload = try canonicalPayload(from: canonical)
         let signature = try identityManager.sign(payload)
-        return LoomSessionHello(
+        let hello = LoomSessionHello(
             deviceID: request.deviceID,
             deviceName: request.deviceName,
             deviceType: request.deviceType,
@@ -176,10 +207,15 @@ public actor LoomSessionHelloValidator {
             identity: .init(
                 keyID: identity.keyID,
                 publicKey: identity.publicKey,
+                ephemeralPublicKey: ephemeralPublicKey,
                 timestampMs: timestampMs,
                 nonce: nonce,
                 signature: signature
             )
+        )
+        return LoomPreparedSessionHello(
+            hello: hello,
+            ephemeralPrivateKey: ephemeralPrivateKey
         )
     }
 
@@ -187,6 +223,17 @@ public actor LoomSessionHelloValidator {
         _ hello: LoomSessionHello,
         endpointDescription: String
     ) async throws -> LoomPeerIdentity {
+        try await validateDetailed(
+            hello,
+            endpointDescription: endpointDescription
+        )
+        .peerIdentity
+    }
+
+    package func validateDetailed(
+        _ hello: LoomSessionHello,
+        endpointDescription: String
+    ) async throws -> LoomValidatedSessionHello {
         guard hello.protocolVersion == Int(Loom.protocolVersion) else {
             throw LoomSessionHelloError.protocolVersionMismatch
         }
@@ -207,6 +254,7 @@ public actor LoomSessionHelloValidator {
                 iCloudUserID: hello.iCloudUserID,
                 keyID: hello.identity.keyID,
                 publicKey: hello.identity.publicKey,
+                ephemeralPublicKey: hello.identity.ephemeralPublicKey,
                 timestampMs: hello.identity.timestampMs,
                 nonce: hello.identity.nonce
             )
@@ -227,15 +275,18 @@ public actor LoomSessionHelloValidator {
             throw LoomSessionHelloError.replayRejected
         }
 
-        return LoomPeerIdentity(
-            deviceID: hello.deviceID,
-            name: hello.deviceName,
-            deviceType: hello.deviceType,
-            iCloudUserID: hello.iCloudUserID,
-            identityKeyID: hello.identity.keyID,
-            identityPublicKey: hello.identity.publicKey,
-            isIdentityAuthenticated: true,
-            endpoint: endpointDescription
+        return LoomValidatedSessionHello(
+            peerIdentity: LoomPeerIdentity(
+                deviceID: hello.deviceID,
+                name: hello.deviceName,
+                deviceType: hello.deviceType,
+                iCloudUserID: hello.iCloudUserID,
+                identityKeyID: hello.identity.keyID,
+                identityPublicKey: hello.identity.publicKey,
+                isIdentityAuthenticated: true,
+                endpoint: endpointDescription
+            ),
+            hello: hello
         )
     }
 
@@ -245,4 +296,3 @@ public actor LoomSessionHelloValidator {
         return try encoder.encode(hello)
     }
 }
-

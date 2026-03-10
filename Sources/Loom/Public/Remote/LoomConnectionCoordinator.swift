@@ -88,10 +88,36 @@ public enum LoomDirectCandidateCollector {
 public final class LoomConnectionCoordinator {
     private let node: LoomNode
     private let relayClient: LoomRelayClient?
+    private let policy: LoomDirectConnectionPolicy
+    private let connector: @Sendable (LoomConnectionTarget, LoomSessionHelloRequest) async throws -> LoomAuthenticatedSession
 
-    public init(node: LoomNode, relayClient: LoomRelayClient? = nil) {
+    public init(
+        node: LoomNode,
+        relayClient: LoomRelayClient? = nil,
+        policy: LoomDirectConnectionPolicy? = nil
+    ) {
         self.node = node
         self.relayClient = relayClient
+        self.policy = policy ?? node.configuration.directConnectionPolicy
+        connector = { target, hello in
+            try await node.connect(
+                to: target.endpoint,
+                using: target.transportKind,
+                hello: hello
+            )
+        }
+    }
+
+    package init(
+        node: LoomNode,
+        relayClient: LoomRelayClient? = nil,
+        policy: LoomDirectConnectionPolicy? = nil,
+        connector: @escaping @Sendable (LoomConnectionTarget, LoomSessionHelloRequest) async throws -> LoomAuthenticatedSession
+    ) {
+        self.node = node
+        self.relayClient = relayClient
+        self.policy = policy ?? node.configuration.directConnectionPolicy
+        self.connector = connector
     }
 
     public func makePlan(
@@ -101,13 +127,7 @@ public final class LoomConnectionCoordinator {
         var targets: [LoomConnectionTarget] = []
 
         if let localPeer {
-            targets.append(
-                LoomConnectionTarget(
-                    source: .localDiscovery,
-                    transportKind: .tcp,
-                    endpoint: localPeer.endpoint
-                )
-            )
+            targets.append(contentsOf: Self.localTargets(from: localPeer, policy: policy))
         }
 
         if let relaySessionID,
@@ -133,13 +153,12 @@ public final class LoomConnectionCoordinator {
         }
 
         var lastError: Error?
-        for target in plan.targets {
+        for batch in connectionBatches(from: plan) {
             do {
-                return try await node.connect(
-                    to: target.endpoint,
-                    using: target.transportKind,
-                    hello: hello
-                )
+                let resolved = try await connect(batch: batch, hello: hello)
+                recordConnectedTarget(resolved.target, session: resolved.session)
+                recordRaceSelectionIfNeeded(for: batch, winner: resolved.target)
+                return resolved.session
             } catch {
                 lastError = error
             }
@@ -152,11 +171,7 @@ public final class LoomConnectionCoordinator {
         to target: LoomConnectionTarget,
         hello: LoomSessionHelloRequest
     ) async throws -> LoomAuthenticatedSession {
-        try await node.connect(
-            to: target.endpoint,
-            using: target.transportKind,
-            hello: hello
-        )
+        try await connector(target, hello)
     }
 
     private func compareRelayCandidates(
@@ -175,12 +190,11 @@ public final class LoomConnectionCoordinator {
     }
 
     private func relayPriority(_ transport: LoomRelayCandidateTransport) -> Int {
-        switch transport {
-        case .quic:
-            0
-        case .tcp:
-            1
+        let transportKind: LoomTransportKind = switch transport {
+        case .quic: .quic
+        case .tcp: .tcp
         }
+        return policy.preferredRemoteTransportOrder.firstIndex(of: transportKind) ?? Int.max
     }
 
     private static func target(from candidate: LoomRelayCandidate) -> LoomConnectionTarget? {
@@ -198,4 +212,284 @@ public final class LoomConnectionCoordinator {
             endpoint: .hostPort(host: host, port: endpointPort)
         )
     }
+
+    private static func localTargets(
+        from peer: LoomPeer,
+        policy: LoomDirectConnectionPolicy
+    ) -> [LoomConnectionTarget] {
+        let advertisedTransports = peer.advertisement.directTransports
+        let transports = advertisedTransports.isEmpty
+            ? [LoomDirectTransportAdvertisement(transportKind: .tcp, port: 0)]
+            : advertisedTransports.sorted { lhs, rhs in
+                let leftPathIndex = policy.preferredLocalPathOrder.firstIndex(of: lhs.pathKind ?? .other) ?? Int.max
+                let rightPathIndex = policy.preferredLocalPathOrder.firstIndex(of: rhs.pathKind ?? .other) ?? Int.max
+                if leftPathIndex != rightPathIndex {
+                    return leftPathIndex < rightPathIndex
+                }
+                let leftIndex = policy.preferredRemoteTransportOrder.firstIndex(of: lhs.transportKind) ?? Int.max
+                let rightIndex = policy.preferredRemoteTransportOrder.firstIndex(of: rhs.transportKind) ?? Int.max
+                if leftIndex != rightIndex {
+                    return leftIndex < rightIndex
+                }
+                return lhs.port < rhs.port
+            }
+
+        return transports.map { transport in
+            LoomConnectionTarget(
+                source: .localDiscovery,
+                transportKind: transport.transportKind,
+                endpoint: localEndpoint(
+                    from: peer.endpoint,
+                    advertisedPort: transport.port
+                )
+            )
+        }
+    }
+
+    private static func localEndpoint(
+        from endpoint: NWEndpoint,
+        advertisedPort: UInt16
+    ) -> NWEndpoint {
+        guard advertisedPort > 0 else {
+            return endpoint
+        }
+        guard case let .hostPort(host, _) = endpoint,
+              let port = NWEndpoint.Port(rawValue: advertisedPort) else {
+            return endpoint
+        }
+        return .hostPort(host: host, port: port)
+    }
+
+    private func connectionBatches(from plan: LoomConnectionPlan) -> [[LoomConnectionTarget]] {
+        var batches: [[LoomConnectionTarget]] = []
+
+        for target in plan.targets {
+            let shouldRaceTargets = shouldRace(source: target.source)
+            if shouldRaceTargets,
+               var lastBatch = batches.last,
+               let lastTarget = lastBatch.first,
+               lastTarget.source == target.source {
+                lastBatch.append(target)
+                batches[batches.count - 1] = lastBatch
+                continue
+            }
+            batches.append([target])
+        }
+
+        return batches
+    }
+
+    private func shouldRace(source: LoomConnectionTargetSource) -> Bool {
+        switch source {
+        case .localDiscovery:
+            policy.racesLocalCandidates
+        case .relay:
+            policy.racesRemoteCandidates
+        }
+    }
+
+    private func connect(
+        batch: [LoomConnectionTarget],
+        hello: LoomSessionHelloRequest
+    ) async throws -> LoomResolvedConnection {
+        guard let firstTarget = batch.first else {
+            throw LoomError.sessionNotFound
+        }
+        guard batch.count > 1,
+              shouldRace(source: firstTarget.source) else {
+            return try await connectSequentially(batch: batch, hello: hello)
+        }
+
+        recordRaceStarted(for: firstTarget.source, attemptCount: batch.count)
+
+        return try await withThrowingTaskGroup(of: LoomConnectionAttemptResult.self) { group in
+            for (index, target) in batch.enumerated() {
+                let delay = raceDelay(for: target.source, attemptIndex: index)
+                group.addTask { [connector] in
+                    do {
+                        if delay != .zero {
+                            try await Task.sleep(for: delay)
+                        }
+                        let session = try await connector(target, hello)
+                        return .success(
+                            LoomResolvedConnection(
+                                target: target,
+                                session: session
+                            )
+                        )
+                    } catch is CancellationError {
+                        return .cancelled(target)
+                    } catch {
+                        return .failure(target, error)
+                    }
+                }
+            }
+
+            var winner: LoomResolvedConnection?
+            var lastError: Error?
+
+            while let result = try await group.next() {
+                switch result {
+                case let .success(connection):
+                    if winner == nil {
+                        winner = connection
+                        group.cancelAll()
+                    } else {
+                        await connection.session.cancel()
+                    }
+
+                case let .failure(target, error):
+                    recordFailedTarget(target)
+                    lastError = error
+
+                case let .cancelled(target):
+                    recordCancelledTarget(target)
+                }
+            }
+
+            guard let winner else {
+                recordSourceExhausted(firstTarget.source)
+                throw lastError ?? LoomError.sessionNotFound
+            }
+
+            return winner
+        }
+    }
+
+    private func connectSequentially(
+        batch: [LoomConnectionTarget],
+        hello: LoomSessionHelloRequest
+    ) async throws -> LoomResolvedConnection {
+        var lastError: Error?
+
+        for target in batch {
+            do {
+                let session = try await connector(target, hello)
+                return LoomResolvedConnection(
+                    target: target,
+                    session: session
+                )
+            } catch {
+                recordFailedTarget(target)
+                lastError = error
+            }
+        }
+
+        if let source = batch.first?.source {
+            recordSourceExhausted(source)
+        }
+        throw lastError ?? LoomError.sessionNotFound
+    }
+
+    private func raceDelay(
+        for source: LoomConnectionTargetSource,
+        attemptIndex: Int
+    ) -> Duration {
+        guard attemptIndex > 0 else {
+            return .zero
+        }
+        let staggerMilliseconds = switch source {
+        case .localDiscovery:
+            75
+        case .relay:
+            150
+        }
+        return .milliseconds(staggerMilliseconds * attemptIndex)
+    }
+
+    private func recordRaceStarted(
+        for source: LoomConnectionTargetSource,
+        attemptCount: Int
+    ) {
+        LoomInstrumentation.record(
+            LoomStepEvent(
+                rawValue: "loom.connection.race.\(source.rawValue).started.\(attemptCount)"
+            )
+        )
+        LoomLogger.debug(
+            .transport,
+            "Racing \(attemptCount) Loom \(source.rawValue) candidates"
+        )
+    }
+
+    private func recordRaceSelectionIfNeeded(
+        for batch: [LoomConnectionTarget],
+        winner: LoomConnectionTarget
+    ) {
+        guard batch.count > 1 else {
+            return
+        }
+        LoomInstrumentation.record(
+            LoomStepEvent(
+                rawValue: "loom.connection.race.\(winner.source.rawValue).selected.\(winner.transportKind.rawValue)"
+            )
+        )
+        LoomLogger.log(
+            .transport,
+            "Selected Loom \(winner.transportKind.rawValue) candidate from \(winner.source.rawValue) raceSize=\(batch.count)"
+        )
+    }
+
+    private func recordFailedTarget(_ target: LoomConnectionTarget) {
+        LoomInstrumentation.record(
+            LoomStepEvent(
+                rawValue: "loom.connection.failed.\(target.source.rawValue).\(target.transportKind.rawValue)"
+            )
+        )
+        LoomLogger.debug(
+            .transport,
+            "Failed Loom connection candidate source=\(target.source.rawValue) transport=\(target.transportKind.rawValue)"
+        )
+    }
+
+    private func recordSourceExhausted(_ source: LoomConnectionTargetSource) {
+        LoomInstrumentation.record(
+            LoomStepEvent(
+                rawValue: "loom.connection.exhausted.\(source.rawValue)"
+            )
+        )
+        LoomLogger.debug(
+            .transport,
+            "Exhausted Loom \(source.rawValue) connection candidates"
+        )
+    }
+
+    private func recordCancelledTarget(_ target: LoomConnectionTarget) {
+        LoomInstrumentation.record(
+            LoomStepEvent(
+                rawValue: "loom.connection.race.cancelled.\(target.source.rawValue).\(target.transportKind.rawValue)"
+            )
+        )
+    }
+
+    private func recordConnectedTarget(
+        _ target: LoomConnectionTarget,
+        session: LoomAuthenticatedSession
+    ) {
+        guard let path = session.rawSession.connection.currentPath else {
+            LoomInstrumentation.record(
+                LoomStepEvent(
+                    rawValue: "loom.connection.connected.\(target.source.rawValue).\(target.transportKind.rawValue).unknown"
+                )
+            )
+            return
+        }
+        let snapshot = LoomNetworkPathClassifier.classify(path)
+        LoomInstrumentation.record(
+            LoomStepEvent(
+                rawValue: "loom.connection.connected.\(target.source.rawValue).\(target.transportKind.rawValue).\(snapshot.kind.rawValue)"
+            )
+        )
+    }
+}
+
+private struct LoomResolvedConnection {
+    let target: LoomConnectionTarget
+    let session: LoomAuthenticatedSession
+}
+
+private enum LoomConnectionAttemptResult {
+    case success(LoomResolvedConnection)
+    case failure(LoomConnectionTarget, Error)
+    case cancelled(LoomConnectionTarget)
 }
