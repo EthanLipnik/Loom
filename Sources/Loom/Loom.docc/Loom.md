@@ -6,6 +6,8 @@ Loom is a product-agnostic networking package for Apple platforms that handles d
 
 Use Loom when your app needs to find another Apple device, decide whether to trust it, and establish a session without baking product-specific assumptions into the transport layer.
 
+If you want a SwiftUI-first container/context/query API, start with the separate `LoomKit` product. This documentation set focuses on the product-agnostic primitives underneath that higher-level surface.
+
 The important architectural choice is that Loom stops at the networking boundary. Real apps still need to decide:
 
 - which Bonjour service type to advertise

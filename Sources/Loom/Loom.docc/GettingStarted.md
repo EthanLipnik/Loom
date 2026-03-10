@@ -2,13 +2,70 @@
 
 Use this guide to get a real Loom integration off the ground. The short version is:
 
-1. create an app-owned `LoomNode`
-2. publish an app-owned `LoomPeerAdvertisement`
-3. discover peers
-4. connect with an authenticated Loom session
-5. keep your protocol, approval UX, and product policy above Loom
+1. start with `LoomKit` if your app is SwiftUI-first and you want a container/context/query model
+2. drop down to an app-owned `LoomNode` when you need full control of discovery and transport wiring
+3. keep your protocol, approval UX, and product policy above Loom
 
 That is the same boundary `MirageKit` uses. Its host and client services both own a ``LoomNode``, but the handshake schema, stream model, CloudKit policy, and UI all live above Loom.
+
+## Start with LoomKit for SwiftUI apps
+
+If you want something modeled more like SwiftData than like a pile of networking services, use the `LoomKit` product first.
+
+`LoomKit` gives you:
+
+- one shared `LoomContainer`
+- a main-actor `LoomContext` in the environment
+- live `@LoomQuery` peer, connection, and transfer snapshots
+- actor-backed `LoomConnectionHandle` values for messages, files, and custom streams
+
+```swift
+import LoomKit
+import SwiftUI
+
+@main
+struct StudioLinkApp: App {
+    let loomContainer = try! LoomContainer(
+        for: .init(
+            serviceType: "_studiolink._tcp",
+            serviceName: "Studio Mac",
+            deviceIDSuiteName: "group.com.example.studiolink"
+        )
+    )
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+        .loomContainer(loomContainer)
+    }
+}
+```
+
+```swift
+import LoomKit
+import SwiftUI
+
+struct ContentView: View {
+    @Environment(\.loomContext) private var loomContext
+    @LoomQuery(.peers(sort: .name)) private var peers: [LoomPeerSnapshot]
+
+    var body: some View {
+        List(peers) { peer in
+            Button(peer.name) {
+                Task {
+                    let connection = try await loomContext.connect(peer)
+                    try await connection.send("hello")
+                }
+            }
+        }
+    }
+}
+```
+
+That is the recommended entry point for most SwiftUI apps. Once a connection exists, you still own protocol semantics and product behavior above LoomKit.
+
+## Build from Loom primitives when you need total control
 
 ## Create an app-owned node
 

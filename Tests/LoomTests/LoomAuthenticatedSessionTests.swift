@@ -125,6 +125,74 @@ struct LoomAuthenticatedSessionTests {
         let receivedPayload = await firstPayload(from: incomingStream)
         #expect(receivedPayload == payload)
     }
+
+    @MainActor
+    @Test("Authenticated sessions reject oversized stream labels")
+    func oversizedStreamLabelRejected() async throws {
+        let pair = try await makeLoopbackPair()
+        defer {
+            Task {
+                await pair.stop()
+            }
+        }
+
+        async let clientContext = pair.client.start(
+            localHello: pair.clientHello,
+            identityManager: pair.clientIdentityManager
+        )
+        async let serverContext = pair.server.start(
+            localHello: pair.serverHello,
+            identityManager: pair.serverIdentityManager
+        )
+        _ = try await (clientContext, serverContext)
+
+        let oversizedLabel = String(
+            repeating: "a",
+            count: LoomMessageLimits.maxStreamLabelBytes + 1
+        )
+
+        do {
+            _ = try await pair.client.openStream(label: oversizedLabel)
+            Issue.record("Expected an oversized stream label to be rejected.")
+        } catch let LoomError.protocolError(message) {
+            #expect(message.contains("must not exceed"))
+        } catch {
+            Issue.record("Expected LoomError.protocolError, got \(error.localizedDescription).")
+        }
+    }
+
+    @MainActor
+    @Test("Authenticated sessions fail explicitly when stream IDs are exhausted")
+    func streamIDExhaustionFailsExplicitly() async throws {
+        let pair = try await makeLoopbackPair()
+        defer {
+            Task {
+                await pair.stop()
+            }
+        }
+
+        async let clientContext = pair.client.start(
+            localHello: pair.clientHello,
+            identityManager: pair.clientIdentityManager
+        )
+        async let serverContext = pair.server.start(
+            localHello: pair.serverHello,
+            identityManager: pair.serverIdentityManager
+        )
+        _ = try await (clientContext, serverContext)
+
+        await pair.client.setNextOutgoingStreamIDForTesting(UInt16.max)
+        _ = try await pair.client.openStream(label: "final-stream")
+
+        do {
+            _ = try await pair.client.openStream(label: "wrapped-stream")
+            Issue.record("Expected exhausted stream identifiers to fail explicitly.")
+        } catch let LoomError.protocolError(message) {
+            #expect(message.contains("exhausted"))
+        } catch {
+            Issue.record("Expected LoomError.protocolError, got \(error.localizedDescription).")
+        }
+    }
 }
 
 private struct LoopbackSessionPair {

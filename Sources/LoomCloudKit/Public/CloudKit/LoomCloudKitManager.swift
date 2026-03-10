@@ -250,15 +250,11 @@ public final class LoomCloudKitManager {
 
     /// Returns a stable device identifier, creating one if needed.
     private func getOrCreateDeviceID() -> UUID {
-        let key = configuration.deviceIDKey
-        if let storedID = UserDefaults.standard.string(forKey: key),
-           let uuid = UUID(uuidString: storedID) {
-            return uuid
-        }
-
-        let newID = UUID()
-        UserDefaults.standard.set(newID.uuidString, forKey: key)
-        return newID
+        LoomSharedDeviceID.getOrCreate(
+            suiteName: configuration.deviceIDSuiteName,
+            key: configuration.deviceIDKey,
+            legacyKeys: [configuration.deviceIDKey]
+        )
     }
 
     // MARK: - Share Participant Checking

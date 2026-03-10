@@ -46,11 +46,19 @@ public final class LoomTrustStore {
 
     /// UserDefaults key for trusted devices.
     private let trustedDevicesKey: String
+    /// UserDefaults store used for persistence.
+    private let userDefaults: UserDefaults
 
     /// Creates a trust store with a configurable storage key.
-    /// - Parameter storageKey: UserDefaults key used for persistence.
-    public init(storageKey: String = "LoomTrustedDevices") {
+    /// - Parameters:
+    ///   - storageKey: UserDefaults key used for persistence.
+    ///   - suiteName: Optional app-group suite used for shared trust persistence.
+    public init(
+        storageKey: String = "LoomTrustedDevices",
+        suiteName: String? = nil
+    ) {
         trustedDevicesKey = storageKey
+        userDefaults = Self.userDefaults(suiteName: suiteName)
         loadTrustedDevices()
     }
 
@@ -58,11 +66,12 @@ public final class LoomTrustStore {
 
     /// Load trusted devices from storage.
     public func loadTrustedDevices() {
-        guard let data = UserDefaults.standard.data(forKey: trustedDevicesKey) else { return }
+        guard let data = userDefaults.data(forKey: trustedDevicesKey) else { return }
         do {
             // Avoid writing back while decoding persisted state.
             isLoading = true
-            trustedDevices = try JSONDecoder().decode([LoomTrustedDevice].self, from: data)
+            let decoded = try JSONDecoder().decode([LoomTrustedDevice].self, from: data)
+            trustedDevices = Self.deduplicated(decoded)
             isLoading = false
             LoomLogger.trust("Loaded \(trustedDevices.count) trusted devices")
         } catch {
@@ -74,8 +83,8 @@ public final class LoomTrustStore {
     private func saveTrustedDevices() {
         guard !isLoading else { return }
         do {
-            let data = try JSONEncoder().encode(trustedDevices)
-            UserDefaults.standard.set(data, forKey: trustedDevicesKey)
+            let data = try JSONEncoder().encode(Self.deduplicated(trustedDevices))
+            userDefaults.set(data, forKey: trustedDevicesKey)
             LoomLogger.trust("Saved \(trustedDevices.count) trusted devices")
         } catch {
             LoomLogger.error(.trust, error: error, message: "Failed to save trusted devices: ")
@@ -93,7 +102,11 @@ public final class LoomTrustStore {
     /// Add a trusted device and persist it.
     /// - Parameter device: Trusted device to add.
     public func addTrustedDevice(_ device: LoomTrustedDevice) {
-        trustedDevices.append(device)
+        if let index = trustedDevices.firstIndex(where: { $0.id == device.id }) {
+            trustedDevices[index] = device
+        } else {
+            trustedDevices.append(device)
+        }
         saveTrustedDevices()
     }
 
@@ -102,5 +115,32 @@ public final class LoomTrustStore {
     public func revokeTrust(for device: LoomTrustedDevice) {
         trustedDevices.removeAll { $0.id == device.id }
         saveTrustedDevices()
+    }
+
+    /// Remove a trusted device by identifier and persist the update.
+    public func revokeTrust(for deviceID: UUID) {
+        trustedDevices.removeAll { $0.id == deviceID }
+        saveTrustedDevices()
+    }
+
+    private static func deduplicated(_ devices: [LoomTrustedDevice]) -> [LoomTrustedDevice] {
+        var deduplicatedDevices: [LoomTrustedDevice] = []
+        for device in devices {
+            if let index = deduplicatedDevices.firstIndex(where: { $0.id == device.id }) {
+                deduplicatedDevices[index] = device
+            } else {
+                deduplicatedDevices.append(device)
+            }
+        }
+        return deduplicatedDevices
+    }
+
+    private static func userDefaults(suiteName: String?) -> UserDefaults {
+        guard let suiteName = suiteName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !suiteName.isEmpty,
+              let userDefaults = UserDefaults(suiteName: suiteName) else {
+            return .standard
+        }
+        return userDefaults
     }
 }

@@ -120,6 +120,8 @@ public actor LoomAuthenticatedSession {
 
     private let framedConnection: LoomFramedConnection
     private let incomingStreamContinuation: AsyncStream<LoomMultiplexedStream>.Continuation
+    private let incomingStreamObservers = LoomAsyncBroadcaster<LoomMultiplexedStream>()
+    private let stateObservers = LoomAsyncBroadcaster<LoomAuthenticatedSessionState>()
     private var streams: [UInt16: LoomMultiplexedStream] = [:]
     private var nextOutgoingStreamID: UInt16
     private var readTask: Task<Void, Never>?
@@ -142,7 +144,19 @@ public actor LoomAuthenticatedSession {
 
     deinit {
         incomingStreamContinuation.finish()
+        incomingStreamObservers.finish()
+        stateObservers.finish()
         readTask?.cancel()
+    }
+
+    /// Creates an additional observation stream for incoming multiplexed streams.
+    public nonisolated func makeIncomingStreamObserver() -> AsyncStream<LoomMultiplexedStream> {
+        incomingStreamObservers.makeStream()
+    }
+
+    /// Creates an observation stream for lifecycle state transitions.
+    public func makeStateObserver() -> AsyncStream<LoomAuthenticatedSessionState> {
+        stateObservers.makeStream(initialValue: state)
     }
 
     public func start(
@@ -159,7 +173,7 @@ public actor LoomAuthenticatedSession {
             throw LoomError.protocolError("Authenticated Loom session has already started.")
         }
 
-        state = .handshaking
+        updateState(.handshaking)
         rawSession.start(queue: queue)
         try await framedConnection.awaitReady()
 
@@ -187,7 +201,7 @@ public actor LoomAuthenticatedSession {
         )
         .sorted()
         guard negotiatedFeatures.contains("loom.session-encryption.v1") else {
-            state = .failed("missing-session-encryption")
+            updateState(.failed("missing-session-encryption"))
             rawSession.cancel()
             throw LoomError.protocolError("Peer does not support Loom authenticated session encryption.")
         }
@@ -197,7 +211,7 @@ public actor LoomAuthenticatedSession {
             trustProvider: trustProvider
         )
         if trustEvaluation.decision == .denied {
-            state = .failed("denied")
+            updateState(.failed("denied"))
             rawSession.cancel()
             throw LoomError.authenticationFailed
         }
@@ -215,7 +229,7 @@ public actor LoomAuthenticatedSession {
             negotiatedFeatures: negotiatedFeatures
         )
         self.context = context
-        state = .ready
+        updateState(.ready)
         readTask = Task { [weak self] in
             await self?.runReadLoop()
         }
@@ -226,8 +240,24 @@ public actor LoomAuthenticatedSession {
         guard case .ready = state else {
             throw LoomError.protocolError("Authenticated Loom session is not ready.")
         }
+        if let label {
+            let labelLength = label.lengthOfBytes(using: .utf8)
+            guard labelLength <= LoomMessageLimits.maxStreamLabelBytes else {
+                throw LoomError.protocolError(
+                    "Authenticated Loom stream labels must not exceed \(LoomMessageLimits.maxStreamLabelBytes) UTF-8 bytes."
+                )
+            }
+        }
         let streamID = nextOutgoingStreamID
-        nextOutgoingStreamID &+= 2
+        guard streamID != 0 else {
+            throw LoomError.protocolError("Authenticated Loom session exhausted available stream identifiers.")
+        }
+        let maxStreamID: UInt16 = role == .initiator ? .max : (.max - 1)
+        if streamID == maxStreamID {
+            nextOutgoingStreamID = 0
+        } else {
+            nextOutgoingStreamID = streamID &+ 2
+        }
         let stream = makeStream(id: streamID, label: label)
         streams[streamID] = stream
         try await sendEnvelope(
@@ -242,13 +272,15 @@ public actor LoomAuthenticatedSession {
     }
 
     public func cancel() {
-        state = .cancelled
+        updateState(.cancelled)
         readTask?.cancel()
         for stream in streams.values {
             stream.finishInbound()
         }
         streams.removeAll(keepingCapacity: false)
         incomingStreamContinuation.finish()
+        incomingStreamObservers.finish()
+        stateObservers.finish()
         rawSession.cancel()
     }
 
@@ -265,12 +297,14 @@ public actor LoomAuthenticatedSession {
             if case .cancelled = state {
                 return
             }
-            state = .failed(error.localizedDescription)
+            updateState(.failed(error.localizedDescription))
             for stream in streams.values {
                 stream.finishInbound()
             }
             streams.removeAll(keepingCapacity: false)
             incomingStreamContinuation.finish()
+            incomingStreamObservers.finish()
+            stateObservers.finish()
             rawSession.cancel()
         }
     }
@@ -281,6 +315,7 @@ public actor LoomAuthenticatedSession {
             let stream = makeStream(id: envelope.streamID, label: envelope.label)
             streams[envelope.streamID] = stream
             incomingStreamContinuation.yield(stream)
+            incomingStreamObservers.yield(stream)
         case .data:
             guard let stream = streams[envelope.streamID], let payload = envelope.payload else {
                 throw LoomError.protocolError("Received data for unknown Loom stream \(envelope.streamID).")
@@ -357,6 +392,15 @@ public actor LoomAuthenticatedSession {
         }
         return await trustProvider.evaluateTrustOutcome(for: peerIdentity)
     }
+
+    private func updateState(_ newState: LoomAuthenticatedSessionState) {
+        state = newState
+        stateObservers.yield(newState)
+    }
+
+    package func setNextOutgoingStreamIDForTesting(_ value: UInt16) {
+        nextOutgoingStreamID = value
+    }
 }
 
 private enum LoomSessionStreamEnvelopeKind: UInt8 {
@@ -374,7 +418,12 @@ private struct LoomSessionStreamEnvelope: Sendable {
     func encode() throws -> Data {
         let labelBytes = label?.data(using: .utf8) ?? Data()
         let payloadBytes = payload ?? Data()
-        let labelLength = UInt16(clamping: labelBytes.count)
+        guard labelBytes.count <= LoomMessageLimits.maxStreamLabelBytes else {
+            throw LoomError.protocolError(
+                "Authenticated Loom stream labels must not exceed \(LoomMessageLimits.maxStreamLabelBytes) UTF-8 bytes."
+            )
+        }
+        let labelLength = UInt16(labelBytes.count)
         let payloadLength = UInt32(clamping: payloadBytes.count)
 
         var data = Data(capacity: 1 + 2 + 2 + 4 + labelBytes.count + payloadBytes.count)

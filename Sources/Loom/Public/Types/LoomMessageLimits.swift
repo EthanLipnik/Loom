@@ -29,6 +29,9 @@ public enum LoomMessageLimits {
     /// Maximum hello frame bytes consumed during connection bootstrap.
     public static let maxHelloFrameBytes = 64 * 1024
 
+    /// Maximum UTF-8 bytes accepted for a multiplexed stream label.
+    public static let maxStreamLabelBytes = 4 * 1024
+
     /// Maximum bootstrap control request/response line bytes.
     public static let maxBootstrapControlLineBytes = 64 * 1024
 

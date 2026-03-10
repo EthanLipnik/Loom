@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 240" fill="none">
+  <rect width="720" height="240" rx="24" fill="#F7F5EF"/>
+  <rect x="40" y="48" width="196" height="144" rx="20" fill="#16324F"/>
+  <text x="138" y="98" fill="#F7F5EF" font-family="Helvetica, Arial, sans-serif" font-size="22" text-anchor="middle">SwiftUI App</text>
+  <text x="138" y="132" fill="#F7F5EF" font-family="Helvetica, Arial, sans-serif" font-size="16" text-anchor="middle">Scene + LoomContainer</text>
+  <rect x="262" y="48" width="196" height="144" rx="20" fill="#2A6F97"/>
+  <text x="360" y="98" fill="#F7F5EF" font-family="Helvetica, Arial, sans-serif" font-size="22" text-anchor="middle">LoomContext</text>
+  <text x="360" y="132" fill="#F7F5EF" font-family="Helvetica, Arial, sans-serif" font-size="16" text-anchor="middle">Actions + Snapshots</text>
+  <rect x="484" y="48" width="196" height="144" rx="20" fill="#F4A261"/>
+  <text x="582" y="98" fill="#16324F" font-family="Helvetica, Arial, sans-serif" font-size="22" text-anchor="middle">Connections</text>
+  <text x="582" y="132" fill="#16324F" font-family="Helvetica, Arial, sans-serif" font-size="16" text-anchor="middle">Messages + Transfers</text>
+  <path d="M236 120H262" stroke="#16324F" stroke-width="8" stroke-linecap="round"/>
+  <path d="M458 120H484" stroke="#16324F" stroke-width="8" stroke-linecap="round"/>
+</svg>

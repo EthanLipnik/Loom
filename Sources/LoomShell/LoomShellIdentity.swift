@@ -37,24 +37,22 @@ public struct LoomShellIdentity: Sendable, Equatable {
         identityKeyID: String? = nil,
         capabilities: LoomShellPeerCapabilities? = nil
     ) throws -> LoomPeerAdvertisement {
-        var metadata = additionalAdvertisementMetadata
-        metadata = try LoomShellAdvertisementCodec.addingCapabilities(capabilities, to: metadata)
-        return LoomPeerAdvertisement(
-            deviceID: deviceID,
-            identityKeyID: identityKeyID,
-            deviceType: deviceType,
-            metadata: metadata
-        )
+        try deviceProfile.makeAdvertisement(
+            identityKeyID: identityKeyID
+        ) { metadata in
+            try LoomShellAdvertisementCodec.addingCapabilities(capabilities, to: metadata)
+        }
     }
 
     public func makeHelloRequest(
         identityKeyID: String? = nil,
         capabilities: LoomShellPeerCapabilities? = nil
     ) throws -> LoomSessionHelloRequest {
-        let advertisement = try makeAdvertisement(
-            identityKeyID: identityKeyID,
-            capabilities: capabilities
-        )
+        let advertisement = try deviceProfile.makeAdvertisement(
+            identityKeyID: identityKeyID
+        ) { metadata in
+            try LoomShellAdvertisementCodec.addingCapabilities(capabilities, to: metadata)
+        }
         return LoomSessionHelloRequest(
             deviceID: deviceID,
             deviceName: deviceName,
@@ -66,18 +64,23 @@ public struct LoomShellIdentity: Sendable, Equatable {
     }
 
     private func supportedFeatures(for capabilities: LoomShellPeerCapabilities?) -> [String] {
-        var features = Set(LoomSessionHelloRequest.defaultFeatures)
+        var features = Set(deviceProfile.supportedFeatures)
         features.insert(LoomShellProtocol.nativeFeature)
         if capabilities?.supportsOpenSSHFallback == true {
             features.insert(LoomShellProtocol.openSSHFallbackFeature)
         }
-        for feature in additionalSupportedFeatures {
-            let trimmed = feature.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                features.insert(trimmed)
-            }
-        }
         return features.sorted()
+    }
+
+    private var deviceProfile: LoomDeviceProfile {
+        LoomDeviceProfile(
+            deviceID: deviceID,
+            deviceName: deviceName,
+            deviceType: deviceType,
+            iCloudUserID: iCloudUserID,
+            additionalAdvertisementMetadata: additionalAdvertisementMetadata,
+            additionalSupportedFeatures: additionalSupportedFeatures
+        )
     }
 }
 

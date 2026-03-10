@@ -31,15 +31,19 @@ public final class LoomNode {
         self.trustProvider = trustProvider
     }
 
-    public func makeDiscovery() -> LoomDiscovery {
+    public func makeDiscovery(localDeviceID: UUID? = nil) -> LoomDiscovery {
         if let discovery {
             discovery.enablePeerToPeer = configuration.enablePeerToPeer
+            if let localDeviceID {
+                discovery.localDeviceID = localDeviceID
+            }
             return discovery
         }
 
         let discovery = LoomDiscovery(
             serviceType: configuration.serviceType,
-            enablePeerToPeer: configuration.enablePeerToPeer
+            enablePeerToPeer: configuration.enablePeerToPeer,
+            localDeviceID: localDeviceID
         )
         self.discovery = discovery
         return discovery

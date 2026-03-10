@@ -58,6 +58,9 @@ public struct LoomCloudKitConfiguration: Sendable {
     /// UserDefaults key for storing the stable device ID.
     public let deviceIDKey: String
 
+    /// Optional App Group suite name used for shared device-ID persistence.
+    public let deviceIDSuiteName: String?
+
     /// Cache TTL for share participants in seconds.
     public let shareParticipantCacheTTL: TimeInterval
 
@@ -70,7 +73,8 @@ public struct LoomCloudKitConfiguration: Sendable {
     ///   - peerZoneName: Zone name for peer records. Defaults to "LoomPeerZone".
     ///   - participantIdentityRecordType: Record type used for participant identity-key metadata.
     ///   - shareTitle: Title for sharing UI. Defaults to "Peer Access".
-    ///   - deviceIDKey: UserDefaults key for device ID. Defaults to "com.loom.deviceID".
+    ///   - deviceIDKey: UserDefaults key for device ID. Defaults to Loom's shared key.
+    ///   - deviceIDSuiteName: Optional App Group suite for shared device identity.
     ///   - shareParticipantCacheTTL: Cache TTL in seconds. Defaults to 300 (5 minutes).
     public init(
         containerIdentifier: String,
@@ -79,7 +83,8 @@ public struct LoomCloudKitConfiguration: Sendable {
         peerZoneName: String = "LoomPeerZone",
         participantIdentityRecordType: String = "LoomParticipantIdentity",
         shareTitle: String = "Peer Access",
-        deviceIDKey: String = "com.loom.deviceID",
+        deviceIDKey: String = LoomSharedDeviceID.key,
+        deviceIDSuiteName: String? = nil,
         shareParticipantCacheTTL: TimeInterval = 300
     ) {
         self.containerIdentifier = containerIdentifier
@@ -89,6 +94,7 @@ public struct LoomCloudKitConfiguration: Sendable {
         self.participantIdentityRecordType = participantIdentityRecordType
         self.shareTitle = shareTitle
         self.deviceIDKey = deviceIDKey
+        self.deviceIDSuiteName = deviceIDSuiteName
         self.shareParticipantCacheTTL = shareParticipantCacheTTL
     }
 }

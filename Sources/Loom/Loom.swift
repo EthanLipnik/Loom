@@ -12,7 +12,7 @@ package typealias StreamID = UInt16
 package typealias StreamSessionID = UUID
 
 public enum Loom {
-    public static let version = "1.1.3"
+    public static let version = "1.2.0"
     public static let protocolVersion: UInt8 = 2
     public static let serviceType = "_loom._tcp"
     public static let defaultControlPort: UInt16 = 9847

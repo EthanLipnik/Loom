@@ -23,6 +23,9 @@ public final class LoomDiscovery {
     /// Whether peer-to-peer WiFi discovery is enabled
     public var enablePeerToPeer: Bool = true
 
+    /// Optional local device identifier used to filter self from discovery results.
+    public var localDeviceID: UUID?
+
     /// Callback invoked whenever discovered peers change.
     public var onPeersChanged: (([LoomPeer]) -> Void)?
 
@@ -31,11 +34,18 @@ public final class LoomDiscovery {
 
     private var browser: NWBrowser?
     private let serviceType: String
-    private var peersByEndpoint: [NWEndpoint: LoomPeer] = [:]
+    private var peerCandidatesByID: [UUID: [NWEndpoint: LoomPeer]] = [:]
+    private var peerIDByEndpoint: [NWEndpoint: UUID] = [:]
+    private var peersByID: [UUID: LoomPeer] = [:]
 
-    public init(serviceType: String = Loom.serviceType, enablePeerToPeer: Bool = true) {
+    public init(
+        serviceType: String = Loom.serviceType,
+        enablePeerToPeer: Bool = true,
+        localDeviceID: UUID? = nil
+    ) {
         self.serviceType = serviceType
         self.enablePeerToPeer = enablePeerToPeer
+        self.localDeviceID = localDeviceID
     }
 
     /// Start discovery on the local network.
@@ -78,6 +88,11 @@ public final class LoomDiscovery {
         browser?.cancel()
         browser = nil
         isSearching = false
+        peerCandidatesByID.removeAll()
+        peerIDByEndpoint.removeAll()
+        peersByID.removeAll()
+        discoveredPeers.removeAll()
+        notifyPeersChanged()
     }
 
     private func handleBrowserState(_ state: NWBrowser.State) {
@@ -131,6 +146,10 @@ public final class LoomDiscovery {
         }
 
         let peerID = advertisement.deviceID ?? fallbackPeerID(endpoint: result.endpoint, peerName: peerName)
+        guard peerID != localDeviceID else {
+            removePeer(for: result.endpoint)
+            return
+        }
 
         let peer = LoomPeer(
             id: peerID,
@@ -140,8 +159,11 @@ public final class LoomDiscovery {
             advertisement: advertisement
         )
 
-        peersByEndpoint[result.endpoint] = peer
-        updatePeersList()
+        peerIDByEndpoint[result.endpoint] = peerID
+        var candidates = peerCandidatesByID[peerID] ?? [:]
+        candidates[result.endpoint] = peer
+        peerCandidatesByID[peerID] = candidates
+        updatePeerSelection(for: peerID)
     }
 
     private func fallbackPeerID(endpoint: NWEndpoint, peerName: String) -> UUID {
@@ -162,22 +184,112 @@ public final class LoomDiscovery {
     }
 
     private func removePeer(for endpoint: NWEndpoint) {
-        peersByEndpoint.removeValue(forKey: endpoint)
+        guard let peerID = peerIDByEndpoint.removeValue(forKey: endpoint) else {
+            return
+        }
+        if var candidates = peerCandidatesByID[peerID] {
+            candidates.removeValue(forKey: endpoint)
+            if candidates.isEmpty {
+                peerCandidatesByID.removeValue(forKey: peerID)
+                peersByID.removeValue(forKey: peerID)
+            } else {
+                peerCandidatesByID[peerID] = candidates
+                updatePeerSelection(for: peerID)
+                return
+            }
+        }
         updatePeersList()
     }
 
     private func updatePeersList() {
-        discoveredPeers = Array(peersByEndpoint.values).sorted { $0.name < $1.name }
+        discoveredPeers = Array(peersByID.values).sorted { lhs, rhs in
+            if lhs.name != rhs.name {
+                return lhs.name < rhs.name
+            }
+            return lhs.id.uuidString < rhs.id.uuidString
+        }
         notifyPeersChanged()
     }
 
     /// Force a discovery refresh.
     public func refresh() {
         stopDiscovery()
-        peersByEndpoint.removeAll()
-        discoveredPeers.removeAll()
-        notifyPeersChanged()
         startDiscovery()
+    }
+
+    package func upsertPeerForTesting(_ peer: LoomPeer) {
+        guard peer.id != localDeviceID else {
+            return
+        }
+        peerIDByEndpoint[peer.endpoint] = peer.id
+        var candidates = peerCandidatesByID[peer.id] ?? [:]
+        candidates[peer.endpoint] = peer
+        peerCandidatesByID[peer.id] = candidates
+        updatePeerSelection(for: peer.id)
+    }
+
+    package func removePeerForTesting(endpoint: NWEndpoint) {
+        removePeer(for: endpoint)
+    }
+
+    private func updatePeerSelection(for peerID: UUID) {
+        guard let candidates = peerCandidatesByID[peerID], !candidates.isEmpty else {
+            peersByID.removeValue(forKey: peerID)
+            updatePeersList()
+            return
+        }
+        peersByID[peerID] = candidates.values.min(by: isPreferredPeer(_:_:))
+        updatePeersList()
+    }
+
+    private func isPreferredPeer(_ lhs: LoomPeer, _ rhs: LoomPeer) -> Bool {
+        let leftRank = rank(for: lhs)
+        let rightRank = rank(for: rhs)
+        if leftRank != rightRank {
+            return leftRank < rightRank
+        }
+        return lhs.endpoint.debugDescription < rhs.endpoint.debugDescription
+    }
+
+    private func rank(for peer: LoomPeer) -> Int {
+        guard let preferredTransport = peer.advertisement.directTransports.min(by: transportIsPreferred(_:_:)) else {
+            return Int.max
+        }
+        return pathRank(preferredTransport.pathKind) * 10 + transportRank(preferredTransport.transportKind)
+    }
+
+    private func transportIsPreferred(
+        _ lhs: LoomDirectTransportAdvertisement,
+        _ rhs: LoomDirectTransportAdvertisement
+    ) -> Bool {
+        let leftRank = pathRank(lhs.pathKind) * 10 + transportRank(lhs.transportKind)
+        let rightRank = pathRank(rhs.pathKind) * 10 + transportRank(rhs.transportKind)
+        if leftRank != rightRank {
+            return leftRank < rightRank
+        }
+        return lhs.port < rhs.port
+    }
+
+    private func pathRank(_ pathKind: LoomDirectPathKind?) -> Int {
+        switch pathKind ?? .other {
+        case .wired:
+            return 0
+        case .wifi:
+            return 1
+        case .awdl:
+            return 2
+        case .other:
+            return 3
+        }
+    }
+
+    private func transportRank(_ transportKind: LoomTransportKind) -> Int {
+        switch transportKind {
+        case .quic:
+            return 0
+        case .tcp:
+            return 1
+        }
     }
 
     /// Registers an observer that is invoked whenever discovered peers change.

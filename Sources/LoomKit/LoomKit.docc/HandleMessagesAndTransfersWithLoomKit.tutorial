@@ -1,0 +1,54 @@
+@Tutorial(time: 20) {
+    @Intro(title: "Handle Messages and Transfers with LoomKit") {
+        In this tutorial, you will treat `LoomConnectionHandle` as the single app-facing boundary for connection-scoped async work: message receipt, lifecycle observation, custom streams, and bulk transfer.
+
+        The goal is to keep the view layer on snapshots while moving transport-shaped work into app-owned runtime objects.
+    }
+
+    @Section(title: "Observe messages and lifecycle events") {
+        @ContentAndMedia {
+            `LoomConnectionHandle` is an actor because it owns long-lived async work. Start by iterating the default message stream, then layer in state events and any custom streams your app needs.
+        }
+
+        @Steps {
+            @Step {
+                Attach a connection and append each received payload to a transcript.
+                @Code(name: "SessionCoordinator.swift", file: HandleMessagesAndTransfersWithLoomKit-SessionCoordinator-01.swift)
+            }
+
+            @Step {
+                Listen to the handle's event stream so your runtime can react to disconnects and transfer offers without reaching into lower-level transport state.
+                @Code(name: "SessionCoordinator.swift", file: HandleMessagesAndTransfersWithLoomKit-SessionCoordinator-02.swift)
+            }
+
+            @Step {
+                Open an additional multiplexed stream when your app needs a separate framing boundary from the default LoomKit message stream.
+                @Code(name: "SessionCoordinator.swift", file: HandleMessagesAndTransfersWithLoomKit-SessionCoordinator-03.swift)
+            }
+        }
+    }
+
+    @Section(title: "Move bulk data on the same handle") {
+        @ContentAndMedia {
+            LoomKit keeps bulk transfer on the same connection handle instead of introducing a second runtime object for files and blobs.
+        }
+
+        @Steps {
+            @Step {
+                Accept incoming file offers into an app-owned destination.
+                @Code(name: "TransferWorkflow.swift", file: HandleMessagesAndTransfersWithLoomKit-TransferWorkflow-01.swift)
+            }
+
+            @Step {
+                Offer a file-backed transfer from local storage.
+                @Code(name: "TransferWorkflow.swift", file: HandleMessagesAndTransfersWithLoomKit-TransferWorkflow-02.swift)
+            }
+
+            @Step {
+                Offer in-memory data when a temporary export does not need a file URL on disk.
+                @Code(name: "TransferWorkflow.swift", file: HandleMessagesAndTransfersWithLoomKit-TransferWorkflow-03.swift)
+                Use ``LoomQuery`` over ``LoomTransferSnapshot`` values when the UI needs live progress for active work.
+            }
+        }
+    }
+}

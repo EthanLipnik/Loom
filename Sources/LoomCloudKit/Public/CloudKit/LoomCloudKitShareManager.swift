@@ -70,6 +70,7 @@ public final class LoomCloudKitShareManager {
         advertisement: LoomPeerAdvertisement,
         identityPublicKey: Data? = nil,
         remoteAccessEnabled: Bool = false,
+        relaySessionID: String? = nil,
         bootstrapMetadata: LoomBootstrapMetadata? = nil
     ) async throws {
         guard cloudKitManager.isAvailable, let container = cloudKitManager.container else {
@@ -92,6 +93,7 @@ public final class LoomCloudKitShareManager {
         record[LoomCloudKitPeerInfo.RecordKey.advertisementBlob.rawValue] = try JSONEncoder().encode(advertisement)
         record[LoomCloudKitPeerInfo.RecordKey.identityPublicKey.rawValue] = identityPublicKey
         record[LoomCloudKitPeerInfo.RecordKey.remoteAccessEnabled.rawValue] = remoteAccessEnabled ? 1 : 0
+        record[LoomCloudKitPeerInfo.RecordKey.relaySessionID.rawValue] = relaySessionID
         record[LoomCloudKitPeerInfo.RecordKey.bootstrapMetadataBlob.rawValue] = try? JSONEncoder().encode(bootstrapMetadata)
         record[LoomCloudKitPeerInfo.RecordKey.lastSeen.rawValue] = Date()
 

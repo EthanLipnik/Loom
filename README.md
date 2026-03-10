@@ -1,10 +1,12 @@
 # Loom
 
-Build Apple-native device-to-device features without building a networking stack from scratch.
+Build high-throughput, low-latency Apple device-to-device features without building a networking stack from scratch.
 
 Loom is a Swift package for apps that need to find other devices, connect directly, verify identity, make trust decisions, and keep working when the local network is not the whole story.
 
-It is designed for Apple platforms, stays product-agnostic, and gives you a clean base for the part every multi-device app eventually has to build.
+It is designed for Apple platforms, stays product-agnostic, and gives you a clean base for the part every multi-device app eventually has to build. The transport is built for high-throughput, low-latency data movement between Apple devices, and the package now includes a SwiftUI-first `LoomKit` surface for the apps that want a plug-and-play integration path.
+
+If you want the default integration path, start with `LoomKit`. Drop down to `Loom` only when you need to own discovery, advertising, handshake policy, or transport composition yourself.
 
 Used in [MirageKit](https://github.com/EthanLipnik/MirageKit).
 
@@ -35,6 +37,14 @@ Loom is a good fit for things like:
 - products that start local but eventually need remote coordination
 
 ## What Loom gives you
+
+### SwiftUI-first package: `LoomKit`
+
+- One shared `LoomContainer` per app or scene, modeled after SwiftData's `ModelContainer`
+- Main-actor `LoomContext` injected through SwiftUI environment values
+- Live `@LoomQuery` peer, connection, and transfer snapshots for SwiftUI lists
+- Actor-backed `LoomConnectionHandle` values for message streams, file transfer, and custom multiplexed streams
+- Optional CloudKit-backed peer merging and relay-backed remote reachability without changing the app-facing API
 
 ### Core package: `Loom`
 
@@ -79,7 +89,9 @@ Your app owns those decisions. Loom gives you the network foundation underneath 
 
 ## How Loom compares
 
-If you are deciding between `Loom` and `MultipeerConnectivity`, the main question is whether you want a convenient local-session API or a foundation you can keep building on.
+For most apps, the practical comparison is `LoomKit` on top of `Loom` versus `MultipeerConnectivity` or a MultipeerKit-style convenience layer.
+
+The main question is whether you want a convenient local-session API only, or a SwiftUI-first path that still has identity, trust, diagnostics, and remote growth underneath it.
 
 | Capability | `Loom` | `MultipeerConnectivity` |
 | --- | --- | --- |
@@ -93,7 +105,9 @@ If you are deciding between `Loom` and `MultipeerConnectivity`, the main questio
 
 If your app only needs nearby discovery and a session quickly, `MultipeerConnectivity` is fine.
 
-If you need identity, trust, diagnostics, and a path beyond the local network, `Loom` is the better foundation.
+If you want the closest Loom equivalent to that convenience class of API, start with `LoomKit`.
+
+If you need identity, trust, diagnostics, and a path beyond the local network, Loom's stack is the better foundation.
 
 ## Installation
 
@@ -101,17 +115,21 @@ Add Loom to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/EthanLipnik/Loom.git", branch: "main")
+    .package(url: "https://github.com/EthanLipnik/Loom.git", from: "1.2.0")
 ]
 ```
 
 Then add the product you want to your target:
 
+For most apps, `LoomKit` should be the default dependency.
+
 ```swift
 .target(
     name: "MyApp",
     dependencies: [
-        .product(name: "Loom", package: "Loom"),
+        .product(name: "LoomKit", package: "Loom"),
+        // Or drop down to the lower-level primitives:
+        // .product(name: "Loom", package: "Loom"),
         // Add this if you want the optional terminal/session layer:
         // .product(name: "LoomShell", package: "Loom"),
         // Add this too if you want CloudKit-backed peer sharing or trust:
@@ -120,13 +138,77 @@ Then add the product you want to your target:
 )
 ```
 
-## Basic usage
+## SwiftUI-first quickstart
 
-The main type to understand is `LoomNode`.
+If you want something in the MultipeerKit class of ergonomics, start with `LoomKit`.
 
-Think of `LoomNode` as the networking hub for one part of your app. It owns discovery, advertising, sessions, and the identity and trust collaborators you inject into it.
+`LoomKit` is modeled more like SwiftData than like raw networking services:
 
-### 1. Create a node
+- `LoomContainer` owns the runtime
+- `LoomContext` is the main-actor action surface
+- `@LoomQuery` gives SwiftUI live snapshots
+- `LoomConnectionHandle` owns the long-lived async streams
+
+```swift
+import LoomKit
+import SwiftUI
+
+@main
+struct StudioLinkApp: App {
+    let loomContainer = try! LoomContainer(
+        for: .init(
+            serviceType: "_studiolink._tcp",
+            serviceName: "Studio Mac",
+            deviceIDSuiteName: "group.com.example.studiolink"
+        )
+    )
+
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+        .loomContainer(loomContainer)
+    }
+}
+```
+
+```swift
+import LoomKit
+import SwiftUI
+
+struct ContentView: View {
+    @Environment(\.loomContext) private var loomContext
+    @LoomQuery(.peers(sort: .name)) private var peers: [LoomPeerSnapshot]
+
+    var body: some View {
+        List(peers) { peer in
+            Button(peer.name) {
+                Task {
+                    let connection = try await loomContext.connect(peer)
+                    try await connection.send("hello")
+                }
+            }
+        }
+        .task {
+            for await connection in loomContext.incomingConnections {
+                Task {
+                    for await message in connection.messages {
+                        print("Received", message.count, "bytes")
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+That is the intended default. You can add CloudKit-backed peer sharing, trust, and relay publication through `LoomContainerConfiguration` without changing the SwiftUI-facing API shape.
+
+## Build from primitives when needed
+
+If you need full control over discovery, advertising, or handshake policy, drop down to `Loom`.
+
+The main type there is `LoomNode`. It owns discovery, advertising, sessions, and the identity and trust collaborators you inject into it.
 
 ```swift
 import Loom
@@ -138,86 +220,22 @@ let node = LoomNode(
     ),
     identityManager: LoomIdentityManager.shared
 )
-```
 
-If you are just getting started, that is the right mental model:
-
-- choose a Bonjour service type for your app
-- decide whether peer-to-peer browsing should be enabled
-- create one `LoomNode` for the runtime surface you are building
-
-### 2. Advertise your device
-
-```swift
-import Foundation
-
-let identity = try LoomIdentityManager.shared.currentIdentity()
-
-let advertisement = LoomPeerAdvertisement(
-    deviceID: UUID(),
-    identityKeyID: identity.keyID,
-    deviceType: .mac,
-    metadata: [
-        "myapp.role": "host",
-        "myapp.protocol": "1",
-    ]
-)
-
-let port = try await node.startAdvertising(
-    serviceName: "My Mac",
-    advertisement: advertisement
-) { session in
-    session.start(queue: .main)
-}
-
-print("Advertising on port \(port)")
-```
-
-This makes your device discoverable and hands you a `LoomSession` when someone connects.
-
-In a real app, keep `deviceID` stable instead of generating a new `UUID()` every launch. Your identity story gets much simpler if the device can be recognized over time.
-
-### 3. Browse for peers
-
-```swift
 let discovery = node.makeDiscovery()
-
 discovery.onPeersChanged = { peers in
-    for peer in peers {
-        print("Found \(peer.name) at \(peer.endpoint)")
-    }
+    print("Peers:", peers.map(\.name))
 }
-
 discovery.startDiscovery()
 ```
 
-At this stage, you are discovering peers and reading their advertised metadata. Your app still decides whether a peer is compatible, trusted, or worth connecting to.
-
-### 4. Open a session
-
-```swift
-import Network
-
-let connection = NWConnection(to: peer.endpoint, using: .tcp)
-let session = node.makeSession(connection: connection)
-
-session.setStateUpdateHandler { state in
-    print("Session state:", state)
-}
-
-session.start(queue: .main)
-```
-
-Once the session exists, your app takes over again. That is where your own protocol, handshake, message framing, and product logic should live.
+Use `LoomNode` when you want to own the full runtime boundary yourself. Use `LoomKit` when you want the repo to feel closer to SwiftUI + SwiftData.
 
 ## The simple mental model
 
-If you only remember one thing, make it this:
-
-1. `LoomNode` manages discovery and connections.
-2. `LoomPeerAdvertisement` tells other devices what you want them to know.
-3. `LoomSession` is the live connection.
-4. Your app owns everything above that line.
+1. `LoomKit` is the app-facing path for SwiftUI apps.
+2. `LoomNode` is the lower-level transport composition root.
+3. `LoomConnectionHandle` and `LoomAuthenticatedSession` are the live data paths.
+4. Your app still owns protocol semantics, product policy, and UI behavior.
 
 That split is what keeps Loom reusable instead of turning it into someone else's app framework.
 
@@ -232,6 +250,7 @@ That split is what keeps Loom reusable instead of turning it into someone else's
 
 If you want the deeper material, go to the docs:
 
+- [LoomKit Documentation](https://ethanlipnik.github.io/Loom/documentation/loomkit/)
 - [Loom Documentation](https://ethanlipnik.github.io/Loom/documentation/loom/)
 - [LoomShell Documentation](https://ethanlipnik.github.io/Loom/documentation/loomshell/)
 - [Architecture notes](Architecture.md)

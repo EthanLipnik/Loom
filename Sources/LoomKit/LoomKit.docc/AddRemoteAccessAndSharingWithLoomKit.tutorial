@@ -1,0 +1,77 @@
+@Tutorial(time: 25) {
+    @Intro(title: "Add Remote Access and Sharing with LoomKit") {
+        In this tutorial, you will extend a SwiftUI-first LoomKit app with CloudKit peer visibility, relay-backed remote hosting, and app-owned share acceptance.
+
+        The important design constraint stays the same: nearby discovery, CloudKit, and relay all project into one `LoomPeerSnapshot` model instead of creating three unrelated code paths in the app.
+    }
+
+    @Section(title: "Configure CloudKit and relay at the app boundary") {
+        @ContentAndMedia {
+            Keep the optional systems in the container configuration so the rest of the app can continue talking to `LoomContext`, `LoomQuery`, and `LoomConnectionHandle`.
+        }
+
+        @Steps {
+            @Step {
+                Start by enabling CloudKit in the shared container configuration.
+                @Code(name: "RemoteStudioApp.swift", file: AddRemoteAccessAndSharingWithLoomKit-App-01.swift)
+            }
+
+            @Step {
+                Add relay configuration and choose the trust mode your app wants.
+                @Code(name: "RemoteStudioApp.swift", file: AddRemoteAccessAndSharingWithLoomKit-App-02.swift)
+                `LoomTrustMode` lets the app decide whether same-account or shared peers should skip manual trust prompts.
+            }
+
+            @Step {
+                Inject the configured container into the scene so the rest of the app still works through environment values and queries.
+                @Code(name: "RemoteStudioApp.swift", file: AddRemoteAccessAndSharingWithLoomKit-App-03.swift)
+            }
+        }
+    }
+
+    @Section(title: "Publish and consume remote reachability") {
+        @ContentAndMedia {
+            Relay-backed reachability should feel like an extension of the same peer model, not like a separate runtime. Query peers normally, then start or stop hosting explicitly through the context.
+        }
+
+        @Steps {
+            @Step {
+                Filter the unified peer list down to remote-access-capable peers.
+                @Code(name: "RemoteAccessView.swift", file: AddRemoteAccessAndSharingWithLoomKit-RemoteAccessView-01.swift)
+            }
+
+            @Step {
+                Start and stop remote hosting from the context while reflecting the published state in SwiftUI.
+                @Code(name: "RemoteAccessView.swift", file: AddRemoteAccessAndSharingWithLoomKit-RemoteAccessView-02.swift)
+            }
+
+            @Step {
+                Connect to a selected remote peer through the same `loomContext.connect(_:)` API the app already uses for nearby peers.
+                @Code(name: "RemoteAccessView.swift", file: AddRemoteAccessAndSharingWithLoomKit-RemoteAccessView-03.swift)
+            }
+        }
+    }
+
+    @Section(title: "Create and accept CloudKit shares") {
+        @ContentAndMedia {
+            Keep CloudKit sharing in an app-owned coordinator. LoomKit should manage the record graph, but the app still decides when sharing starts, how accepted metadata enters the process, and what UI wraps those flows.
+        }
+
+        @Steps {
+            @Step {
+                Create a coordinator that asks LoomKit to create or return the current share for the local peer publication.
+                @Code(name: "SharingCoordinator.swift", file: AddRemoteAccessAndSharingWithLoomKit-SharingCoordinator-01.swift)
+            }
+
+            @Step {
+                Accept inbound `CKShare.Metadata` through the same context once the app receives it from your scene delegate or SwiftUI handoff path.
+                @Code(name: "SharingCoordinator.swift", file: AddRemoteAccessAndSharingWithLoomKit-SharingCoordinator-02.swift)
+            }
+
+            @Step {
+                Refresh peers after accepted shares so remote visibility and trust state catch up with the new sharing graph.
+                @Code(name: "SharingCoordinator.swift", file: AddRemoteAccessAndSharingWithLoomKit-SharingCoordinator-03.swift)
+            }
+        }
+    }
+}

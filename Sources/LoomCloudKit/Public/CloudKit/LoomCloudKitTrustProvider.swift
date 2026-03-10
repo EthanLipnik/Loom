@@ -10,6 +10,13 @@
 import Foundation
 import Loom
 
+/// Auto-trust policy used by CloudKit-backed Loom trust providers.
+public enum LoomCloudKitTrustMode: Sendable {
+    case manualOnly
+    case sameAccountAutoTrust
+    case shareAwareAutoTrust
+}
+
 /// iCloud-based trust provider that auto-approves devices on the same iCloud account
 /// or devices belonging to friends via CloudKit sharing.
 ///
@@ -45,6 +52,9 @@ public final class LoomCloudKitTrustProvider: LoomTrustProvider {
     /// Local trust store fallback for devices without iCloud.
     private let localTrustStore: LoomTrustStore
 
+    /// CloudKit-backed trust mode for the current runtime.
+    public let trustMode: LoomCloudKitTrustMode
+
     /// Whether to require approval for all connections regardless of iCloud status.
     ///
     /// When enabled, even devices on the same iCloud account or share participants
@@ -58,9 +68,15 @@ public final class LoomCloudKitTrustProvider: LoomTrustProvider {
     /// - Parameters:
     ///   - cloudKitManager: The CloudKit manager for identity and share checking.
     ///   - localTrustStore: Local trust store for manually approved devices.
-    public init(cloudKitManager: LoomCloudKitManager, localTrustStore: LoomTrustStore) {
+    ///   - trustMode: CloudKit-backed trust behavior layered above the local trust store.
+    public init(
+        cloudKitManager: LoomCloudKitManager,
+        localTrustStore: LoomTrustStore,
+        trustMode: LoomCloudKitTrustMode = .shareAwareAutoTrust
+    ) {
         self.cloudKitManager = cloudKitManager
         self.localTrustStore = localTrustStore
+        self.trustMode = trustMode
     }
 
     // MARK: - LoomTrustProvider
@@ -107,6 +123,11 @@ public final class LoomCloudKitTrustProvider: LoomTrustProvider {
             return LoomTrustEvaluation(decision: .requiresApproval, shouldShowAutoTrustNotice: false)
         }
 
+        if trustMode == .manualOnly {
+            LoomLogger.trust("Trust evaluation: manual-only mode for \(peer.name)")
+            return LoomTrustEvaluation(decision: .requiresApproval, shouldShowAutoTrustNotice: false)
+        }
+
         // Check if CloudKit is available
         guard cloudKitManager.isAvailable else {
             LoomLogger.trust("Trust evaluation: CloudKit unavailable, falling back to approval")
@@ -120,6 +141,11 @@ public final class LoomCloudKitTrustProvider: LoomTrustProvider {
         if let myUserID = cloudKitManager.currentUserRecordID, peerUserID == myUserID {
             LoomLogger.trust("Trust evaluation: same iCloud account for \(peer.name)")
             return LoomTrustEvaluation(decision: .trusted, shouldShowAutoTrustNotice: true)
+        }
+
+        guard trustMode == .shareAwareAutoTrust else {
+            LoomLogger.trust("Trust evaluation: share-aware auto-trust disabled for \(peer.name)")
+            return LoomTrustEvaluation(decision: .requiresApproval, shouldShowAutoTrustNotice: false)
         }
 
         // Check if peer is a share participant (friend)

@@ -1,0 +1,82 @@
+@Tutorial(time: 25) {
+    @Intro(title: "Build a SwiftUI App with LoomKit") {
+        In this tutorial, you will build a SwiftUI-first Loom integration that feels like SwiftData: one shared `LoomContainer`, one environment-injected `LoomContext`, live `@LoomQuery` snapshots for the UI, and actor-backed `LoomConnectionHandle` values for connection-scoped async work.
+
+        Each code listing builds on the previous step so you can follow the runtime model incrementally instead of jumping straight to the finished version.
+    }
+
+    @Section(title: "Create the shared container") {
+        @ContentAndMedia {
+            Start with the app boundary. `LoomContainer` is the one shared owner for discovery, authenticated sessions, trust, and any optional CloudKit or relay integration.
+        }
+
+        @Steps {
+            @Step {
+                Create the app entry point and initialize a basic `LoomContainer`.
+                @Code(name: "StudioLinkApp.swift", file: BuildASwiftUIAppWithLoomKit-App-01.swift)
+                Even the smallest integration should start with one long-lived container instead of having views create ad hoc nodes or discovery objects.
+            }
+
+            @Step {
+                Add the service type, shared device-ID suite, and advertisement metadata your app wants to own.
+                @Code(name: "StudioLinkApp.swift", file: BuildASwiftUIAppWithLoomKit-App-02.swift)
+                This is the LoomKit equivalent of configuring a `ModelContainer`: make product policy explicit at the app boundary.
+            }
+
+            @Step {
+                Attach the container to the SwiftUI scene so the shared `LoomContext` enters the environment and autostarts with the scene lifecycle.
+                @Code(name: "StudioLinkApp.swift", file: BuildASwiftUIAppWithLoomKit-App-03.swift)
+            }
+        }
+    }
+
+    @Section(title: "Render runtime snapshots in SwiftUI") {
+        @ContentAndMedia {
+            With the container in place, the view layer should stay read-only. Ask `LoomQuery` for peer and connection snapshots, then trigger work through the environment context.
+        }
+
+        @Steps {
+            @Step {
+                Start with a simple peer list driven by `@LoomQuery`.
+                @Code(name: "ContentView.swift", file: BuildASwiftUIAppWithLoomKit-ContentView-01.swift)
+                The view does not start discovery itself. It simply reflects the current state of the shared runtime.
+            }
+
+            @Step {
+                Add the environment-injected context and a second query for active connections.
+                @Code(name: "ContentView.swift", file: BuildASwiftUIAppWithLoomKit-ContentView-02.swift)
+                This mirrors SwiftData's split between a context that performs work and queries that render state.
+            }
+
+            @Step {
+                Connect to a selected peer and surface lightweight connection status in the UI.
+                @Code(name: "ContentView.swift", file: BuildASwiftUIAppWithLoomKit-ContentView-03.swift)
+            }
+        }
+    }
+
+    @Section(title: "Move connection work out of the view") {
+        @ContentAndMedia {
+            Once a connection exists, long-lived async work belongs in an app-owned runtime object, not inside the view tree. `LoomConnectionHandle` is the boundary for messages, events, and file transfer.
+        }
+
+        @Steps {
+            @Step {
+                Create an app-owned conversation runtime that listens for incoming connections and appends received messages to a transcript.
+                @Code(name: "ConversationRuntime.swift", file: BuildASwiftUIAppWithLoomKit-ConversationRuntime-01.swift)
+            }
+
+            @Step {
+                Add a helper that connects to a selected peer and sends an initial greeting over the default LoomKit message stream.
+                @Code(name: "ConversationRuntime.swift", file: BuildASwiftUIAppWithLoomKit-ConversationRuntime-02.swift)
+                `LoomContext` still owns the connect action, while the runtime object owns what happens after the connection exists.
+            }
+
+            @Step {
+                Reuse the same connection handle for file-backed transfer without introducing a second transport abstraction.
+                @Code(name: "ConversationRuntime.swift", file: BuildASwiftUIAppWithLoomKit-ConversationRuntime-03.swift)
+                At this point you have the full LoomKit shape: views render snapshots, the context performs app-level actions, and handles own connection-scoped async work.
+            }
+        }
+    }
+}

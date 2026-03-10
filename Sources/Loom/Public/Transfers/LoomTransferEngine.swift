@@ -17,6 +17,7 @@ public final class LoomOutgoingTransfer: @unchecked Sendable {
 
     private let cancelHandler: @Sendable () async -> Void
     private let progressContinuation: AsyncStream<LoomTransferProgress>.Continuation
+    private let progressObservers = LoomAsyncBroadcaster<LoomTransferProgress>()
 
     fileprivate init(
         offer: LoomTransferOffer,
@@ -34,13 +35,20 @@ public final class LoomOutgoingTransfer: @unchecked Sendable {
         await cancelHandler()
     }
 
+    /// Creates an additional observation stream for transfer progress updates.
+    public nonisolated func makeProgressObserver() -> AsyncStream<LoomTransferProgress> {
+        progressObservers.makeStream()
+    }
+
     fileprivate func yield(_ progress: LoomTransferProgress) {
         progressContinuation.yield(progress)
+        progressObservers.yield(progress)
         if progress.state == .completed ||
             progress.state == .cancelled ||
             progress.state == .failed ||
             progress.state == .declined {
             progressContinuation.finish()
+            progressObservers.finish()
         }
     }
 }
@@ -55,6 +63,7 @@ public final class LoomIncomingTransfer: @unchecked Sendable {
     private let acceptHandler: @Sendable (any LoomTransferSink, UInt64) async throws -> Void
     private let declineHandler: @Sendable () async throws -> Void
     private let progressContinuation: AsyncStream<LoomTransferProgress>.Continuation
+    private let progressObservers = LoomAsyncBroadcaster<LoomTransferProgress>()
 
     fileprivate init(
         offer: LoomTransferOffer,
@@ -82,13 +91,20 @@ public final class LoomIncomingTransfer: @unchecked Sendable {
         try await declineHandler()
     }
 
+    /// Creates an additional observation stream for transfer progress updates.
+    public nonisolated func makeProgressObserver() -> AsyncStream<LoomTransferProgress> {
+        progressObservers.makeStream()
+    }
+
     fileprivate func yield(_ progress: LoomTransferProgress) {
         progressContinuation.yield(progress)
+        progressObservers.yield(progress)
         if progress.state == .completed ||
             progress.state == .cancelled ||
             progress.state == .failed ||
             progress.state == .declined {
             progressContinuation.finish()
+            progressObservers.finish()
         }
     }
 }
@@ -162,7 +178,7 @@ public actor LoomTransferEngine {
     }
 
     private func observeIncomingStreams() async {
-        for await stream in session.incomingStreams {
+        for await stream in session.makeIncomingStreamObserver() {
             guard let label = stream.label else {
                 continue
             }

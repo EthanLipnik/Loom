@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 280" role="img" aria-labelledby="title desc">
+  <title id="title">LoomKit cloud and relay diagram</title>
+  <desc id="desc">Nearby peers, CloudKit sharing, and relay reachability merge into one LoomKit peer model.</desc>
+  <rect width="760" height="280" fill="#f8fafc"/>
+  <rect x="40" y="100" width="150" height="80" rx="16" fill="#dbeafe"/>
+  <text x="115" y="147" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="24" fill="#1d4ed8">Nearby</text>
+  <rect x="305" y="40" width="150" height="80" rx="16" fill="#e9d5ff"/>
+  <text x="380" y="87" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="24" fill="#7e22ce">CloudKit</text>
+  <rect x="305" y="160" width="150" height="80" rx="16" fill="#dcfce7"/>
+  <text x="380" y="207" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="24" fill="#166534">Relay</text>
+  <rect x="570" y="100" width="150" height="80" rx="16" fill="#0f172a"/>
+  <text x="645" y="138" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="24" fill="#ffffff">Merged</text>
+  <text x="645" y="166" text-anchor="middle" font-family="Helvetica, Arial, sans-serif" font-size="24" fill="#ffffff">Peer</text>
+  <path d="M190 140 H305" stroke="#64748b" stroke-width="4" fill="none"/>
+  <path d="M455 80 H570" stroke="#64748b" stroke-width="4" fill="none"/>
+  <path d="M455 200 H570" stroke="#64748b" stroke-width="4" fill="none"/>
+</svg>

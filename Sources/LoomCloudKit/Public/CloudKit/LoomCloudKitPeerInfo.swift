@@ -22,6 +22,7 @@ public struct LoomCloudKitPeerInfo: Identifiable, Hashable, Sendable {
     public let recordID: String
     public let identityPublicKey: Data?
     public let remoteAccessEnabled: Bool
+    public let relaySessionID: String?
     public let bootstrapMetadata: LoomBootstrapMetadata?
 
     public init(
@@ -35,6 +36,7 @@ public struct LoomCloudKitPeerInfo: Identifiable, Hashable, Sendable {
         recordID: String,
         identityPublicKey: Data? = nil,
         remoteAccessEnabled: Bool = false,
+        relaySessionID: String? = nil,
         bootstrapMetadata: LoomBootstrapMetadata? = nil
     ) {
         self.id = id
@@ -47,6 +49,7 @@ public struct LoomCloudKitPeerInfo: Identifiable, Hashable, Sendable {
         self.recordID = recordID
         self.identityPublicKey = identityPublicKey
         self.remoteAccessEnabled = remoteAccessEnabled
+        self.relaySessionID = relaySessionID
         self.bootstrapMetadata = bootstrapMetadata
     }
 
@@ -69,6 +72,7 @@ public extension LoomCloudKitPeerInfo {
         case advertisementBlob
         case identityPublicKey
         case remoteAccessEnabled
+        case relaySessionID
         case bootstrapMetadataBlob
         case lastSeen
         case createdAt

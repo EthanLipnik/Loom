@@ -205,6 +205,7 @@ public final class LoomCloudKitPeerProvider {
                     advertisementBlob: record[LoomCloudKitPeerInfo.RecordKey.advertisementBlob.rawValue] as? Data,
                     identityPublicKey: record[LoomCloudKitPeerInfo.RecordKey.identityPublicKey.rawValue] as? Data,
                     remoteAccessEnabled: (record[LoomCloudKitPeerInfo.RecordKey.remoteAccessEnabled.rawValue] as? Int64).map { $0 != 0 },
+                    relaySessionID: record[LoomCloudKitPeerInfo.RecordKey.relaySessionID.rawValue] as? String,
                     bootstrapMetadataBlob: record[LoomCloudKitPeerInfo.RecordKey.bootstrapMetadataBlob.rawValue] as? Data,
                     lastSeen: record[LoomCloudKitPeerInfo.RecordKey.lastSeen.rawValue] as? Date,
                     isShared: isShared,
@@ -243,6 +244,7 @@ private struct PeerRecordSnapshot: Sendable {
     let advertisementBlob: Data?
     let identityPublicKey: Data?
     let remoteAccessEnabled: Bool?
+    let relaySessionID: String?
     let bootstrapMetadataBlob: Data?
     let lastSeen: Date?
     let isShared: Bool
@@ -283,6 +285,7 @@ private actor PeerRecordSnapshotParser {
             recordID: snapshot.recordID,
             identityPublicKey: snapshot.identityPublicKey,
             remoteAccessEnabled: snapshot.remoteAccessEnabled ?? false,
+            relaySessionID: snapshot.relaySessionID,
             bootstrapMetadata: bootstrapMetadata
         )
     }
