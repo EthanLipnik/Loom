@@ -234,7 +234,7 @@ If you want the deeper material, go to the docs:
 
 - [Loom Documentation](https://ethanlipnik.github.io/Loom/documentation/loom/)
 - [LoomShell Documentation](https://ethanlipnik.github.io/Loom/documentation/loomshell/)
-- [Build A Shell App On Loom](https://ethanlipnik.github.io/Loom/documentation/loomshell/build-a-shell-app-on-loom)
+- [Build A Shell App On Loom](https://ethanlipnik.github.io/Loom/documentation/loomshell/buildashellapponloom/)
 - [Architecture notes](Architecture.md)
 
 ## Development

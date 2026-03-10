@@ -81,4 +81,20 @@ convert_catalog() {
 convert_catalog "$ROOT_DIR/Sources/Loom/Loom.docc" Loom loom.Loom
 convert_catalog "$ROOT_DIR/Sources/LoomShell/LoomShell.docc" LoomShell loom.LoomShell
 
+mkdir -p "$OUTPUT_PATH/documentation/loomshell/build-a-shell-app-on-loom"
+cat >"$OUTPUT_PATH/documentation/loomshell/build-a-shell-app-on-loom/index.html" <<'EOF'
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="refresh" content="0; url=../buildashellapponloom/">
+    <link rel="canonical" href="../buildashellapponloom/">
+    <title>Redirecting…</title>
+  </head>
+  <body>
+    <p><a href="../buildashellapponloom/">Redirecting to Build A Shell App On Loom…</a></p>
+  </body>
+</html>
+EOF
+
 touch "$OUTPUT_PATH/.nojekyll"
