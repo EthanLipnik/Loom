@@ -83,8 +83,12 @@ actor LoomStore {
     private var lastErrorMessage: String?
     private var listeningPorts: [LoomTransportKind: UInt16] = [:]
     private var discoveryObserverToken: UUID?
+    private var overlayDirectory: LoomOverlayDirectory?
+    private var overlayDirectoryObserverToken: UUID?
     private var localPeersByID: [LoomPeerID: LoomPeer] = [:]
     private var localPeerLastSeen: [LoomPeerID: Date] = [:]
+    private var overlayPeersByID: [LoomPeerID: LoomPeer] = [:]
+    private var overlayPeerLastSeen: [LoomPeerID: Date] = [:]
     private var cloudPeersByID: [LoomPeerID: LoomCloudKitPeerInfo] = [:]
     private var connections: [UUID: ManagedConnection] = [:]
     private var connectionSnapshots: [UUID: LoomConnectionSnapshot] = [:]
@@ -175,6 +179,28 @@ actor LoomStore {
             }
             discoveryObserverToken = observerToken
 
+            if let overlayDirectoryConfiguration = configuration.overlayDirectory {
+                if overlayDirectory == nil {
+                    overlayDirectory = await MainActor.run {
+                        LoomOverlayDirectory(
+                            configuration: overlayDirectoryConfiguration,
+                            localDeviceID: deviceID
+                        )
+                    }
+                }
+                if let overlayDirectory {
+                    let token = await MainActor.run {
+                        overlayDirectory.addPeersChangedObserver { [weak self] peers in
+                            guard let self else { return }
+                            Task {
+                                await self.handleOverlayPeersChanged(peers)
+                            }
+                        }
+                    }
+                    overlayDirectoryObserverToken = token
+                }
+            }
+
             let ports = try await node.startAuthenticatedAdvertising(
                 serviceName: configuration.serviceName,
                 helloProvider: { [weak self] in
@@ -201,6 +227,17 @@ actor LoomStore {
                     discovery.discoveredPeers
                 }
             )
+            if let overlayDirectory {
+                await MainActor.run {
+                    overlayDirectory.start()
+                }
+                await overlayDirectory.refresh()
+                await handleOverlayPeersChanged(
+                    await MainActor.run {
+                        overlayDirectory.discoveredPeers
+                    }
+                )
+            }
             await refreshCloudPeers()
             try await publishCurrentPeer()
 
@@ -258,9 +295,19 @@ actor LoomStore {
             }
         }
         self.discoveryObserverToken = nil
+        if let overlayDirectoryObserverToken,
+           let overlayDirectory {
+            await MainActor.run {
+                overlayDirectory.removePeersChangedObserver(overlayDirectoryObserverToken)
+                overlayDirectory.stop()
+            }
+        }
+        self.overlayDirectoryObserverToken = nil
 
         localPeersByID.removeAll()
         localPeerLastSeen.removeAll()
+        overlayPeersByID.removeAll()
+        overlayPeerLastSeen.removeAll()
         cloudPeersByID.removeAll()
         listeningPorts.removeAll()
 
@@ -293,6 +340,10 @@ actor LoomStore {
                 discovery.refresh()
             }
         }
+        if let overlayDirectory,
+           isRunning {
+            await overlayDirectory.refresh()
+        }
         await refreshCloudPeers()
     }
 
@@ -314,15 +365,21 @@ actor LoomStore {
 
         let resolvedPeer = currentPeerSnapshot(for: peerSnapshot.id) ?? peerSnapshot
         let localPeer = localPeersByID[resolvedPeer.id]
-        let relaySessionID = localPeer == nil ? resolvedPeer.relaySessionID : nil
+        let overlayPeer = localPeer == nil ? overlayPeersByID[resolvedPeer.id] : nil
+        let relaySessionID = LoomConnectionCoordinator.relayFallbackSessionID(
+            advertisedRelaySessionID: resolvedPeer.relaySessionID,
+            localPeer: localPeer,
+            overlayPeer: overlayPeer
+        )
 
-        guard localPeer != nil || relaySessionID != nil else {
+        guard localPeer != nil || overlayPeer != nil || relaySessionID != nil else {
             throw LoomStoreError.peerNotFound(resolvedPeer.id)
         }
 
         return try await connect(
             preferredPeer: resolvedPeer,
             localPeer: localPeer,
+            overlayPeer: overlayPeer,
             relaySessionID: relaySessionID
         )
     }
@@ -352,6 +409,7 @@ actor LoomStore {
         return try await connect(
             preferredPeer: knownPeer,
             localPeer: nil,
+            overlayPeer: nil,
             relaySessionID: sessionID
         )
     }
@@ -671,6 +729,19 @@ actor LoomStore {
         await notifyStateChanged()
     }
 
+    private func handleOverlayPeersChanged(_ peers: [LoomPeer]) async {
+        let now = Date()
+        overlayPeersByID = Dictionary(
+            uniqueKeysWithValues: peers
+                .filter { $0.deviceID != deviceID }
+                .map { ($0.id, $0) }
+        )
+        overlayPeerLastSeen = Dictionary(
+            uniqueKeysWithValues: overlayPeersByID.keys.map { ($0, now) }
+        )
+        await notifyStateChanged()
+    }
+
     private func acceptIncomingSession(_ session: LoomAuthenticatedSession) async {
         do {
             let peerSnapshot = try await resolveConnectedPeer(
@@ -707,13 +778,15 @@ actor LoomStore {
     private func connect(
         preferredPeer: LoomPeerSnapshot?,
         localPeer: LoomPeer?,
+        overlayPeer: LoomPeer?,
         relaySessionID: String?
     ) async throws -> LoomConnectionHandle {
         let hello = try await makeHelloRequest()
         var didJoinRelay = false
 
         if let relaySessionID,
-           localPeer == nil {
+           localPeer == nil,
+           overlayPeer == nil {
             guard let relayClient else {
                 throw LoomStoreError.relayUnavailable
             }
@@ -725,6 +798,7 @@ actor LoomStore {
             let session = try await connectionCoordinator.connect(
                 hello: hello,
                 localPeer: localPeer,
+                overlayPeer: overlayPeer,
                 relaySessionID: relaySessionID
             )
             let peerSnapshot = try await resolveConnectedPeer(
@@ -912,7 +986,9 @@ actor LoomStore {
     }
 
     private func mergedPeers() -> [LoomPeerSnapshot] {
-        let peerIDs = Set(localPeersByID.keys).union(cloudPeersByID.keys)
+        let peerIDs = Set(localPeersByID.keys)
+            .union(overlayPeersByID.keys)
+            .union(cloudPeersByID.keys)
         return peerIDs.compactMap(currentPeerSnapshot(for:)).sorted { lhs, rhs in
             if lhs.name != rhs.name {
                 return lhs.name < rhs.name
@@ -923,13 +999,15 @@ actor LoomStore {
 
     private func currentPeerSnapshot(for peerID: LoomPeerID) -> LoomPeerSnapshot? {
         let localPeer = localPeersByID[peerID]
+        let overlayPeer = overlayPeersByID[peerID]
         let cloudPeer = cloudPeersByID[peerID]
-        guard localPeer != nil || cloudPeer != nil else {
+        guard localPeer != nil || overlayPeer != nil || cloudPeer != nil else {
             return nil
         }
 
-        let deviceType = localPeer?.deviceType ?? cloudPeer?.deviceType ?? .unknown
+        let deviceType = localPeer?.deviceType ?? overlayPeer?.deviceType ?? cloudPeer?.deviceType ?? .unknown
         let advertisement = localPeer?.advertisement
+            ?? overlayPeer?.advertisement
             ?? cloudPeer?.advertisement
             ?? LoomPeerAdvertisement(deviceID: peerID.deviceID, deviceType: deviceType)
         let bootstrapMetadata = LoomKitMetadataCodec.bootstrapMetadata(from: advertisement)
@@ -937,6 +1015,9 @@ actor LoomStore {
         var sources: [LoomPeerSource] = []
         if localPeer != nil {
             sources.append(.nearby)
+        }
+        if overlayPeer != nil {
+            sources.append(.overlay)
         }
         if let cloudPeer {
             sources.append(cloudPeer.isShared ? .cloudKitShared : .cloudKitOwn)
@@ -946,9 +1027,14 @@ actor LoomStore {
         }
 
         let localLastSeen = localPeerLastSeen[peerID] ?? .distantPast
+        let overlayLastSeen = overlayPeerLastSeen[peerID] ?? .distantPast
         let cloudLastSeen = cloudPeer?.lastSeen ?? .distantPast
-        let lastSeen = max(localLastSeen, cloudLastSeen)
-        let name = resolvedPeerName(localPeer: localPeer, cloudPeer: cloudPeer)
+        let lastSeen = max(localLastSeen, max(overlayLastSeen, cloudLastSeen))
+        let name = resolvedPeerName(
+            localPeer: localPeer,
+            overlayPeer: overlayPeer,
+            cloudPeer: cloudPeer
+        )
 
         return LoomPeerSnapshot(
             id: peerID,
@@ -971,11 +1057,16 @@ actor LoomStore {
 
     private func resolvedPeerName(
         localPeer: LoomPeer?,
+        overlayPeer: LoomPeer?,
         cloudPeer: LoomCloudKitPeerInfo?
     ) -> String {
         if let localPeer,
            localPeer.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
             return localPeer.name
+        }
+        if let overlayPeer,
+           overlayPeer.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return overlayPeer.name
         }
         if let cloudPeer,
            cloudPeer.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
@@ -1030,6 +1121,7 @@ actor LoomStore {
             sources: record.sources.map {
                 switch $0 {
                 case .nearby: .nearby
+                case .overlay: .overlay
                 case .cloudKitOwn: .cloudKitOwn
                 case .cloudKitShared: .cloudKitShared
                 case .relay: .relay
@@ -1056,6 +1148,10 @@ actor LoomStore {
         }
         if configuration.serviceName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             throw LoomStoreError.invalidConfiguration("LoomKit service name must not be empty.")
+        }
+        if let overlayDirectory = configuration.overlayDirectory,
+           overlayDirectory.probePort == 0 {
+            throw LoomStoreError.invalidConfiguration("LoomKit overlay probe port must not be zero.")
         }
     }
 

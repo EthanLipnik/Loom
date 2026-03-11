@@ -10,6 +10,7 @@ import Loom
 
 package enum LoomHostPeerSource: String, Codable, Sendable {
     case nearby
+    case overlay
     case cloudKitOwn
     case cloudKitShared
     case relay

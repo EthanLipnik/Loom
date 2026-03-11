@@ -52,6 +52,27 @@ struct LoomNetworkPathClassifierTests {
         #expect(snapshot.kind == .wifi)
     }
 
+    @Test("Overlay classification prefers utun interfaces over generic other")
+    func classifyOverlayPath() {
+        let snapshot = LoomNetworkPathClassifier.classify(
+            interfaceNames: ["utun4"],
+            usesWiFi: false,
+            usesWired: false,
+            usesCellular: false,
+            usesLoopback: false,
+            usesOther: true,
+            status: "satisfied",
+            isExpensive: false,
+            isConstrained: false,
+            supportsIPv4: true,
+            supportsIPv6: true
+        )
+
+        #expect(snapshot.kind == .overlay)
+        #expect(snapshot.isReady)
+        #expect(snapshot.signature.localizedStandardContains("kind=overlay"))
+    }
+
     @Test("Unknown classification applies when no interface hints are present")
     func classifyUnknownPath() {
         let snapshot = LoomNetworkPathClassifier.classify(

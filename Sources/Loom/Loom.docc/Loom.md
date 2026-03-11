@@ -39,6 +39,7 @@ Your app still owns payload schemas, user experience, and product policy.
 - <doc:AddTrustAndApproval>
 - <doc:SharePeersWithCloudKit>
 - <doc:AddRemoteReachabilityAndBootstrap>
+- <doc:UseTailscaleAndCustomOverlays>
 - <doc:TransferLargeObjects>
 - ``LoomNode``
 - ``LoomSession``
@@ -57,6 +58,9 @@ Your app still owns payload schemas, user experience, and product policy.
 
 ### Remote Connectivity
 
+- ``LoomOverlayDirectory``
+- ``LoomOverlayDirectoryConfiguration``
+- ``LoomOverlaySeed``
 - ``LoomRelayClient``
 - ``LoomSTUNProbe``
 

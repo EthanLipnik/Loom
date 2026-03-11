@@ -33,6 +33,8 @@ public struct LoomContainerConfiguration: Sendable {
     public let deviceIDSuiteName: String?
     /// Optional CloudKit configuration used to merge shared peers into the runtime.
     public let cloudKit: LoomCloudKitConfiguration?
+    /// Optional overlay directory configuration used for off-LAN peer discovery.
+    public let overlayDirectory: LoomOverlayDirectoryConfiguration?
     /// Optional relay configuration used for remote hosting and remote joins.
     public let relay: LoomRelayConfiguration?
     /// Optional macOS shared-host configuration used to share one Loom runtime across App Group apps.
@@ -60,6 +62,7 @@ public struct LoomContainerConfiguration: Sendable {
         serviceName: String,
         deviceIDSuiteName: String? = nil,
         cloudKit: LoomCloudKitConfiguration? = nil,
+        overlayDirectory: LoomOverlayDirectoryConfiguration? = nil,
         relay: LoomRelayConfiguration? = nil,
         sharedHost: LoomSharedHostConfiguration? = nil,
         trust: LoomTrustMode = .manualOnly,
@@ -75,6 +78,7 @@ public struct LoomContainerConfiguration: Sendable {
         self.serviceName = serviceName
         self.deviceIDSuiteName = deviceIDSuiteName
         self.cloudKit = cloudKit
+        self.overlayDirectory = overlayDirectory
         self.relay = relay
         self.sharedHost = sharedHost
         self.trust = trust

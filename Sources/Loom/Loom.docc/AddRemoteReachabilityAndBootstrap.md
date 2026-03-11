@@ -5,9 +5,10 @@ Remote support in Loom is intentionally composable. You can adopt as much or as 
 The broad pattern looks like this:
 
 1. probe whether direct external connectivity is possible
-2. publish remote presence and candidates
-3. expose bootstrap metadata for recovery paths
-4. attempt deterministic recovery in app-owned policy order
+2. resolve overlay-reachable peers when your network provides stable host seeds
+3. publish remote presence and candidates
+4. expose bootstrap metadata for recovery paths
+5. attempt deterministic recovery in app-owned policy order
 
 That is also how `MirageKit` uses Loom. Remote reachability, CloudKit peer records, and SSH or Wake-on-LAN recovery are layered on top of the same local discovery and identity model.
 
@@ -32,6 +33,38 @@ let candidate = LoomRelayCandidate(
 ```
 
 That gives your app concrete information about whether direct remote connectivity is even worth advertising.
+
+## Add an overlay peer directory when you already have host seeds
+
+Some products run on overlay or VPN-style networks where devices already have stable names or IP addresses. In that case, use ``LoomOverlayDirectory`` with an app-owned seed provider instead of treating those peers as relay-only.
+
+```swift
+let overlayDirectory = LoomOverlayDirectory(
+    configuration: LoomOverlayDirectoryConfiguration(
+        probePort: Loom.defaultOverlayProbePort,
+        refreshInterval: .seconds(30),
+        probeTimeout: .seconds(2),
+        seedProvider: {
+            [
+                LoomOverlaySeed(host: "studio-mac.tailnet.example"),
+                LoomOverlaySeed(host: "100.64.0.25"),
+            ]
+        }
+    )
+)
+
+overlayDirectory.start()
+```
+
+Each seed is just a host hint. Loom then probes that host’s dedicated overlay listener, validates the Loom advertisement payload, and builds regular ``LoomPeer`` values from the response. That keeps the transport generic:
+
+- your network provider owns device reachability and naming
+- Loom owns Loom-native peer identity and transport metadata
+- your app still decides which seeds to trust and when to refresh them
+
+The important architectural boundary is that overlay discovery is still direct connectivity. It is not CloudKit presence and it is not relay signaling.
+
+If your overlay is Tailscale, that usually means your seed provider returns MagicDNS host names or stable tailnet IP addresses. Loom does not integrate with the Tailscale control plane directly. It only probes the hosts your app chooses to trust and publish. For a more concrete Tailscale and custom-inventory walkthrough, see <doc:UseTailscaleAndCustomOverlays>.
 
 ## Publish remote presence
 

@@ -28,6 +28,8 @@ public struct LoomKitError: LocalizedError, Sendable, Equatable {
 public enum LoomPeerSource: String, Codable, CaseIterable, Hashable, Sendable {
     /// Nearby peer discovered over Bonjour or direct local advertising.
     case nearby
+    /// Peer resolved through the overlay-directory off-LAN probe path.
+    case overlay
     /// Peer record published by the current iCloud account.
     case cloudKitOwn
     /// Peer record visible through an accepted CloudKit share.

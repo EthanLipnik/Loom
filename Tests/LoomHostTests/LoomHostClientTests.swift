@@ -67,6 +67,7 @@ struct LoomHostClientTests {
                     peerProvider: nil,
                     shareManager: nil,
                     relayClient: nil,
+                    overlayDirectoryConfiguration: nil,
                     connectionCoordinator: connectionCoordinator,
                     bootstrapMetadataProvider: nil,
                     hostAdvertisementMetadata: [:],

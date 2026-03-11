@@ -11,6 +11,7 @@ import Network
 /// Origin of a direct connection attempt chosen by the coordinator.
 public enum LoomConnectionTargetSource: String, Sendable, Codable {
     case localDiscovery
+    case overlayDirectory
     case relay
 }
 
@@ -120,14 +121,42 @@ public final class LoomConnectionCoordinator {
         self.connector = connector
     }
 
+    nonisolated package static func relayFallbackSessionID(
+        advertisedRelaySessionID: String?,
+        localPeer: LoomPeer?,
+        overlayPeer _: LoomPeer?
+    ) -> String? {
+        guard localPeer == nil else {
+            return nil
+        }
+        return advertisedRelaySessionID
+    }
+
     public func makePlan(
         localPeer: LoomPeer? = nil,
+        overlayPeer: LoomPeer? = nil,
         relaySessionID: String? = nil
     ) async throws -> LoomConnectionPlan {
         var targets: [LoomConnectionTarget] = []
 
         if let localPeer {
-            targets.append(contentsOf: Self.localTargets(from: localPeer, policy: policy))
+            targets.append(
+                contentsOf: Self.discoveryTargets(
+                    from: localPeer,
+                    source: .localDiscovery,
+                    policy: policy
+                )
+            )
+        }
+
+        if let overlayPeer {
+            targets.append(
+                contentsOf: Self.discoveryTargets(
+                    from: overlayPeer,
+                    source: .overlayDirectory,
+                    policy: policy
+                )
+            )
         }
 
         if let relaySessionID,
@@ -145,9 +174,14 @@ public final class LoomConnectionCoordinator {
     public func connect(
         hello: LoomSessionHelloRequest,
         localPeer: LoomPeer? = nil,
+        overlayPeer: LoomPeer? = nil,
         relaySessionID: String? = nil
     ) async throws -> LoomAuthenticatedSession {
-        let plan = try await makePlan(localPeer: localPeer, relaySessionID: relaySessionID)
+        let plan = try await makePlan(
+            localPeer: localPeer,
+            overlayPeer: overlayPeer,
+            relaySessionID: relaySessionID
+        )
         guard !plan.targets.isEmpty else {
             throw LoomError.sessionNotFound
         }
@@ -213,8 +247,9 @@ public final class LoomConnectionCoordinator {
         )
     }
 
-    private static func localTargets(
+    private static func discoveryTargets(
         from peer: LoomPeer,
+        source: LoomConnectionTargetSource,
         policy: LoomDirectConnectionPolicy
     ) -> [LoomConnectionTarget] {
         let advertisedTransports = peer.advertisement.directTransports
@@ -236,7 +271,7 @@ public final class LoomConnectionCoordinator {
 
         return transports.map { transport in
             LoomConnectionTarget(
-                source: .localDiscovery,
+                source: source,
                 transportKind: transport.transportKind,
                 endpoint: localEndpoint(
                     from: peer.endpoint,
@@ -283,6 +318,8 @@ public final class LoomConnectionCoordinator {
         switch source {
         case .localDiscovery:
             policy.racesLocalCandidates
+        case .overlayDirectory:
+            policy.racesRemoteCandidates
         case .relay:
             policy.racesRemoteCandidates
         }
@@ -391,6 +428,8 @@ public final class LoomConnectionCoordinator {
         let staggerMilliseconds = switch source {
         case .localDiscovery:
             75
+        case .overlayDirectory:
+            150
         case .relay:
             150
         }

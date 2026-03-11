@@ -36,6 +36,7 @@ public final class LoomContainer {
             serviceName: trimmedServiceName,
             deviceIDSuiteName: configuration.deviceIDSuiteName,
             cloudKit: configuration.cloudKit,
+            overlayDirectory: configuration.overlayDirectory,
             relay: configuration.relay,
             sharedHost: configuration.sharedHost,
             trust: configuration.trust,
@@ -53,6 +54,7 @@ public final class LoomContainer {
         )
         let networkConfiguration = LoomNetworkConfiguration(
             serviceType: trimmedServiceType,
+            overlayProbePort: configuration.overlayDirectory?.probePort,
             enablePeerToPeer: configuration.enablePeerToPeer,
             directConnectionPolicy: configuration.directConnectionPolicy
         )
@@ -90,6 +92,7 @@ public final class LoomContainer {
         let bootstrapMetadataProvider = self.configuration.bootstrapMetadataProvider
         let hostAdvertisementMetadata = self.configuration.advertisementMetadata
         let hostSupportedFeatures = self.configuration.supportedFeatures
+        let overlayDirectoryConfiguration = self.configuration.overlayDirectory
         let hostClient: LoomHostClient?
         #if os(macOS)
         if let sharedHost = self.configuration.sharedHost {
@@ -104,6 +107,7 @@ public final class LoomContainer {
                         peerProvider: peerProvider,
                         shareManager: shareManager,
                         relayClient: relayClient,
+                        overlayDirectoryConfiguration: overlayDirectoryConfiguration,
                         connectionCoordinator: connectionCoordinator,
                         bootstrapMetadataProvider: bootstrapMetadataProvider,
                         hostAdvertisementMetadata: hostAdvertisementMetadata,

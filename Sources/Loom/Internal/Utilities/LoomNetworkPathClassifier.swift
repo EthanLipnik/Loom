@@ -12,6 +12,7 @@ import Network
 
 package enum LoomNetworkPathKind: String, Sendable, Equatable {
     case awdl
+    case overlay
     case wifi
     case wired
     case cellular
@@ -75,9 +76,12 @@ package enum LoomNetworkPathClassifier {
             .map { $0.lowercased() }
             .sorted()
         let hasAWDLInterface = sortedNames.contains { $0.hasPrefix("awdl") }
+        let hasOverlayInterface = sortedNames.contains { $0.hasPrefix("utun") }
         let kind: LoomNetworkPathKind
         if hasAWDLInterface && usesOther {
             kind = .awdl
+        } else if hasOverlayInterface && usesOther {
+            kind = .overlay
         } else if usesWiFi {
             kind = .wifi
         } else if usesWired {

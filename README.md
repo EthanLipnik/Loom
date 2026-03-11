@@ -52,6 +52,7 @@ Loom is a good fit for things like:
 - Direct sessions built on `Network.framework`
 - Stable device identity and key management
 - Pluggable trust policy and local trust storage
+- Seed-driven overlay discovery for Tailscale, Headscale, and other VPN-style networks
 - Remote reachability support with relay presence and network probing
 - Bootstrap tools for flows like Wake-on-LAN and SSH handoff
 - Diagnostics and instrumentation hooks
@@ -109,13 +110,39 @@ If you want the closest Loom equivalent to that convenience class of API, start 
 
 If you need identity, trust, diagnostics, and a path beyond the local network, Loom's stack is the better foundation.
 
+## Tailscale and custom overlays
+
+Loom can treat Tailscale and other overlay networks as direct connectivity instead of forcing those peers through relay-only flows. The model is intentionally simple: publish a small overlay probe listener on each Loom host, and provide `LoomOverlayDirectory` with the host names or IP addresses your app already trusts.
+
+That means Loom does not depend on a specific control plane. You can feed the directory with MagicDNS names, stable overlay IPs, or results from your own inventory service:
+
+```swift
+let configuration = LoomContainerConfiguration(
+    serviceType: "_studio._tcp",
+    serviceName: "Studio Mac",
+    overlayDirectory: LoomOverlayDirectoryConfiguration(
+        probePort: Loom.defaultOverlayProbePort,
+        refreshInterval: .seconds(30),
+        probeTimeout: .seconds(2),
+        seedProvider: {
+            [
+                LoomOverlaySeed(host: "studio-mac.tailnet.example"),
+                LoomOverlaySeed(host: "100.64.0.25"),
+            ]
+        }
+    )
+)
+```
+
+When a peer is visible through both the overlay and relay signaling, Loom prefers the direct overlay route and still preserves relay fallback if that host is temporarily unreachable.
+
 ## Installation
 
 Add Loom to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/EthanLipnik/Loom.git", from: "1.2.0")
+    .package(url: "https://github.com/EthanLipnik/Loom.git", from: "1.3.0")
 ]
 ```
 

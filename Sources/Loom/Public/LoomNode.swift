@@ -20,6 +20,7 @@ public final class LoomNode {
 
     private var advertiser: BonjourAdvertiser?
     private var directListeners: [LoomTransportKind: LoomDirectListener] = [:]
+    private var overlayProbeServer: LoomOverlayProbeServer?
 
     public init(
         configuration: LoomNetworkConfiguration = .default,
@@ -67,12 +68,18 @@ public final class LoomNode {
     }
 
     public func stopAdvertising() async {
+        let overlayProbeServer = self.overlayProbeServer
+        self.overlayProbeServer = nil
+        let advertiser = self.advertiser
+        self.advertiser = nil
+        let directListeners = self.directListeners.values
+        self.directListeners.removeAll()
+
+        await overlayProbeServer?.stop()
         await advertiser?.stop()
-        advertiser = nil
-        for listener in directListeners.values {
+        for listener in directListeners {
             await listener.stop()
         }
-        directListeners.removeAll()
     }
 
     public func updateAdvertisement(_ advertisement: LoomPeerAdvertisement) async {
@@ -133,75 +140,103 @@ public final class LoomNode {
         helloProvider: @escaping @Sendable () async throws -> LoomSessionHelloRequest,
         onSession: @escaping @Sendable (LoomAuthenticatedSession) -> Void
     ) async throws -> [LoomTransportKind: UInt16] {
-        let identityManager = self.identityManager ?? LoomIdentityManager.shared
-        let baseHello = try await helloProvider()
-        let port = try await startAdvertising(
-            serviceName: serviceName,
-            advertisement: baseHello.advertisement
-        ) { [weak self] rawSession in
-            guard let self else { return }
-            let session = LoomAuthenticatedSession(rawSession: rawSession, role: .receiver, transportKind: .tcp)
-            Task {
-                do {
-                    let hello = try await helloProvider()
-                    _ = try await session.start(
-                        localHello: hello,
-                        identityManager: identityManager,
-                        trustProvider: self.trustProvider
-                    )
-                    onSession(session)
-                } catch {
-                    await session.cancel()
+        do {
+            let identityManager = self.identityManager ?? LoomIdentityManager.shared
+            let baseHello = try await helloProvider()
+            let port = try await startAdvertising(
+                serviceName: serviceName,
+                advertisement: baseHello.advertisement
+            ) { [weak self] rawSession in
+                guard let self else { return }
+                let session = LoomAuthenticatedSession(rawSession: rawSession, role: .receiver, transportKind: .tcp)
+                Task {
+                    do {
+                        let hello = try await helloProvider()
+                        _ = try await session.start(
+                            localHello: hello,
+                            identityManager: identityManager,
+                            trustProvider: self.trustProvider
+                        )
+                        onSession(session)
+                    } catch {
+                        await session.cancel()
+                    }
                 }
             }
-        }
 
-        var ports: [LoomTransportKind: UInt16] = [.tcp: port]
-        await updateAdvertisement(
-            Self.advertisement(
-                baseHello.advertisement,
-                withDirectTransportPorts: ports
+            var ports: [LoomTransportKind: UInt16] = [.tcp: port]
+            await updateAdvertisement(
+                Self.advertisement(
+                    baseHello.advertisement,
+                    withDirectTransportPorts: ports
+                )
             )
-        )
-        guard configuration.enabledDirectTransports.contains(.quic) else {
+            guard configuration.enabledDirectTransports.contains(.quic) else {
+                try await startOverlayProbeServer(serviceName: serviceName)
+                return ports
+            }
+
+            let quicListener = LoomDirectListener(
+                transportKind: .quic,
+                enablePeerToPeer: configuration.enablePeerToPeer
+            )
+            let requestedQUICPort = configuration.quicPort == 0 ? port : configuration.quicPort
+            let quicPort = try await quicListener.start(port: requestedQUICPort) { [weak self] connection in
+                guard let self else { return }
+                let session = LoomAuthenticatedSession(
+                    rawSession: LoomSession(connection: connection),
+                    role: .receiver,
+                    transportKind: .quic
+                )
+                Task {
+                    do {
+                        let hello = try await helloProvider()
+                        _ = try await session.start(
+                            localHello: hello,
+                            identityManager: identityManager,
+                            trustProvider: self.trustProvider
+                        )
+                        onSession(session)
+                    } catch {
+                        await session.cancel()
+                    }
+                }
+            }
+            directListeners[.quic] = quicListener
+            ports[.quic] = quicPort
+            await updateAdvertisement(
+                Self.advertisement(
+                    baseHello.advertisement,
+                    withDirectTransportPorts: ports
+                )
+            )
+            try await startOverlayProbeServer(serviceName: serviceName)
             return ports
+        } catch {
+            await stopAdvertising()
+            throw error
+        }
+    }
+
+    private func startOverlayProbeServer(serviceName: String) async throws {
+        guard let overlayProbePort = configuration.overlayProbePort,
+              let advertiser else {
+            return
         }
 
-        let quicListener = LoomDirectListener(
-            transportKind: .quic,
-            enablePeerToPeer: configuration.enablePeerToPeer
-        )
-        let requestedQUICPort = configuration.quicPort == 0 ? port : configuration.quicPort
-        let quicPort = try await quicListener.start(port: requestedQUICPort) { [weak self] connection in
-            guard let self else { return }
-            let session = LoomAuthenticatedSession(
-                rawSession: LoomSession(connection: connection),
-                role: .receiver,
-                transportKind: .quic
+        let existingProbeServer = overlayProbeServer
+        overlayProbeServer = nil
+        await existingProbeServer?.stop()
+        let probeServer = LoomOverlayProbeServer(port: overlayProbePort) {
+            let advertisement = await advertiser.currentAdvertisement()
+            return LoomOverlayProbeResponse(
+                name: serviceName,
+                deviceType: advertisement.deviceType ?? .unknown,
+                advertisement: advertisement
             )
-            Task {
-                do {
-                    let hello = try await helloProvider()
-                    _ = try await session.start(
-                        localHello: hello,
-                        identityManager: identityManager,
-                        trustProvider: self.trustProvider
-                    )
-                    onSession(session)
-                } catch {
-                    await session.cancel()
-                }
-            }
         }
-        directListeners[.quic] = quicListener
-        ports[.quic] = quicPort
-        await updateAdvertisement(
-            Self.advertisement(
-                baseHello.advertisement,
-                withDirectTransportPorts: ports
-            )
-        )
-        return ports
+        _ = try await probeServer.start()
+        overlayProbeServer = probeServer
     }
 
     private static func advertisement(

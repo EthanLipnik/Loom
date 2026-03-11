@@ -114,4 +114,8 @@ actor BonjourAdvertiser {
     }
 
     var port: UInt16? { listener?.port?.rawValue }
+
+    func currentAdvertisement() -> LoomPeerAdvertisement {
+        advertisement
+    }
 }

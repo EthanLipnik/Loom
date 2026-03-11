@@ -26,6 +26,7 @@ package struct LoomHostRuntimeDependencies: Sendable {
     package let peerProvider: LoomCloudKitPeerProvider?
     package let shareManager: LoomCloudKitShareManager?
     package let relayClient: LoomRelayClient?
+    package let overlayDirectoryConfiguration: LoomOverlayDirectoryConfiguration?
     package let connectionCoordinator: LoomConnectionCoordinator
     package let bootstrapMetadataProvider: (@Sendable () async throws -> LoomBootstrapMetadata?)?
     package let hostAdvertisementMetadata: [String: String]
@@ -40,6 +41,7 @@ package struct LoomHostRuntimeDependencies: Sendable {
         peerProvider: LoomCloudKitPeerProvider?,
         shareManager: LoomCloudKitShareManager?,
         relayClient: LoomRelayClient?,
+        overlayDirectoryConfiguration: LoomOverlayDirectoryConfiguration?,
         connectionCoordinator: LoomConnectionCoordinator,
         bootstrapMetadataProvider: (@Sendable () async throws -> LoomBootstrapMetadata?)?,
         hostAdvertisementMetadata: [String: String],
@@ -53,6 +55,7 @@ package struct LoomHostRuntimeDependencies: Sendable {
         self.peerProvider = peerProvider
         self.shareManager = shareManager
         self.relayClient = relayClient
+        self.overlayDirectoryConfiguration = overlayDirectoryConfiguration
         self.connectionCoordinator = connectionCoordinator
         self.bootstrapMetadataProvider = bootstrapMetadataProvider
         self.hostAdvertisementMetadata = hostAdvertisementMetadata
@@ -76,8 +79,12 @@ package actor LoomHostRuntime {
     private var lastErrorMessage: String?
     private var listeningPorts: [LoomTransportKind: UInt16] = [:]
     private var discoveryObserverToken: UUID?
+    private var overlayDirectory: LoomOverlayDirectory?
+    private var overlayDirectoryObserverToken: UUID?
     private var localPeersByID: [LoomPeerID: LoomPeer] = [:]
     private var localPeerLastSeen: [LoomPeerID: Date] = [:]
+    private var overlayPeersByID: [LoomPeerID: LoomPeer] = [:]
+    private var overlayPeerLastSeen: [LoomPeerID: Date] = [:]
     private var cloudPeersByID: [LoomPeerID: LoomCloudKitPeerInfo] = [:]
     private var relayHeartbeatTask: Task<Void, Never>?
     private var currentRemoteSessionID: String?
@@ -151,6 +158,28 @@ package actor LoomHostRuntime {
             }
             discoveryObserverToken = observerToken
 
+            if let overlayDirectoryConfiguration = dependencies.overlayDirectoryConfiguration {
+                if overlayDirectory == nil {
+                    overlayDirectory = await MainActor.run {
+                        LoomOverlayDirectory(
+                            configuration: overlayDirectoryConfiguration,
+                            localDeviceID: dependencies.deviceID
+                        )
+                    }
+                }
+                if let overlayDirectory {
+                    let token = await MainActor.run {
+                        overlayDirectory.addPeersChangedObserver { [weak self] peers in
+                            guard let self else { return }
+                            Task {
+                                await self.handleOverlayPeersChanged(peers)
+                            }
+                        }
+                    }
+                    overlayDirectoryObserverToken = token
+                }
+            }
+
             let ports = try await dependencies.node.startAuthenticatedAdvertising(
                 serviceName: dependencies.serviceName,
                 helloProvider: { [weak self] in
@@ -180,6 +209,17 @@ package actor LoomHostRuntime {
                     discovery.discoveredPeers
                 }
             )
+            if let overlayDirectory {
+                await MainActor.run {
+                    overlayDirectory.start()
+                }
+                await overlayDirectory.refresh()
+                await handleOverlayPeersChanged(
+                    await MainActor.run {
+                        overlayDirectory.discoveredPeers
+                    }
+                )
+            }
             await refreshCloudPeers()
             try await publishCurrentPeer()
             await notifyStateChanged()
@@ -210,9 +250,19 @@ package actor LoomHostRuntime {
             }
         }
         self.discoveryObserverToken = nil
+        if let overlayDirectoryObserverToken,
+           let overlayDirectory {
+            await MainActor.run {
+                overlayDirectory.removePeersChangedObserver(overlayDirectoryObserverToken)
+                overlayDirectory.stop()
+            }
+        }
+        self.overlayDirectoryObserverToken = nil
 
         localPeersByID.removeAll()
         localPeerLastSeen.removeAll()
+        overlayPeersByID.removeAll()
+        overlayPeerLastSeen.removeAll()
         cloudPeersByID.removeAll()
         listeningPorts.removeAll()
 
@@ -227,6 +277,10 @@ package actor LoomHostRuntime {
             await MainActor.run {
                 discovery.refresh()
             }
+        }
+        if let overlayDirectory,
+           isRunning {
+            await overlayDirectory.refresh()
         }
         await refreshCloudPeers()
     }
@@ -306,9 +360,14 @@ package actor LoomHostRuntime {
 
         let resolvedPeer = currentPeerRecord(for: peerID)
         let localPeer = localPeersByID[peerID]
-        let relaySessionID = localPeer == nil ? resolvedPeer?.relaySessionID : nil
+        let overlayPeer = localPeer == nil ? overlayPeersByID[peerID] : nil
+        let relaySessionID = LoomConnectionCoordinator.relayFallbackSessionID(
+            advertisedRelaySessionID: resolvedPeer?.relaySessionID,
+            localPeer: localPeer,
+            overlayPeer: overlayPeer
+        )
 
-        guard localPeer != nil || relaySessionID != nil else {
+        guard localPeer != nil || overlayPeer != nil || relaySessionID != nil else {
             throw LoomHostError.peerNotFound(peerID)
         }
 
@@ -319,6 +378,7 @@ package actor LoomHostRuntime {
         let session = try await dependencies.connectionCoordinator.connect(
             hello: hello,
             localPeer: localPeer,
+            overlayPeer: overlayPeer,
             relaySessionID: relaySessionID
         )
         let peer = try await resolveConnectedPeer(
@@ -505,6 +565,19 @@ package actor LoomHostRuntime {
         await notifyStateChanged()
     }
 
+    private func handleOverlayPeersChanged(_ peers: [LoomPeer]) async {
+        let now = Date()
+        overlayPeersByID = Dictionary(
+            uniqueKeysWithValues: peers
+                .filter { $0.deviceID != dependencies.deviceID }
+                .map { ($0.id, $0) }
+        )
+        overlayPeerLastSeen = Dictionary(
+            uniqueKeysWithValues: overlayPeersByID.keys.map { ($0, now) }
+        )
+        await notifyStateChanged()
+    }
+
     private func currentSnapshot() -> LoomHostStateSnapshot {
         LoomHostStateSnapshot(
             peers: mergedPeers(),
@@ -515,7 +588,9 @@ package actor LoomHostRuntime {
     }
 
     private func mergedPeers() -> [LoomHostPeerRecord] {
-        let peerIDs = Set(localPeersByID.keys).union(cloudPeersByID.keys)
+        let peerIDs = Set(localPeersByID.keys)
+            .union(overlayPeersByID.keys)
+            .union(cloudPeersByID.keys)
         return peerIDs.compactMap(currentPeerRecord(for:)).sorted { lhs, rhs in
             if lhs.name != rhs.name {
                 return lhs.name < rhs.name
@@ -526,13 +601,15 @@ package actor LoomHostRuntime {
 
     private func currentPeerRecord(for peerID: LoomPeerID) -> LoomHostPeerRecord? {
         let localPeer = localPeersByID[peerID]
+        let overlayPeer = overlayPeersByID[peerID]
         let cloudPeer = cloudPeersByID[peerID]
-        guard localPeer != nil || cloudPeer != nil else {
+        guard localPeer != nil || overlayPeer != nil || cloudPeer != nil else {
             return nil
         }
 
-        let deviceType = localPeer?.deviceType ?? cloudPeer?.deviceType ?? .unknown
+        let deviceType = localPeer?.deviceType ?? overlayPeer?.deviceType ?? cloudPeer?.deviceType ?? .unknown
         let advertisement = localPeer?.advertisement
+            ?? overlayPeer?.advertisement
             ?? cloudPeer?.advertisement
             ?? LoomPeerAdvertisement(deviceID: peerID.deviceID, deviceType: deviceType)
         let bootstrapMetadata = LoomHostMetadata(
@@ -544,6 +621,9 @@ package actor LoomHostRuntime {
         if localPeer != nil {
             sources.append(.nearby)
         }
+        if overlayPeer != nil {
+            sources.append(.overlay)
+        }
         if let cloudPeer {
             sources.append(cloudPeer.isShared ? .cloudKitShared : .cloudKitOwn)
             if cloudPeer.relaySessionID != nil {
@@ -552,12 +632,17 @@ package actor LoomHostRuntime {
         }
 
         let localLastSeen = localPeerLastSeen[peerID] ?? .distantPast
+        let overlayLastSeen = overlayPeerLastSeen[peerID] ?? .distantPast
         let cloudLastSeen = cloudPeer?.lastSeen ?? .distantPast
-        let lastSeen = max(localLastSeen, cloudLastSeen)
+        let lastSeen = max(localLastSeen, max(overlayLastSeen, cloudLastSeen))
 
         return LoomHostPeerRecord(
             id: peerID,
-            name: resolvedPeerName(localPeer: localPeer, cloudPeer: cloudPeer),
+            name: resolvedPeerName(
+                localPeer: localPeer,
+                overlayPeer: overlayPeer,
+                cloudPeer: cloudPeer
+            ),
             deviceType: deviceType,
             sources: sources,
             isNearby: localPeer != nil,
@@ -708,11 +793,16 @@ package actor LoomHostRuntime {
 
     private func resolvedPeerName(
         localPeer: LoomPeer?,
+        overlayPeer: LoomPeer?,
         cloudPeer: LoomCloudKitPeerInfo?
     ) -> String {
         if let localPeer,
            !localPeer.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return localPeer.name
+        }
+        if let overlayPeer,
+           !overlayPeer.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return overlayPeer.name
         }
         if let cloudPeer,
            !cloudPeer.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
