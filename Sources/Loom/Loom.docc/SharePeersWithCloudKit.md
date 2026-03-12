@@ -41,7 +41,12 @@ That is especially useful when you want share-participant trust to be bound to a
 Hosts typically publish their app-owned peer record with `LoomCloudKitShareManager`.
 
 ```swift
-let shareManager = LoomCloudKitShareManager(cloudKitManager: cloudKitManager)
+let shareManager = LoomCloudKitShareManager(
+    cloudKitManager: cloudKitManager,
+    shareThumbnailDataProvider: { peerRecord in
+        makeThumbnailData(for: peerRecord)
+    }
+)
 await shareManager.setup()
 
 try await shareManager.registerPeer(
@@ -62,6 +67,20 @@ Notice what gets stored:
 - optional ``LoomBootstrapMetadata``
 
 That pattern matters because it keeps the peer directory aligned with the same identity and reachability data your runtime is already using.
+
+`registerPeer` also retries with reduced field sets when CloudKit rejects undeployed optional schema, so apps can publish base peer records while production schema catches up.
+
+## Refresh and reuse shares
+
+If your app already created a share for the current peer record, `createShare()` refreshes that existing share before reuse instead of creating an unrelated duplicate.
+
+```swift
+await shareManager.refresh()
+
+let share = try await shareManager.createShare()
+```
+
+That is also where the optional `shareThumbnailDataProvider` hook applies app-owned presentation metadata without moving share lifecycle ownership out of `LoomCloudKit`.
 
 ## Fetch your own and shared peers
 

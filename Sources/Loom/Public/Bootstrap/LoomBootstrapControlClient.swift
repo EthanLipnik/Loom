@@ -40,16 +40,35 @@ public enum LoomBootstrapControlError: LocalizedError, Sendable, Equatable {
 
 /// Daemon handoff result.
 public struct LoomBootstrapControlResult: Sendable, Equatable {
+    /// Whether the requested operation succeeded.
+    public let success: Bool
     /// Current peer session state after the control request.
     public let state: LoomSessionAvailability
     /// Optional peer diagnostic message.
     public let message: String?
+    /// Whether the request can be retried.
+    public let canRetry: Bool
+    /// Remaining retries available (if bounded by peer policy).
+    public let retriesRemaining: Int?
+    /// Cooldown before retry is allowed.
+    public let retryAfterSeconds: Int?
     /// Whether the peer has an active post-unlock session.
     public var isSessionActive: Bool { state.isReady }
 
-    public init(state: LoomSessionAvailability, message: String?) {
+    public init(
+        state: LoomSessionAvailability,
+        message: String?,
+        success: Bool = true,
+        canRetry: Bool? = nil,
+        retriesRemaining: Int? = nil,
+        retryAfterSeconds: Int? = nil
+    ) {
+        self.success = success
         self.state = state
         self.message = message
+        self.canRetry = canRetry ?? !state.isReady
+        self.retriesRemaining = retriesRemaining
+        self.retryAfterSeconds = retryAfterSeconds
     }
 }
 
@@ -125,7 +144,11 @@ public struct LoomDefaultBootstrapControlClient: LoomBootstrapControlClient {
         )
         return LoomBootstrapControlResult(
             state: response.availability,
-            message: response.message
+            message: response.message,
+            success: response.success,
+            canRetry: response.canRetry,
+            retriesRemaining: response.retriesRemaining,
+            retryAfterSeconds: response.retryAfterSeconds
         )
     }
 
@@ -179,7 +202,11 @@ public struct LoomDefaultBootstrapControlClient: LoomBootstrapControlClient {
 
         return LoomBootstrapControlResult(
             state: response.availability,
-            message: response.message
+            message: response.message,
+            success: response.success,
+            canRetry: response.canRetry,
+            retriesRemaining: response.retriesRemaining,
+            retryAfterSeconds: response.retryAfterSeconds
         )
     }
 }

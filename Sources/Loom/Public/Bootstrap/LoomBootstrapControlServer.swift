@@ -85,47 +85,33 @@ public actor LoomBootstrapControlServer {
         connection.start(queue: .global(qos: .utility))
         defer { connection.cancel() }
 
+        var requestID: UUID?
+
         do {
             try await awaitReady(connection)
             let requestData = try await receiveLine(
                 over: connection,
                 maxBytes: LoomMessageLimits.maxBootstrapControlLineBytes
             )
+            requestID = Self.extractRequestID(from: requestData)
             let request = try JSONDecoder().decode(LoomBootstrapControlRequest.self, from: requestData)
+            requestID = request.requestID
             let peer = try await validate(request, endpoint: connection.endpoint.debugDescription)
             let responseResult = try await process(request, peer: peer)
             let response = LoomBootstrapControlResponse(
                 requestID: request.requestID,
-                success: true,
+                success: responseResult.success,
                 availability: responseResult.state,
                 message: responseResult.message,
-                canRetry: !responseResult.isSessionActive,
-                retriesRemaining: nil,
-                retryAfterSeconds: nil
+                canRetry: responseResult.canRetry,
+                retriesRemaining: responseResult.retriesRemaining,
+                retryAfterSeconds: responseResult.retryAfterSeconds
             )
             try await sendLine(response, over: connection)
         } catch let error as LoomBootstrapControlError {
-            let response = LoomBootstrapControlResponse(
-                requestID: UUID(),
-                success: false,
-                availability: .unavailable,
-                message: error.errorDescription,
-                canRetry: false,
-                retriesRemaining: nil,
-                retryAfterSeconds: nil
-            )
-            try? await sendLine(response, over: connection)
+            try? await sendLine(Self.makeErrorResponse(requestID: requestID, message: error.errorDescription), over: connection)
         } catch {
-            let response = LoomBootstrapControlResponse(
-                requestID: UUID(),
-                success: false,
-                availability: .unavailable,
-                message: error.localizedDescription,
-                canRetry: false,
-                retriesRemaining: nil,
-                retryAfterSeconds: nil
-            )
-            try? await sendLine(response, over: connection)
+            try? await sendLine(Self.makeErrorResponse(requestID: requestID, message: error.localizedDescription), over: connection)
         }
     }
 
@@ -259,6 +245,30 @@ public actor LoomBootstrapControlServer {
                 throw LoomBootstrapControlError.protocolViolation("Bootstrap control request exceeded \(maxBytes) bytes.")
             }
         }
+    }
+
+    private nonisolated static func makeErrorResponse(
+        requestID: UUID?,
+        message: String?
+    ) -> LoomBootstrapControlResponse {
+        LoomBootstrapControlResponse(
+            requestID: requestID ?? UUID(),
+            success: false,
+            availability: .unavailable,
+            message: message,
+            canRetry: false,
+            retriesRemaining: nil,
+            retryAfterSeconds: nil
+        )
+    }
+
+    private nonisolated static func extractRequestID(from data: Data) -> UUID? {
+        guard let object = try? JSONSerialization.jsonObject(with: data),
+              let dictionary = object as? [String: Any],
+              let rawRequestID = dictionary["requestID"] as? String else {
+            return nil
+        }
+        return UUID(uuidString: rawRequestID)
     }
 }
 

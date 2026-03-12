@@ -72,7 +72,7 @@ public final class LoomContainer {
         }
         let cloudKitManager = cloudKitConfiguration.map(LoomCloudKitManager.init(configuration:))
         let peerProvider = cloudKitManager.map(LoomCloudKitPeerProvider.init(cloudKitManager:))
-        let shareManager = cloudKitManager.map(LoomCloudKitShareManager.init(cloudKitManager:))
+        let shareManager = cloudKitManager.map { LoomCloudKitShareManager(cloudKitManager: $0) }
 
         if let cloudKitManager {
             node.trustProvider = LoomCloudKitTrustProvider(

@@ -142,7 +142,7 @@ Add Loom to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/EthanLipnik/Loom.git", from: "1.3.0")
+    .package(url: "https://github.com/EthanLipnik/Loom.git", from: "1.4.0")
 ]
 ```
 
