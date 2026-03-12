@@ -33,7 +33,10 @@ public final class LoomDiscovery {
     private var peersChangedObservers: [UUID: ([LoomPeer]) -> Void] = [:]
 
     private var browser: NWBrowser?
+    private var txtRecordMonitor: BonjourTXTRecordMonitor?
     private let serviceType: String
+    private var browseResultsByEndpoint: [NWEndpoint: NWBrowser.Result] = [:]
+    private var txtRecordsByService: [BonjourServiceIdentity: [String: String]] = [:]
     private var peerCandidatesByDeviceID: [UUID: [NWEndpoint: LoomHostDiscoveryCandidate]] = [:]
     private var peerIDByEndpoint: [NWEndpoint: UUID] = [:]
     private var peersByID: [LoomPeerID: LoomPeer] = [:]
@@ -59,6 +62,19 @@ public final class LoomDiscovery {
 
         let parameters = NWParameters()
         parameters.includePeerToPeer = enablePeerToPeer
+
+        let txtRecordMonitor = BonjourTXTRecordMonitor(
+            serviceType: serviceType,
+            enablePeerToPeer: enablePeerToPeer
+        )
+        txtRecordMonitor.onTXTRecordChanged = { [weak self] serviceIdentity, txtRecord in
+            self?.handleTXTRecordUpdate(txtRecord, for: serviceIdentity)
+        }
+        txtRecordMonitor.onServiceRemoved = { [weak self] serviceIdentity in
+            self?.handleTXTRecordRemoval(for: serviceIdentity)
+        }
+        txtRecordMonitor.start()
+        self.txtRecordMonitor = txtRecordMonitor
 
         browser = NWBrowser(
             for: .bonjour(type: serviceType, domain: nil),
@@ -87,7 +103,11 @@ public final class LoomDiscovery {
     public func stopDiscovery() {
         browser?.cancel()
         browser = nil
+        txtRecordMonitor?.stop()
+        txtRecordMonitor = nil
         isSearching = false
+        browseResultsByEndpoint.removeAll()
+        txtRecordsByService.removeAll()
         peerCandidatesByDeviceID.removeAll()
         peerIDByEndpoint.removeAll()
         peersByID.removeAll()
@@ -111,11 +131,15 @@ public final class LoomDiscovery {
         for change in changes {
             switch change {
             case let .added(result):
+                browseResultsByEndpoint[result.endpoint] = result
                 addPeer(from: result)
             case let .removed(result):
+                browseResultsByEndpoint.removeValue(forKey: result.endpoint)
                 removePeer(for: result.endpoint)
             case let .changed(old, new, _):
+                browseResultsByEndpoint.removeValue(forKey: old.endpoint)
                 removePeer(for: old.endpoint)
+                browseResultsByEndpoint[new.endpoint] = new
                 addPeer(from: new)
             case .identical:
                 break
@@ -127,27 +151,33 @@ public final class LoomDiscovery {
 
     private func addPeer(from result: NWBrowser.Result) {
         var peerName = "Unknown Peer"
-        var advertisement = LoomPeerAdvertisement()
-        var txtDict: [String: String] = [:]
 
         if case let .service(name, _, _, _) = result.endpoint {
             peerName = name
         }
 
-        let metadata = result.metadata
-        if case let .bonjour(txtRecord) = metadata {
-            for key in txtRecord.dictionary.keys {
-                if let value = txtRecord.dictionary[key] { txtDict[key] = value }
-            }
-            advertisement = LoomPeerAdvertisement.from(txtRecord: txtDict)
+        upsertBonjourPeer(
+            peerName: peerName,
+            endpoint: result.endpoint,
+            txtRecord: txtRecord(for: result)
+        )
+    }
+
+    private func upsertBonjourPeer(
+        peerName: String,
+        endpoint: NWEndpoint,
+        txtRecord: [String: String]
+    ) {
+        let advertisement = LoomPeerAdvertisement.from(txtRecord: txtRecord)
+        if !txtRecord.isEmpty {
             LoomLogger.discovery(
-                "Peer metadata \(peerName): did=\(advertisement.deviceID?.uuidString ?? "nil") type=\(advertisement.deviceType?.rawValue ?? "unknown") keys=\(txtDict.keys.sorted())"
+                "Peer metadata \(peerName): did=\(advertisement.deviceID?.uuidString ?? "nil") type=\(advertisement.deviceType?.rawValue ?? "unknown") keys=\(txtRecord.keys.sorted())"
             )
         }
 
-        let peerID = advertisement.deviceID ?? fallbackPeerID(endpoint: result.endpoint, peerName: peerName)
+        let peerID = advertisement.deviceID ?? fallbackPeerID(endpoint: endpoint, peerName: peerName)
         guard peerID != localDeviceID else {
-            removePeer(for: result.endpoint)
+            removePeer(for: endpoint)
             return
         }
 
@@ -165,15 +195,11 @@ public final class LoomDiscovery {
         let candidate = LoomHostDiscoveryCandidate(
             name: peerName,
             deviceType: normalizedAdvertisement.deviceType ?? .unknown,
-            endpoint: result.endpoint,
+            endpoint: endpoint,
             advertisement: normalizedAdvertisement
         )
 
-        peerIDByEndpoint[result.endpoint] = peerID
-        var candidates = peerCandidatesByDeviceID[peerID] ?? [:]
-        candidates[result.endpoint] = candidate
-        peerCandidatesByDeviceID[peerID] = candidates
-        updatePeerSelection(forDeviceID: peerID)
+        storeCandidate(candidate, for: endpoint, peerID: peerID)
     }
 
     private func fallbackPeerID(endpoint: NWEndpoint, peerName: String) -> UUID {
@@ -197,6 +223,60 @@ public final class LoomDiscovery {
         guard let peerID = peerIDByEndpoint.removeValue(forKey: endpoint) else {
             return
         }
+        removeCandidate(for: endpoint, peerID: peerID)
+    }
+
+    private func txtRecord(for result: NWBrowser.Result) -> [String: String] {
+        if let serviceIdentity = BonjourServiceIdentity(endpoint: result.endpoint),
+           let txtRecord = txtRecordsByService[serviceIdentity] {
+            return txtRecord
+        }
+
+        guard case let .bonjour(txtRecord) = result.metadata else {
+            return [:]
+        }
+
+        return txtRecord.dictionary.reduce(into: [:]) { result, entry in
+            result[entry.key] = entry.value
+        }
+    }
+
+    private func handleTXTRecordUpdate(_ txtRecord: [String: String], for serviceIdentity: BonjourServiceIdentity) {
+        txtRecordsByService[serviceIdentity] = txtRecord
+        refreshPeers(for: serviceIdentity)
+    }
+
+    private func handleTXTRecordRemoval(for serviceIdentity: BonjourServiceIdentity) {
+        txtRecordsByService.removeValue(forKey: serviceIdentity)
+        refreshPeers(for: serviceIdentity)
+    }
+
+    private func refreshPeers(for serviceIdentity: BonjourServiceIdentity) {
+        let matchingResults = browseResultsByEndpoint.values.filter { result in
+            BonjourServiceIdentity(endpoint: result.endpoint) == serviceIdentity
+        }
+        for result in matchingResults {
+            addPeer(from: result)
+        }
+    }
+
+    private func storeCandidate(
+        _ candidate: LoomHostDiscoveryCandidate,
+        for endpoint: NWEndpoint,
+        peerID: UUID
+    ) {
+        if let existingPeerID = peerIDByEndpoint[endpoint], existingPeerID != peerID {
+            removeCandidate(for: endpoint, peerID: existingPeerID)
+        }
+
+        peerIDByEndpoint[endpoint] = peerID
+        var candidates = peerCandidatesByDeviceID[peerID] ?? [:]
+        candidates[endpoint] = candidate
+        peerCandidatesByDeviceID[peerID] = candidates
+        updatePeerSelection(forDeviceID: peerID)
+    }
+
+    private func removeCandidate(for endpoint: NWEndpoint, peerID: UUID) {
         if var candidates = peerCandidatesByDeviceID[peerID] {
             candidates.removeValue(forKey: endpoint)
             if candidates.isEmpty {
@@ -231,7 +311,6 @@ public final class LoomDiscovery {
         guard peer.deviceID != localDeviceID else {
             return
         }
-        peerIDByEndpoint[peer.endpoint] = peer.deviceID
         let candidate = LoomHostDiscoveryCandidate(
             name: peer.name,
             deviceType: peer.deviceType,
@@ -250,10 +329,19 @@ public final class LoomDiscovery {
                 )
                 : peer.advertisement
         )
-        var candidates = peerCandidatesByDeviceID[peer.deviceID] ?? [:]
-        candidates[peer.endpoint] = candidate
-        peerCandidatesByDeviceID[peer.deviceID] = candidates
-        updatePeerSelection(forDeviceID: peer.deviceID)
+        storeCandidate(candidate, for: peer.endpoint, peerID: peer.deviceID)
+    }
+
+    package func upsertBonjourPeerForTesting(
+        peerName: String,
+        endpoint: NWEndpoint,
+        txtRecord: [String: String]
+    ) {
+        upsertBonjourPeer(
+            peerName: peerName,
+            endpoint: endpoint,
+            txtRecord: txtRecord
+        )
     }
 
     package func removePeerForTesting(endpoint: NWEndpoint) {

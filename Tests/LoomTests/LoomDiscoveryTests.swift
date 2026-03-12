@@ -141,6 +141,66 @@ struct LoomDiscoveryTests {
     }
 
     @MainActor
+    @Test("Discovery promotes Bonjour peers from fallback identity to advertised metadata")
+    func discoveryPromotesBonjourPeersFromFallbackIdentityToAdvertisedMetadata() throws {
+        let discovery = LoomDiscovery()
+        let endpoint = NWEndpoint.hostPort(
+            host: "127.0.0.1",
+            port: NWEndpoint.Port(rawValue: 8800)!
+        )
+        let peerName = "Studio Mac"
+        let deviceID = UUID()
+        let advertisedTransport = LoomDirectTransportAdvertisement(
+            transportKind: .tcp,
+            port: 4242,
+            pathKind: .wifi
+        )
+        let advertisedTXTRecord = LoomPeerAdvertisement(
+            deviceID: deviceID,
+            deviceType: .mac,
+            modelIdentifier: "Mac15,9",
+            iconName: "macstudio",
+            machineFamily: "Mac",
+            directTransports: [advertisedTransport],
+            metadata: ["loom.role": "host"]
+        ).toTXTRecord()
+
+        discovery.upsertBonjourPeerForTesting(
+            peerName: peerName,
+            endpoint: endpoint,
+            txtRecord: [:]
+        )
+
+        let fallbackPeer = try #require(discovery.discoveredPeers.first)
+        #expect(fallbackPeer.name == peerName)
+        #expect(fallbackPeer.deviceType == .unknown)
+        #expect(fallbackPeer.deviceID != deviceID)
+        #expect(fallbackPeer.advertisement.deviceID == fallbackPeer.deviceID)
+        #expect(fallbackPeer.advertisement.modelIdentifier == nil)
+        #expect(fallbackPeer.advertisement.iconName == nil)
+
+        discovery.upsertBonjourPeerForTesting(
+            peerName: peerName,
+            endpoint: endpoint,
+            txtRecord: advertisedTXTRecord
+        )
+
+        #expect(discovery.discoveredPeers.count == 1)
+        let resolvedPeer = try #require(discovery.discoveredPeers.first)
+        #expect(resolvedPeer.name == peerName)
+        #expect(resolvedPeer.id == LoomPeerID(deviceID: deviceID))
+        #expect(resolvedPeer.deviceType == .mac)
+        #expect(resolvedPeer.advertisement.deviceID == deviceID)
+        #expect(resolvedPeer.advertisement.deviceType == .mac)
+        #expect(resolvedPeer.advertisement.modelIdentifier == "Mac15,9")
+        #expect(resolvedPeer.advertisement.iconName == "macstudio")
+        #expect(resolvedPeer.advertisement.machineFamily == "Mac")
+        #expect(resolvedPeer.advertisement.directTransports == [advertisedTransport])
+        #expect(resolvedPeer.advertisement.metadata["loom.role"] == "host")
+        #expect(discovery.discoveredPeers.map(\.id).contains(fallbackPeer.id) == false)
+    }
+
+    @MainActor
     private func makePeer(
         id: UUID,
         name: String,
