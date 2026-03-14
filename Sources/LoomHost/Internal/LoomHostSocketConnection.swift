@@ -11,6 +11,8 @@ import Foundation
 import Darwin
 
 package actor LoomHostSocketConnection {
+    private static let maximumBufferedFrameBytes = 1_048_576
+
     private let encoder = JSONEncoder()
     private let onFrame: @Sendable (LoomHostIPCFrame) async -> Void
     private let onClosed: @Sendable () async -> Void
@@ -147,7 +149,14 @@ package actor LoomHostSocketConnection {
 
             if readCount > 0 {
                 bufferedData.append(readBuffer, count: readCount)
+                if bufferedData.count > Self.maximumBufferedFrameBytes {
+                    break
+                }
                 while let newlineIndex = bufferedData.firstIndex(of: 0x0A) {
+                    if newlineIndex > Self.maximumBufferedFrameBytes {
+                        bufferedData.removeAll(keepingCapacity: false)
+                        break
+                    }
                     let frameData = bufferedData.prefix(upTo: newlineIndex)
                     bufferedData.removeSubrange(...newlineIndex)
                     guard !frameData.isEmpty else {
