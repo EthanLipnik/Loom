@@ -28,6 +28,8 @@ Loom owns the peer relationship and connectivity infrastructure:
 
 Your app still owns payload schemas, user experience, and product policy.
 
+Authenticated Loom sessions also expose transport-facing metadata that higher-level products can observe without reaching under the session boundary: a stable session identifier, the current remote endpoint, and async snapshots of path changes on the underlying connection.
+
 ## Topics
 
 ### Essentials

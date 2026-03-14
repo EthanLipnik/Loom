@@ -101,6 +101,8 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
 
 /// Authenticated Loom session that provides generic multiplexed streams.
 public actor LoomAuthenticatedSession: LoomSessionProtocol {
+    /// Stable authenticated-session identifier for app-owned bookkeeping.
+    public nonisolated let id: UUID
     public let rawSession: LoomSession
     public let role: LoomSessionRole
     public let transportKind: LoomTransportKind
@@ -114,16 +116,21 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
     private let incomingStreamContinuation: AsyncStream<LoomMultiplexedStream>.Continuation
     private let incomingStreamObservers = LoomAsyncBroadcaster<LoomMultiplexedStream>()
     private let stateObservers = LoomAsyncBroadcaster<LoomAuthenticatedSessionState>()
+    private let pathObservers = LoomAsyncBroadcaster<LoomSessionNetworkPathSnapshot>()
     private var streams: [UInt16: LoomMultiplexedStream] = [:]
     private var nextOutgoingStreamID: UInt16
     private var readTask: Task<Void, Never>?
     private var securityContext: LoomSessionSecurityContext?
+    private var currentRemoteEndpoint: NWEndpoint?
+    private var currentPathSnapshot: LoomSessionNetworkPathSnapshot?
+    private var transportObserversConfigured = false
 
     public init(
         rawSession: LoomSession,
         role: LoomSessionRole,
         transportKind: LoomTransportKind
     ) {
+        id = UUID()
         self.rawSession = rawSession
         self.role = role
         self.transportKind = transportKind
@@ -138,6 +145,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         incomingStreamContinuation.finish()
         incomingStreamObservers.finish()
         stateObservers.finish()
+        pathObservers.finish()
         readTask?.cancel()
     }
 
@@ -149,6 +157,21 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
     /// Creates an observation stream for lifecycle state transitions.
     public func makeStateObserver() -> AsyncStream<LoomAuthenticatedSessionState> {
         stateObservers.makeStream(initialValue: state)
+    }
+
+    /// Returns the latest remote endpoint observed for this session's transport.
+    public var remoteEndpoint: NWEndpoint? {
+        currentRemoteEndpoint ?? currentPathSnapshot?.remoteEndpoint ?? rawSession.endpoint
+    }
+
+    /// Returns the latest transport-path snapshot observed for this session.
+    public var pathSnapshot: LoomSessionNetworkPathSnapshot? {
+        currentPathSnapshot
+    }
+
+    /// Creates an observation stream for transport-path changes on the underlying connection.
+    public func makePathObserver() -> AsyncStream<LoomSessionNetworkPathSnapshot> {
+        pathObservers.makeStream(initialValue: currentPathSnapshot)
     }
 
     public func start(
@@ -222,6 +245,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             negotiatedFeatures: negotiatedFeatures
         )
         self.context = context
+        configureTransportObserversIfNeeded()
         updateState(.ready)
         readTask = Task { [weak self] in
             await self?.runReadLoop()
@@ -265,16 +289,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
     }
 
     public func cancel() async {
-        updateState(.cancelled)
-        readTask?.cancel()
-        for stream in streams.values {
-            stream.finishInbound()
-        }
-        streams.removeAll(keepingCapacity: false)
-        incomingStreamContinuation.finish()
-        incomingStreamObservers.finish()
-        stateObservers.finish()
-        rawSession.cancel()
+        finishSession(state: .cancelled, cancelUnderlyingConnection: true)
     }
 
     private func runReadLoop() async {
@@ -290,15 +305,10 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             if case .cancelled = state {
                 return
             }
-            updateState(.failed(error.localizedDescription))
-            for stream in streams.values {
-                stream.finishInbound()
-            }
-            streams.removeAll(keepingCapacity: false)
-            incomingStreamContinuation.finish()
-            incomingStreamObservers.finish()
-            stateObservers.finish()
-            rawSession.cancel()
+            finishSession(
+                state: .failed(error.localizedDescription),
+                cancelUnderlyingConnection: true
+            )
         }
     }
 
@@ -411,6 +421,85 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
     private func updateState(_ newState: LoomAuthenticatedSessionState) {
         state = newState
         stateObservers.yield(newState)
+    }
+
+    private func configureTransportObserversIfNeeded() {
+        guard !transportObserversConfigured else { return }
+        transportObserversConfigured = true
+        currentRemoteEndpoint = rawSession.endpoint
+
+        if let path = rawSession.connection.currentPath {
+            applyTransportPathSnapshot(LoomSessionNetworkPathSnapshot(path: path))
+        }
+
+        rawSession.connection.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            Task {
+                await self.handleTransportPathUpdate(path)
+            }
+        }
+        rawSession.connection.stateUpdateHandler = { [weak self] state in
+            guard let self else { return }
+            Task {
+                await self.handleUnderlyingConnectionState(state)
+            }
+        }
+    }
+
+    private func handleTransportPathUpdate(_ path: NWPath) {
+        applyTransportPathSnapshot(LoomSessionNetworkPathSnapshot(path: path))
+    }
+
+    private func applyTransportPathSnapshot(_ snapshot: LoomSessionNetworkPathSnapshot) {
+        currentPathSnapshot = snapshot
+        if let remoteEndpoint = snapshot.remoteEndpoint {
+            currentRemoteEndpoint = remoteEndpoint
+        }
+        pathObservers.yield(snapshot)
+    }
+
+    private func handleUnderlyingConnectionState(_ connectionState: NWConnection.State) {
+        switch connectionState {
+        case let .failed(error):
+            if case .failed = state { return }
+            if case .cancelled = state { return }
+            finishSession(
+                state: .failed(error.localizedDescription),
+                cancelUnderlyingConnection: false
+            )
+        case .cancelled:
+            if case .cancelled = state { return }
+            if case .failed = state { return }
+            finishSession(state: .cancelled, cancelUnderlyingConnection: false)
+        default:
+            break
+        }
+    }
+
+    private func finishSession(
+        state newState: LoomAuthenticatedSessionState,
+        cancelUnderlyingConnection: Bool
+    ) {
+        switch state {
+        case .cancelled, .failed:
+            return
+        default:
+            break
+        }
+
+        updateState(newState)
+        readTask?.cancel()
+        for stream in streams.values {
+            stream.finishInbound()
+        }
+        streams.removeAll(keepingCapacity: false)
+        incomingStreamContinuation.finish()
+        incomingStreamObservers.finish()
+        stateObservers.finish()
+        pathObservers.finish()
+        if cancelUnderlyingConnection {
+            rawSession.cancel()
+        }
     }
 
     package func setNextOutgoingStreamIDForTesting(_ value: UInt16) {

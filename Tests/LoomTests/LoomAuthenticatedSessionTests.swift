@@ -193,6 +193,72 @@ struct LoomAuthenticatedSessionTests {
             Issue.record("Expected LoomError.protocolError, got \(error.localizedDescription).")
         }
     }
+
+    @MainActor
+    @Test("Authenticated sessions expose stable transport metadata")
+    func transportMetadataExposed() async throws {
+        let pair = try await makeLoopbackPair()
+        defer {
+            Task {
+                await pair.stop()
+            }
+        }
+
+        async let clientContext = pair.client.start(
+            localHello: pair.clientHello,
+            identityManager: pair.clientIdentityManager
+        )
+        async let serverContext = pair.server.start(
+            localHello: pair.serverHello,
+            identityManager: pair.serverIdentityManager
+        )
+        _ = try await (clientContext, serverContext)
+
+        #expect(pair.client.id != pair.server.id)
+
+        let clientRemoteEndpoint = try #require(await pair.client.remoteEndpoint)
+        let clientPathSnapshot = try #require(await pair.client.pathSnapshot)
+        #expect(clientPathSnapshot.remoteEndpoint == clientRemoteEndpoint)
+        #expect(clientPathSnapshot.status == .satisfied)
+
+        if case let .hostPort(host, port) = clientRemoteEndpoint {
+            #expect("\(host)" == "127.0.0.1")
+            #expect(port.rawValue > 0)
+        } else {
+            Issue.record("Expected a host/port endpoint for the client transport metadata.")
+        }
+
+        let serverRemoteEndpoint = try #require(await pair.server.remoteEndpoint)
+        let serverPathSnapshot = try #require(await pair.server.pathSnapshot)
+        #expect(serverPathSnapshot.remoteEndpoint == serverRemoteEndpoint)
+        #expect(serverPathSnapshot.status == .satisfied)
+    }
+
+    @MainActor
+    @Test("Authenticated sessions emit the current path snapshot to new observers")
+    func pathObserverReceivesInitialSnapshot() async throws {
+        let pair = try await makeLoopbackPair()
+        defer {
+            Task {
+                await pair.stop()
+            }
+        }
+
+        async let clientContext = pair.client.start(
+            localHello: pair.clientHello,
+            identityManager: pair.clientIdentityManager
+        )
+        async let serverContext = pair.server.start(
+            localHello: pair.serverHello,
+            identityManager: pair.serverIdentityManager
+        )
+        _ = try await (clientContext, serverContext)
+
+        let expectedSnapshot = try #require(await pair.client.pathSnapshot)
+        let observer = await pair.client.makePathObserver()
+        let observedSnapshot = try #require(await firstPathSnapshot(from: observer))
+        #expect(observedSnapshot == expectedSnapshot)
+    }
 }
 
 private struct LoopbackSessionPair {
@@ -295,6 +361,15 @@ private func makeLoopbackPair(
 private func firstPayload(from stream: LoomMultiplexedStream) async -> Data? {
     for await payload in stream.incomingBytes {
         return payload
+    }
+    return nil
+}
+
+private func firstPathSnapshot(
+    from stream: AsyncStream<LoomSessionNetworkPathSnapshot>
+) async -> LoomSessionNetworkPathSnapshot? {
+    for await snapshot in stream {
+        return snapshot
     }
     return nil
 }
