@@ -105,11 +105,13 @@ public final class LoomNode {
     public func makeConnection(
         to endpoint: NWEndpoint,
         using transportKind: LoomTransportKind,
-        enablePeerToPeer: Bool? = nil
+        enablePeerToPeer: Bool? = nil,
+        requiredInterfaceType: NWInterface.InterfaceType? = nil
     ) throws -> NWConnection {
         let parameters = try LoomTransportParametersFactory.makeParameters(
             for: transportKind,
-            enablePeerToPeer: enablePeerToPeer ?? configuration.enablePeerToPeer
+            enablePeerToPeer: enablePeerToPeer ?? configuration.enablePeerToPeer,
+            requiredInterfaceType: requiredInterfaceType
         )
         return NWConnection(to: endpoint, using: parameters)
     }
@@ -119,6 +121,7 @@ public final class LoomNode {
         using transportKind: LoomTransportKind,
         hello: LoomSessionHelloRequest,
         enablePeerToPeer: Bool? = nil,
+        requiredInterfaceType: NWInterface.InterfaceType? = nil,
         queue: DispatchQueue = .global(qos: .userInitiated)
     ) async throws -> LoomAuthenticatedSession {
         let resolvedEnablePeerToPeer = enablePeerToPeer ?? configuration.enablePeerToPeer
@@ -129,11 +132,17 @@ public final class LoomNode {
                 using: transportKind,
                 hello: hello,
                 enablePeerToPeer: resolvedEnablePeerToPeer,
+                requiredInterfaceType: requiredInterfaceType,
                 queue: queue
             )
         }
 
-        let connection = try makeConnection(to: endpoint, using: transportKind, enablePeerToPeer: enablePeerToPeer)
+        let connection = try makeConnection(
+            to: endpoint,
+            using: transportKind,
+            enablePeerToPeer: enablePeerToPeer,
+            requiredInterfaceType: requiredInterfaceType
+        )
         let identityManager = self.identityManager ?? LoomIdentityManager.shared
         let session = makeAuthenticatedSession(
             connection: connection,
@@ -153,29 +162,36 @@ public final class LoomNode {
         }
     }
 
-    /// Races a Bonjour `.service` endpoint connection against a resolved `.hostPort`
-    /// fallback to work around the macOS NECP TLV encoding bug that intermittently prevents
-    /// service-endpoint NWConnections from reaching `.ready` state. This affects all Bonjour
-    /// service endpoints when network extensions (VPNs, Tailscale, etc.) are present.
+    /// Races a Bonjour `.service` endpoint connection against interface-specific resolved
+    /// candidates to work around macOS NECP path-selection issues on multi-interface Macs.
+    /// Candidates are staggered so the first to connect wins and losers are cancelled.
     private func connectWithServiceEndpointRace(
         to serviceEndpoint: NWEndpoint,
         using transportKind: LoomTransportKind,
         hello: LoomSessionHelloRequest,
         enablePeerToPeer: Bool,
+        requiredInterfaceType: NWInterface.InterfaceType? = nil,
         queue: DispatchQueue
     ) async throws -> LoomAuthenticatedSession {
         let tracker = ServiceEndpointRaceSessionTracker()
         let identityManager = self.identityManager ?? LoomIdentityManager.shared
         let trustProvider = self.trustProvider
+        let addInterfaceCandidates = requiredInterfaceType == nil
 
         LoomLogger.session("Racing service endpoint and resolved endpoint for \(serviceEndpoint)")
 
         return try await withThrowingTaskGroup(of: LoomAuthenticatedSession?.self) { group in
+            var candidateCount = 0
+
+            // MARK: Candidate 1 — Service endpoint (immediate, NW default routing)
+
+            candidateCount += 1
             group.addTask {
                 do {
                     let parameters = try LoomTransportParametersFactory.makeParameters(
                         for: transportKind,
-                        enablePeerToPeer: enablePeerToPeer
+                        enablePeerToPeer: enablePeerToPeer,
+                        requiredInterfaceType: requiredInterfaceType
                     )
                     let connection = NWConnection(to: serviceEndpoint, using: parameters)
                     let session = LoomAuthenticatedSession(
@@ -210,63 +226,186 @@ public final class LoomNode {
                 }
             }
 
-            group.addTask {
-                do {
-                    try await Task.sleep(for: .milliseconds(250))
-                } catch {
-                    return nil
-                }
+            // MARK: Candidate 2 — Resolved + Ethernet (200ms delay)
 
-                let resolvedEndpoint: NWEndpoint
-                do {
-                    resolvedEndpoint = try await LoomBonjourServiceEndpointResolver.resolve(
-                        endpoint: serviceEndpoint,
-                        enablePeerToPeer: enablePeerToPeer
-                    )
-                } catch {
-                    LoomLogger.session("Service endpoint race: fallback resolution failed: \(error.localizedDescription)")
-                    return nil
-                }
+            if addInterfaceCandidates {
+                candidateCount += 1
+                group.addTask {
+                    do {
+                        try await Task.sleep(for: .milliseconds(200))
+                    } catch { return nil }
 
-                do {
-                    let parameters = try LoomTransportParametersFactory.makeParameters(
-                        for: transportKind,
-                        enablePeerToPeer: enablePeerToPeer
-                    )
-                    let connection = NWConnection(to: resolvedEndpoint, using: parameters)
-                    let session = LoomAuthenticatedSession(
-                        rawSession: LoomSession(connection: connection),
-                        role: .initiator,
-                        transportKind: transportKind
-                    )
-                    let result: LoomAuthenticatedSession = try await withTaskCancellationHandler {
-                        _ = try await session.start(
-                            localHello: hello,
-                            identityManager: identityManager,
-                            trustProvider: trustProvider,
-                            queue: queue
+                    let resolvedEndpoint: NWEndpoint
+                    do {
+                        resolvedEndpoint = try await LoomBonjourServiceEndpointResolver.resolve(
+                            endpoint: serviceEndpoint,
+                            enablePeerToPeer: false
                         )
-                        return session
-                    } onCancel: {
-                        connection.cancel()
-                    }
-
-                    await tracker.register(result)
-                    guard await tracker.claimWinner(result) else {
-                        await result.cancel()
+                    } catch {
+                        LoomLogger.session("Service endpoint race: ethernet resolution failed: \(error.localizedDescription)")
                         return nil
                     }
-                    LoomLogger.session(
-                        "Service endpoint race: fallback (resolved) candidate connected to \(resolvedEndpoint)"
-                    )
-                    return result
-                } catch {
-                    if !(error is CancellationError) {
-                        LoomLogger.session("Service endpoint race: fallback candidate failed: \(error.localizedDescription)")
+
+                    do {
+                        let parameters = try LoomTransportParametersFactory.makeParameters(
+                            for: transportKind,
+                            enablePeerToPeer: false,
+                            requiredInterfaceType: .wiredEthernet
+                        )
+                        let connection = NWConnection(to: resolvedEndpoint, using: parameters)
+                        let session = LoomAuthenticatedSession(
+                            rawSession: LoomSession(connection: connection),
+                            role: .initiator,
+                            transportKind: transportKind
+                        )
+                        let result: LoomAuthenticatedSession = try await withTaskCancellationHandler {
+                            _ = try await session.start(
+                                localHello: hello,
+                                identityManager: identityManager,
+                                trustProvider: trustProvider,
+                                queue: queue
+                            )
+                            return session
+                        } onCancel: {
+                            connection.cancel()
+                        }
+
+                        await tracker.register(result)
+                        guard await tracker.claimWinner(result) else {
+                            await result.cancel()
+                            return nil
+                        }
+                        LoomLogger.session("Service endpoint race: ethernet candidate connected to \(resolvedEndpoint)")
+                        return result
+                    } catch {
+                        if !(error is CancellationError) {
+                            LoomLogger.session("Service endpoint race: ethernet candidate failed: \(error.localizedDescription)")
+                        }
+                        return nil
                     }
-                    return nil
                 }
             }
+
+            // MARK: Candidate 3 — Resolved + P2P (400ms delay, only if P2P enabled)
+
+            if addInterfaceCandidates, enablePeerToPeer {
+                candidateCount += 1
+                group.addTask {
+                    do {
+                        try await Task.sleep(for: .milliseconds(400))
+                    } catch { return nil }
+
+                    let resolvedEndpoint: NWEndpoint
+                    do {
+                        resolvedEndpoint = try await LoomBonjourServiceEndpointResolver.resolve(
+                            endpoint: serviceEndpoint,
+                            enablePeerToPeer: true
+                        )
+                    } catch {
+                        LoomLogger.session("Service endpoint race: p2p resolution failed: \(error.localizedDescription)")
+                        return nil
+                    }
+
+                    do {
+                        let parameters = try LoomTransportParametersFactory.makeParameters(
+                            for: transportKind,
+                            enablePeerToPeer: true
+                        )
+                        let connection = NWConnection(to: resolvedEndpoint, using: parameters)
+                        let session = LoomAuthenticatedSession(
+                            rawSession: LoomSession(connection: connection),
+                            role: .initiator,
+                            transportKind: transportKind
+                        )
+                        let result: LoomAuthenticatedSession = try await withTaskCancellationHandler {
+                            _ = try await session.start(
+                                localHello: hello,
+                                identityManager: identityManager,
+                                trustProvider: trustProvider,
+                                queue: queue
+                            )
+                            return session
+                        } onCancel: {
+                            connection.cancel()
+                        }
+
+                        await tracker.register(result)
+                        guard await tracker.claimWinner(result) else {
+                            await result.cancel()
+                            return nil
+                        }
+                        LoomLogger.session("Service endpoint race: p2p candidate connected to \(resolvedEndpoint)")
+                        return result
+                    } catch {
+                        if !(error is CancellationError) {
+                            LoomLogger.session("Service endpoint race: p2p candidate failed: \(error.localizedDescription)")
+                        }
+                        return nil
+                    }
+                }
+            }
+
+            // MARK: Candidate 4 — Resolved + WiFi (600ms delay)
+
+            if addInterfaceCandidates {
+                candidateCount += 1
+                group.addTask {
+                    do {
+                        try await Task.sleep(for: .milliseconds(600))
+                    } catch { return nil }
+
+                    let resolvedEndpoint: NWEndpoint
+                    do {
+                        resolvedEndpoint = try await LoomBonjourServiceEndpointResolver.resolve(
+                            endpoint: serviceEndpoint,
+                            enablePeerToPeer: false
+                        )
+                    } catch {
+                        LoomLogger.session("Service endpoint race: wifi resolution failed: \(error.localizedDescription)")
+                        return nil
+                    }
+
+                    do {
+                        let parameters = try LoomTransportParametersFactory.makeParameters(
+                            for: transportKind,
+                            enablePeerToPeer: false,
+                            requiredInterfaceType: .wifi
+                        )
+                        let connection = NWConnection(to: resolvedEndpoint, using: parameters)
+                        let session = LoomAuthenticatedSession(
+                            rawSession: LoomSession(connection: connection),
+                            role: .initiator,
+                            transportKind: transportKind
+                        )
+                        let result: LoomAuthenticatedSession = try await withTaskCancellationHandler {
+                            _ = try await session.start(
+                                localHello: hello,
+                                identityManager: identityManager,
+                                trustProvider: trustProvider,
+                                queue: queue
+                            )
+                            return session
+                        } onCancel: {
+                            connection.cancel()
+                        }
+
+                        await tracker.register(result)
+                        guard await tracker.claimWinner(result) else {
+                            await result.cancel()
+                            return nil
+                        }
+                        LoomLogger.session("Service endpoint race: wifi candidate connected to \(resolvedEndpoint)")
+                        return result
+                    } catch {
+                        if !(error is CancellationError) {
+                            LoomLogger.session("Service endpoint race: wifi candidate failed: \(error.localizedDescription)")
+                        }
+                        return nil
+                    }
+                }
+            }
+
+            // MARK: Collect results
 
             var candidatesFinished = 0
             for try await result in group {
@@ -276,7 +415,7 @@ public final class LoomNode {
                     return session
                 }
                 candidatesFinished += 1
-                if candidatesFinished >= 2 {
+                if candidatesFinished >= candidateCount {
                     group.cancelAll()
                     throw LoomError.protocolError("All service endpoint race candidates failed for \(serviceEndpoint)")
                 }

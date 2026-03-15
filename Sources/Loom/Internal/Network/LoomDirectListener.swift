@@ -65,24 +65,28 @@ package actor LoomDirectListener {
 package enum LoomTransportParametersFactory {
     package static func makeParameters(
         for transportKind: LoomTransportKind,
-        enablePeerToPeer: Bool
+        enablePeerToPeer: Bool,
+        requiredInterfaceType: NWInterface.InterfaceType? = nil
     ) throws -> NWParameters {
+        let parameters: NWParameters
         switch transportKind {
         case .tcp:
-            let parameters = NWParameters.tcp
+            parameters = NWParameters.tcp
             parameters.includePeerToPeer = enablePeerToPeer
             if let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
                 tcpOptions.noDelay = true
                 tcpOptions.enableKeepalive = true
                 tcpOptions.keepaliveInterval = 5
             }
-            return parameters
         case .quic:
             let options = NWProtocolQUIC.Options()
-            let parameters = NWParameters(quic: options)
+            parameters = NWParameters(quic: options)
             parameters.includePeerToPeer = enablePeerToPeer
-            return parameters
         }
+        if let requiredInterfaceType {
+            parameters.requiredInterfaceType = requiredInterfaceType
+        }
+        return parameters
     }
 }
 
