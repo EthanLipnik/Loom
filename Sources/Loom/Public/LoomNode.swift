@@ -449,11 +449,17 @@ public final class LoomNode {
                         )
                         onSession(session)
                     } catch {
-                        LoomLogger.error(
-                            .session,
-                            error: error,
-                            message: "Failed to start authenticated tcp listener session for \(serviceName): "
-                        )
+                        if error is LoomError || error is CancellationError {
+                            LoomLogger.session(
+                                "Authenticated tcp listener session handshake failed for \(serviceName): \(error.localizedDescription)"
+                            )
+                        } else {
+                            LoomLogger.error(
+                                .session,
+                                error: error,
+                                message: "Failed to start authenticated tcp listener session for \(serviceName): "
+                            )
+                        }
                         await session.cancel()
                     }
                 }
@@ -493,11 +499,17 @@ public final class LoomNode {
                         )
                         onSession(session)
                     } catch {
-                        LoomLogger.error(
-                            .session,
-                            error: error,
-                            message: "Failed to start authenticated quic listener session for \(serviceName): "
-                        )
+                        if error is LoomError || error is CancellationError {
+                            LoomLogger.session(
+                                "Authenticated quic listener session handshake failed for \(serviceName): \(error.localizedDescription)"
+                            )
+                        } else {
+                            LoomLogger.error(
+                                .session,
+                                error: error,
+                                message: "Failed to start authenticated quic listener session for \(serviceName): "
+                            )
+                        }
                         await session.cancel()
                     }
                 }
