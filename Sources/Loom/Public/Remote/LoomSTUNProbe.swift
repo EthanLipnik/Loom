@@ -37,6 +37,16 @@ public struct LoomSTUNProbeResult: Sendable {
     }
 }
 
+/// Detected NAT mapping behavior from multi-server STUN probes.
+public enum LoomNATType: String, Sendable {
+    /// Same mapped port regardless of destination (full-cone, restricted-cone, or port-restricted-cone).
+    case endpointIndependent = "endpoint_independent"
+    /// Different mapped port per destination — direct inbound connections will not work.
+    case symmetric = "symmetric"
+    /// Could not determine NAT type (one or both probes failed).
+    case unknown = "unknown"
+}
+
 /// STUN probe entry point for remote preflight.
 public enum LoomSTUNProbe {
     /// Sends a STUN binding request and parses XOR-MAPPED-ADDRESS if available.
@@ -55,6 +65,43 @@ public enum LoomSTUNProbe {
     ///     print("Mapped endpoint: \(result.mappedAddress ?? "?"):\(result.mappedPort ?? 0)")
     /// }
     /// ```
+    /// Probes two STUN servers from the same local port and compares mapped ports.
+    ///
+    /// If both servers report the same mapped port the NAT uses endpoint-independent
+    /// mapping and STUN-based direct connect is viable.  If the ports differ the NAT
+    /// is symmetric and a relay is required.
+    ///
+    /// - Parameters:
+    ///   - localPort: The QUIC listener port to probe from.
+    ///   - timeout: Per-probe timeout.
+    /// - Returns: Detected NAT mapping type.
+    public static func detectNATType(
+        localPort: UInt16,
+        timeout: Duration = .seconds(3)
+    ) async -> LoomNATType {
+        async let probeA = run(
+            host: "stun.cloudflare.com",
+            port: 3478,
+            localPort: localPort,
+            timeout: timeout
+        )
+        async let probeB = run(
+            host: "stun.l.google.com",
+            port: 19302,
+            localPort: localPort,
+            timeout: timeout
+        )
+
+        let (resultA, resultB) = await (probeA, probeB)
+
+        guard resultA.reachable, resultB.reachable,
+              let portA = resultA.mappedPort,
+              let portB = resultB.mappedPort else {
+            return .unknown
+        }
+        return portA == portB ? .endpointIndependent : .symmetric
+    }
+
     public static func run(
         host: String = "stun.cloudflare.com",
         port: UInt16 = 3478,
@@ -88,13 +135,13 @@ public enum LoomSTUNProbe {
         do {
             try await waitForReady(connection, timeout: timeout)
 
-            let transactionID = randomTransactionID()
-            let request = buildBindingRequest(transactionID: transactionID)
+            let transactionID = loomSTUNRandomTransactionID()
+            let request = loomSTUNBuildBindingRequest(transactionID: transactionID)
             try await send(connection, content: request, timeout: timeout)
             let response = try await receive(connection, timeout: timeout)
             connection.cancel()
 
-            if let parsed = parseBindingResponse(response, expectedTransactionID: transactionID) {
+            if let parsed = loomSTUNParseBindingResponse(response, expectedTransactionID: transactionID) {
                 return LoomSTUNProbeResult(
                     reachable: true,
                     mappedAddress: parsed.address,
@@ -110,13 +157,13 @@ public enum LoomSTUNProbe {
     }
 }
 
-private enum LoomSTUNProbeError: LocalizedError {
+package enum LoomSTUNProbeError: LocalizedError {
     case timeout
     case connectionFailed(String)
     case sendFailed(String)
     case receiveFailed(String)
 
-    var errorDescription: String? {
+    package var errorDescription: String? {
         switch self {
         case .timeout:
             "timeout"
@@ -130,7 +177,7 @@ private enum LoomSTUNProbeError: LocalizedError {
     }
 }
 
-private final class ProbeCompletionFlag: @unchecked Sendable {
+package final class ProbeCompletionFlag: @unchecked Sendable {
     private var completed = false
     private let lock = NSLock()
 
@@ -229,7 +276,7 @@ private func receive(_ connection: NWConnection, timeout: Duration) async throws
     }
 }
 
-private func randomTransactionID() -> Data {
+package func loomSTUNRandomTransactionID() -> Data {
     var bytes = [UInt8](repeating: 0, count: 12)
     for index in bytes.indices {
         bytes[index] = UInt8.random(in: 0 ... 255)
@@ -237,7 +284,7 @@ private func randomTransactionID() -> Data {
     return Data(bytes)
 }
 
-private func buildBindingRequest(transactionID: Data) -> Data {
+package func loomSTUNBuildBindingRequest(transactionID: Data) -> Data {
     var data = Data()
     appendUInt16(0x0001, into: &data) // Binding request
     appendUInt16(0x0000, into: &data) // No attributes
@@ -256,7 +303,7 @@ private func appendUInt32(_ value: UInt32, into data: inout Data) {
     data.append(contentsOf: withUnsafeBytes(of: be) { Array($0) })
 }
 
-private func parseBindingResponse(
+package func loomSTUNParseBindingResponse(
     _ data: Data,
     expectedTransactionID: Data
 ) -> (address: String, port: UInt16)? {
