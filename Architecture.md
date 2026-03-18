@@ -35,7 +35,7 @@ It owns:
 
 - peer discovery
 - transport and session lifecycle
-- relay/direct connectivity
+- signaling/direct connectivity
 - identity and trust
 - replay protection
 - diagnostics and instrumentation
@@ -47,7 +47,7 @@ It does not own product-specific:
 
 - service types
 - CloudKit record naming
-- relay header prefixes
+- signaling header prefixes
 - control message schemas
 - stream, window, app, or UI semantics
 
@@ -70,7 +70,7 @@ It does not own product-specific:
 
 ### 3.3 Remote and Bootstrap
 
-- `LoomRelayClient` handles relay-backed remote coordination.
+- `LoomRelayClient` handles signaling-backed remote coordination.
 - `LoomSTUNProbe` discovers external candidate information.
 - `LoomBootstrapEndpointResolver`, `LoomBootstrapControlClient`, `LoomWakeOnLANClient`, and `LoomSSHBootstrapClient` support peer recovery and bootstrap flows.
 

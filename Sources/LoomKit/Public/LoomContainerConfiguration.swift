@@ -52,7 +52,7 @@ public struct LoomContainerConfiguration: Sendable {
     public let remoteSessionID: String?
     /// Transfer-engine tuning used for outgoing and incoming bulk transfers.
     public let transferConfiguration: LoomTransferConfiguration
-    /// Policy used when racing direct candidates before relay fallback.
+    /// Policy used when racing direct candidates before signaling fallback.
     public let directConnectionPolicy: LoomDirectConnectionPolicy
 
     /// Creates a SwiftUI-first LoomKit runtime configuration.

@@ -66,6 +66,6 @@ Accept incoming transfers with ``LoomConnectionHandle/accept(_:to:resumeIfPossib
 
 ## Keep Domain Protocols Above LoomKit
 
-`LoomKit` deliberately stops at transport, discovery, trust, relay reachability, and file transfer. Message schemas, approval UX, retry policy, and app semantics should remain in your app layer.
+`LoomKit` deliberately stops at transport, discovery, trust, signaling reachability, and file transfer. Message schemas, approval UX, retry policy, and app semantics should remain in your app layer.
 
 For a step-by-step walkthrough, see <doc:HandleMessagesAndTransfersWithLoomKit>.

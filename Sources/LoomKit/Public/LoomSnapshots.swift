@@ -52,7 +52,7 @@ public struct LoomPeerSnapshot: Identifiable, Hashable, Sendable {
     public let isNearby: Bool
     /// Indicates whether the peer is visible through a shared CloudKit graph.
     public let isShared: Bool
-    /// Indicates whether the peer currently publishes relay-backed remote access.
+    /// Indicates whether the peer currently publishes signaling-backed remote access.
     public let remoteAccessEnabled: Bool
     /// Remote signaling session identifier published for remote joins, when available.
     public let signalingSessionID: String?

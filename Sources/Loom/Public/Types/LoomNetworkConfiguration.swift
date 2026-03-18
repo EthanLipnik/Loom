@@ -19,6 +19,7 @@ public struct LoomNetworkConfiguration: Sendable {
     public var requireEncryptedMediaOnLocalNetwork: Bool
     public var enabledDirectTransports: Set<LoomTransportKind>
     public var directConnectionPolicy: LoomDirectConnectionPolicy
+    public var quicALPN: [String]
 
     public init(
         serviceType: String = Loom.serviceType,
@@ -30,7 +31,8 @@ public struct LoomNetworkConfiguration: Sendable {
         enablePeerToPeer: Bool = true,
         requireEncryptedMediaOnLocalNetwork: Bool = false,
         enabledDirectTransports: Set<LoomTransportKind> = Set(LoomTransportKind.allCases),
-        directConnectionPolicy: LoomDirectConnectionPolicy = .default
+        directConnectionPolicy: LoomDirectConnectionPolicy = .default,
+        quicALPN: [String] = ["loom"]
     ) {
         self.serviceType = serviceType
         self.controlPort = controlPort
@@ -42,6 +44,7 @@ public struct LoomNetworkConfiguration: Sendable {
         self.requireEncryptedMediaOnLocalNetwork = requireEncryptedMediaOnLocalNetwork
         self.enabledDirectTransports = enabledDirectTransports
         self.directConnectionPolicy = directConnectionPolicy
+        self.quicALPN = quicALPN
     }
 
     public init(
@@ -53,7 +56,8 @@ public struct LoomNetworkConfiguration: Sendable {
         maxPacketSize: Int = Loom.defaultMaxPacketSize,
         enablePeerToPeer: Bool = true,
         requireEncryptedMediaOnLocalNetwork: Bool = false,
-        enabledDirectTransports: Set<LoomTransportKind>
+        enabledDirectTransports: Set<LoomTransportKind>,
+        quicALPN: [String] = ["loom"]
     ) {
         self.init(
             serviceType: serviceType,
@@ -65,7 +69,8 @@ public struct LoomNetworkConfiguration: Sendable {
             enablePeerToPeer: enablePeerToPeer,
             requireEncryptedMediaOnLocalNetwork: requireEncryptedMediaOnLocalNetwork,
             enabledDirectTransports: enabledDirectTransports,
-            directConnectionPolicy: .default
+            directConnectionPolicy: .default,
+            quicALPN: quicALPN
         )
     }
 
@@ -77,7 +82,8 @@ public struct LoomNetworkConfiguration: Sendable {
         maxPacketSize: Int = Loom.defaultMaxPacketSize,
         enablePeerToPeer: Bool = true,
         requireEncryptedMediaOnLocalNetwork: Bool = false,
-        enabledDirectTransports: Set<LoomTransportKind>
+        enabledDirectTransports: Set<LoomTransportKind>,
+        quicALPN: [String] = ["loom"]
     ) {
         self.init(
             serviceType: serviceType,
@@ -89,7 +95,8 @@ public struct LoomNetworkConfiguration: Sendable {
             enablePeerToPeer: enablePeerToPeer,
             requireEncryptedMediaOnLocalNetwork: requireEncryptedMediaOnLocalNetwork,
             enabledDirectTransports: enabledDirectTransports,
-            directConnectionPolicy: .default
+            directConnectionPolicy: .default,
+            quicALPN: quicALPN
         )
     }
 

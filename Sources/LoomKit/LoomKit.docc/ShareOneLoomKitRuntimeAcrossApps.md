@@ -2,7 +2,7 @@
 
 Use this guide when multiple macOS apps in one App Group should behave like one Loom host on the network.
 
-The key architectural point is that `LoomKit` stays the app-facing API surface. You still create one ``LoomContainer`` per process, inject ``LoomContext`` into SwiftUI, and read peers through ``LoomQuery``. The difference is that each process opts into a shared runtime through ``LoomContainerConfiguration/appGroup`` so one App Group-scoped runtime owns discovery, relay presence, and authenticated sessions.
+The key architectural point is that `LoomKit` stays the app-facing API surface. You still create one ``LoomContainer`` per process, inject ``LoomContext`` into SwiftUI, and read peers through ``LoomQuery``. The difference is that each process opts into a shared runtime through ``LoomContainerConfiguration/appGroup`` so one App Group-scoped runtime owns discovery, signaling presence, and authenticated sessions.
 
 ## When To Use It
 
@@ -33,4 +33,4 @@ That is the main reason to learn this from the LoomKit side first: adopting shar
 ## Learn The Setup
 
 - Start with <doc:ShareOneLoomKitRuntimeAcrossMacOSApps> for the step-by-step LoomKit setup.
-- Read <doc:EnableCloudPeersAndRemoteAccess> if the same app also needs CloudKit sharing or relay-backed joins.
+- Read <doc:EnableCloudPeersAndRemoteAccess> if the same app also needs CloudKit sharing or signaling-backed joins.

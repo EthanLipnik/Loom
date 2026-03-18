@@ -2,7 +2,7 @@
     @Intro(title: "Share One LoomKit Runtime Across macOS Apps") {
         In this tutorial, you will keep the normal LoomKit container and context model while opting multiple macOS apps into one App Group-backed Loom runtime.
 
-        The architectural goal is simple: each app keeps its own app-shaped identity in the peer list, but only one shared host owns discovery, relay presence, and authenticated sessions for the Mac.
+        The architectural goal is simple: each app keeps its own app-shaped identity in the peer list, but only one shared host owns discovery, signaling presence, and authenticated sessions for the Mac.
     }
 
     @Section(title: "Describe the shared host at the container boundary") {

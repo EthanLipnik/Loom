@@ -5,11 +5,11 @@
 The intended shape is:
 
 1. A host app runs `LoomShellService` with a `LoomShellHost`.
-2. The host optionally publishes relay presence with `startRemoteAccess`.
-3. A client app discovers peers locally or learns a relay session ID remotely.
+2. The host optionally publishes signaling presence with `startRemoteAccess`.
+3. A client app discovers peers locally or learns a signaling session ID remotely.
 4. The client connects with `LoomShellConnector`, which prefers Loom-native direct paths and only falls back to SSH when needed.
 
-That keeps AWDL, local network transport, relay introduction, and SSH compatibility as one coherent app-level story.
+That keeps AWDL, local network transport, signaling introduction, and SSH compatibility as one coherent app-level story.
 
 ## Start a host
 
@@ -130,8 +130,8 @@ print(result.report)
 Connection order is deterministic:
 
 1. Local Loom-native direct path
-2. Relay-discovered QUIC direct path
-3. Relay-discovered TCP direct path
+2. Signaling-discovered QUIC direct path
+3. Signaling-discovered TCP direct path
 4. Emergency SSH, if explicitly enabled
 
 ## Handle emergency SSH
@@ -206,7 +206,7 @@ do {
 That report is the right place to drive user-facing diagnostics such as:
 
 - "Nearby direct connection failed"
-- "Relay discovered only TCP candidates"
+- "Signaling discovered only TCP candidates"
 - "SSH fallback skipped because no credentials were provided"
 - "SSH host key fingerprint did not match metadata"
 
@@ -216,6 +216,6 @@ For a serious terminal app, keep this architecture boundary:
 
 - Your app owns terminal rendering, tabs, profiles, bookmarks, history, SSH agent UX, and host approval UX.
 - `LoomShell` owns the shell transport contract and transport fallback policy.
-- `Loom` owns authenticated device networking, trust, relay presence, and recovery primitives.
+- `Loom` owns authenticated device networking, trust, signaling presence, and recovery primitives.
 
 That split is what lets you build a polished product without re-implementing AWDL, trust, or direct-connection plumbing each time.

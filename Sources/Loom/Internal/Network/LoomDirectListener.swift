@@ -12,13 +12,16 @@ package actor LoomDirectListener {
     private var listener: NWListener?
     private let transportKind: LoomTransportKind
     private let enablePeerToPeer: Bool
+    private let quicALPN: [String]
 
     package init(
         transportKind: LoomTransportKind,
-        enablePeerToPeer: Bool
+        enablePeerToPeer: Bool,
+        quicALPN: [String] = []
     ) {
         self.transportKind = transportKind
         self.enablePeerToPeer = enablePeerToPeer
+        self.quicALPN = quicALPN
     }
 
     package func start(
@@ -27,7 +30,8 @@ package actor LoomDirectListener {
     ) async throws -> UInt16 {
         let parameters = try LoomTransportParametersFactory.makeParameters(
             for: transportKind,
-            enablePeerToPeer: enablePeerToPeer
+            enablePeerToPeer: enablePeerToPeer,
+            quicALPN: quicALPN
         )
         let actualPort: NWEndpoint.Port = port == 0 ? .any : NWEndpoint.Port(rawValue: port) ?? .any
         listener = try NWListener(using: parameters, on: actualPort)
@@ -66,7 +70,8 @@ package enum LoomTransportParametersFactory {
     package static func makeParameters(
         for transportKind: LoomTransportKind,
         enablePeerToPeer: Bool,
-        requiredInterfaceType: NWInterface.InterfaceType? = nil
+        requiredInterfaceType: NWInterface.InterfaceType? = nil,
+        quicALPN: [String] = []
     ) throws -> NWParameters {
         let parameters: NWParameters
         switch transportKind {
@@ -79,7 +84,9 @@ package enum LoomTransportParametersFactory {
                 tcpOptions.keepaliveInterval = 5
             }
         case .quic:
-            let options = NWProtocolQUIC.Options()
+            let options = quicALPN.isEmpty
+                ? NWProtocolQUIC.Options()
+                : NWProtocolQUIC.Options(alpn: quicALPN)
             parameters = NWParameters(quic: options)
             parameters.includePeerToPeer = enablePeerToPeer
         }

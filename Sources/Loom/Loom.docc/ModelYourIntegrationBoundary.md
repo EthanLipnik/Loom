@@ -82,7 +82,7 @@ If the answer is no, keep it above Loom.
 
 When you introduce Loom to a product, keep this split:
 
-- Loom owns discovery, identity primitives, trust interfaces, relay helpers, STUN, bootstrap transports, and diagnostics.
+- Loom owns discovery, identity primitives, trust interfaces, signaling helpers, STUN, bootstrap transports, and diagnostics.
 - Your app owns message schemas, approval UX, CloudKit schema choices, protocol negotiation, and any domain-specific capability model.
 
 That boundary makes the rest of the tutorial set easier to apply:

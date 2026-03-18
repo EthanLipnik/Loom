@@ -2,7 +2,7 @@
     @Intro(title: "Share a Mac Host Across Apps") {
         In this tutorial, you will configure the `LoomHost` runtime so multiple Loom-based macOS apps in one App Group share a single network owner.
 
-        The important architectural move is to keep app identity and host identity separate. The shared runtime owns discovery, relay presence, and authenticated transport, while each app still contributes its own app-scoped metadata through the host catalog.
+        The important architectural move is to keep app identity and host identity separate. The shared runtime owns discovery, signaling presence, and authenticated transport, while each app still contributes its own app-scoped metadata through the host catalog.
     }
 
     @Section(title: "Define the App Group boundary") {

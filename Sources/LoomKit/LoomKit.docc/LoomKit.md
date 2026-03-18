@@ -4,7 +4,7 @@ Build SwiftUI-first Apple device communication on top of Loom's high-throughput,
 
 ## Overview
 
-`LoomKit` is the high-level product for apps that want a container/context/query API rather than wiring `LoomNode`, discovery, CloudKit, and relay pieces by hand.
+`LoomKit` is the high-level product for apps that want a container/context/query API rather than wiring `LoomNode`, discovery, CloudKit, and signaling pieces by hand.
 
 Use it when you want:
 
@@ -12,12 +12,12 @@ Use it when you want:
 - a main-actor `LoomContext` injected through SwiftUI environment values
 - live `@LoomQuery` peer, connection, and transfer snapshots in SwiftUI views
 - actor-backed `LoomConnectionHandle` values for messages, file transfer, and custom multiplexed streams
-- optional CloudKit-backed peer merging and relay-backed remote reachability publication without changing the app-facing API shape
+- optional CloudKit-backed peer merging and signaling-backed remote reachability publication without changing the app-facing API shape
 - optional App Group-backed shared hosting on macOS when multiple apps should behave like one network host
 
 `LoomKit` sits above `Loom`:
 
-- `Loom` owns discovery, authenticated transport, trust primitives, relay rendezvous, and bootstrap helpers
+- `Loom` owns discovery, authenticated transport, trust primitives, signaling rendezvous, and bootstrap helpers
 - `LoomKit` owns the SwiftUI-facing runtime model, unified peer snapshots, and the app-friendly async handles
 
 The documentation is organized the same way:
@@ -29,7 +29,7 @@ The documentation is organized the same way:
 ## Which Product Should I Use?
 
 - Use `LoomKit` when you want a SwiftUI-first, peer-centric runtime with one `LoomContainer`, a `LoomContext`, live queries, and connection handles.
-- Use `Loom` when you want to wire discovery, advertising, sessions, trust, or relay behavior yourself at a lower level.
+- Use `Loom` when you want to wire discovery, advertising, sessions, trust, or signaling behavior yourself at a lower level.
 - Add `LoomCloudKit` when peer visibility or trust should flow through CloudKit-backed records and shares.
 - Use LoomKit's App Group configuration only for macOS setups where multiple apps should share one underlying Loom runtime.
 - Add `LoomShell` only when your product needs shell/bootstrap-oriented recovery flows above the core transport layer.

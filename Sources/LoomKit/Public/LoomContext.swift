@@ -22,7 +22,7 @@ public final class LoomContext {
     public private(set) var transfers: [LoomTransferSnapshot] = []
     /// Indicates whether the shared Loom runtime is active.
     public private(set) var isRunning = false
-    /// Indicates whether this local peer is currently publishing relay-backed reachability.
+    /// Indicates whether this local peer is currently publishing signaling-backed reachability.
     public private(set) var isPublishingRemoteReachability = false
     /// Current capability projection for the local peer runtime.
     public private(set) var localPeerCapabilities: LoomPeerCapabilities = .none
@@ -97,7 +97,7 @@ public final class LoomContext {
         try await store.connect(to: peer)
     }
 
-    /// Connects through relay using a known remote session identifier.
+    /// Connects through signaling using a known remote session identifier.
     public func connect(remoteSessionID: String) async throws -> LoomConnectionHandle {
         try await store.connect(remoteSessionID: remoteSessionID)
     }
@@ -107,7 +107,7 @@ public final class LoomContext {
         await store.disconnect(connectionID: connection.id)
     }
 
-    /// Publishes relay-backed remote reachability for the local peer.
+    /// Publishes signaling-backed remote reachability for the local peer.
     public func publishRemoteReachability(
         sessionID: String,
         publicHostForTCP: String? = nil
@@ -118,7 +118,7 @@ public final class LoomContext {
         )
     }
 
-    /// Stops publishing relay-backed remote reachability for the local peer.
+    /// Stops publishing signaling-backed remote reachability for the local peer.
     public func stopPublishingRemoteReachability() async {
         await store.stopRemoteHosting()
     }

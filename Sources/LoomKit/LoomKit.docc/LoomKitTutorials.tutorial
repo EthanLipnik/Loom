@@ -1,6 +1,6 @@
 @Tutorials(name: "LoomKit Tutorials") {
     @Intro(title: "Build SwiftUI-first multi-device apps") {
-        These tutorials walk through the high-level LoomKit runtime model: one shared container, environment-injected context, live SwiftUI queries, actor-backed connection handles, optional CloudKit or relay-backed reachability, and optional App Group-backed shared hosting on macOS.
+        These tutorials walk through the high-level LoomKit runtime model: one shared container, environment-injected context, live SwiftUI queries, actor-backed connection handles, optional CloudKit or signaling-backed reachability, and optional App Group-backed shared hosting on macOS.
     }
 
     @Chapter(name: "SwiftUI Runtime") {
@@ -19,10 +19,10 @@
         @TutorialReference(tutorial: "doc:HandleMessagesAndTransfersWithLoomKit")
     }
 
-    @Chapter(name: "Cloud and Relay Reachability") {
-        Use this chapter when your app needs CloudKit-backed peer sharing, relay-backed remote reachability publication, or both.
+    @Chapter(name: "Cloud and Signaling Reachability") {
+        Use this chapter when your app needs CloudKit-backed peer sharing, signaling-backed remote reachability publication, or both.
 
-        @Image(source: "TutorialCloudAndRelay.svg", alt: "Diagram of LoomKit merging nearby peers, CloudKit visibility, and relay reachability into one peer model.")
+        @Image(source: "TutorialCloudAndRelay.svg", alt: "Diagram of LoomKit merging nearby peers, CloudKit visibility, and signaling reachability into one peer model.")
 
         @TutorialReference(tutorial: "doc:AddRemoteAccessAndSharingWithLoomKit")
     }

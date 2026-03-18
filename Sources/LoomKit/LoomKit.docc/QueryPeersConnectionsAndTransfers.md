@@ -38,7 +38,7 @@ struct SidebarView: View {
 
 The values returned by ``LoomQuery`` are snapshots:
 
-- ``LoomPeerSnapshot`` merges nearby discovery, CloudKit visibility, and relay reachability by logical device identifier.
+- ``LoomPeerSnapshot`` merges nearby discovery, CloudKit visibility, and signaling reachability by logical device identifier.
 - ``LoomConnectionSnapshot`` is a UI-friendly projection of a connection's lifecycle and transport kind.
 - ``LoomTransferSnapshot`` tracks progress without forcing the view layer to subscribe directly to transfer streams.
 

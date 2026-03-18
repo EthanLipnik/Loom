@@ -4,12 +4,12 @@
 
 ## Overview
 
-Use `LoomHost` when multiple apps on the same Mac should share one Loom network owner instead of each app independently advertising, publishing relay presence, and opening authenticated sessions.
+Use `LoomHost` when multiple apps on the same Mac should share one Loom network owner instead of each app independently advertising, publishing signaling presence, and opening authenticated sessions.
 
 The package keeps the architectural boundary explicit:
 
 - `LoomHost` owns App Group coordination, Unix-socket IPC, leader election, and host-scoped session virtualization.
-- `Loom` continues to own discovery, identity, trust, transport, and relay primitives.
+- `Loom` continues to own discovery, identity, trust, transport, and signaling primitives.
 - `LoomKit` remains the app-facing container/context layer and can opt into shared hosting without changing its own public interaction model.
 
 Shared-host mode is intentionally scoped:

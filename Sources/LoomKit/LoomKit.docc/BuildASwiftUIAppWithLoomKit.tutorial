@@ -7,7 +7,7 @@
 
     @Section(title: "Create the shared container") {
         @ContentAndMedia {
-            Start with the app boundary. `LoomContainer` is the one shared owner for discovery, authenticated sessions, trust, and any optional CloudKit or relay integration.
+            Start with the app boundary. `LoomContainer` is the one shared owner for discovery, authenticated sessions, trust, and any optional CloudKit or signaling integration.
         }
 
         @Steps {

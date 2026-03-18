@@ -1,6 +1,6 @@
 # Adopt LoomKit in SwiftUI
 
-Use `LoomKit` when you want Loom's nearby discovery, authenticated sessions, transfer engine, optional CloudKit peer sharing, optional relay reachability publication, and optional macOS shared-host mode to show up in SwiftUI as one coherent runtime.
+Use `LoomKit` when you want Loom's nearby discovery, authenticated sessions, transfer engine, optional CloudKit peer sharing, optional signaling reachability publication, and optional macOS shared-host mode to show up in SwiftUI as one coherent runtime.
 
 `LoomKit` is intentionally modeled after SwiftData:
 

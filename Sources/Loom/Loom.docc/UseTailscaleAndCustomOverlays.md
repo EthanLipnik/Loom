@@ -9,13 +9,13 @@ That split is deliberate. Your app owns which hosts exist and which ones are tru
 
 ## Treat Tailscale as direct connectivity
 
-When two devices can reach each other over Tailscale, Loom should treat that path as a direct transport, not as relay-only remote presence.
+When two devices can reach each other over Tailscale, Loom should treat that path as a direct transport, not as signaling-only remote presence.
 
 The usual setup is:
 
 1. publish a local overlay probe listener on each host
 2. feed ``LoomOverlayDirectory`` with MagicDNS names or stable tailnet IP addresses
-3. let Loom race the overlay candidate before falling back to relay
+3. let Loom race the overlay candidate before falling back to signaling
 
 If you are using `LoomKit`, setting `overlayDirectory` on the container configuration is enough. The container wires the same probe port into the underlying ``LoomNode`` automatically.
 
@@ -41,11 +41,11 @@ let container = try LoomContainer(
 
 If you are using ``Loom`` directly, set `overlayProbePort` on ``LoomNetworkConfiguration`` for the local node and construct ``LoomOverlayDirectory`` yourself for remote peer resolution.
 
-## Keep relay as a fallback, not the primary plan
+## Keep signaling as a fallback, not the primary plan
 
-Overlay-discovered peers can still advertise relay reachability. That is the useful shape for Tailscale: use the tailnet path when it is reachable, but keep relay available when the overlay host is stale, asleep, or currently blocked by policy.
+Overlay-discovered peers can still advertise signaling reachability. That is the useful shape for Tailscale: use the tailnet path when it is reachable, but keep signaling available when the overlay host is stale, asleep, or currently blocked by policy.
 
-The key design point is that ``LoomConnectionCoordinator`` plans overlay connectivity before relay without discarding relay fallback. Your app does not need separate policy branches just because the same peer is visible through both systems.
+The key design point is that ``LoomConnectionCoordinator`` plans overlay connectivity before signaling without discarding signaling fallback. Your app does not need separate policy branches just because the same peer is visible through both systems.
 
 ## Build custom seed providers from your own control plane
 

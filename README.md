@@ -44,7 +44,7 @@ Loom is a good fit for things like:
 - Main-actor `LoomContext` injected through SwiftUI environment values
 - Live `@LoomQuery` peer, connection, and transfer snapshots for SwiftUI lists
 - Actor-backed `LoomConnectionHandle` values for message streams, file transfer, and custom multiplexed streams
-- Optional CloudKit-backed peer merging and relay-backed remote reachability without changing the app-facing API
+- Optional CloudKit-backed peer merging and signaling-backed remote reachability without changing the app-facing API
 
 ### Core package: `Loom`
 
@@ -53,7 +53,7 @@ Loom is a good fit for things like:
 - Stable device identity and key management
 - Pluggable trust policy and local trust storage
 - Seed-driven overlay discovery for Tailscale, Headscale, and other VPN-style networks
-- Remote reachability support with relay presence and network probing
+- Remote reachability support with signaling presence and network probing
 - Bootstrap tools for flows like Wake-on-LAN and SSH handoff
 - Diagnostics and instrumentation hooks
 
@@ -62,7 +62,7 @@ Loom is a good fit for things like:
 - Loom-native interactive shell sessions over authenticated Loom transport
 - macOS PTY host runtime for building a native host app quickly
 - Connection policy that prefers Loom-native direct paths before SSH fallback
-- Relay publication helpers for introducer-only remote access
+- Signaling publication helpers for introducer-only remote access
 - OpenSSH fallback runtime with password or private-key authentication
 - Connection attempt reports that are usable in product UI
 
@@ -99,7 +99,7 @@ The main question is whether you want a convenient local-session API only, or a 
 | Networking model | Bonjour discovery plus direct `Network.framework` sessions you can reason about and extend | High-level Apple-managed local peer sessions |
 | Identity model | Stable device identity and signed session setup are first-class | Peer identity is mostly session-oriented and app-specific trust modeling is left to you |
 | Trust decisions | Explicit trust providers and local trust storage | Invitation and certificate hooks exist, but there is no Loom-style trust layer to plug into your product |
-| Remote growth path | Includes relay/STUN support and optional `LoomCloudKit` peer sharing and trust | Focused on nearby/local networking with no built-in remote reachability story |
+| Remote growth path | Includes signaling/STUN support and optional `LoomCloudKit` peer sharing and trust | Focused on nearby/local networking with no built-in remote reachability story |
 | Product boundaries | Keeps your protocol, schema, and app roles above the transport layer | Easy to start, but the framework shape tends to leak into the rest of your app architecture |
 | Diagnostics and operability | Built-in diagnostics and instrumentation hooks | Much thinner observability surface |
 | Best fit | Apps that need a durable multi-device architecture, not just nearby messaging | Quick local-first prototypes or simple nearby collaboration |
@@ -112,7 +112,7 @@ If you need identity, trust, diagnostics, and a path beyond the local network, L
 
 ## Tailscale and custom overlays
 
-Loom can treat Tailscale and other overlay networks as direct connectivity instead of forcing those peers through relay-only flows. The model is intentionally simple: publish a small overlay probe listener on each Loom host, and provide `LoomOverlayDirectory` with the host names or IP addresses your app already trusts.
+Loom can treat Tailscale and other overlay networks as direct connectivity instead of forcing those peers through signaling-only flows. The model is intentionally simple: publish a small overlay probe listener on each Loom host, and provide `LoomOverlayDirectory` with the host names or IP addresses your app already trusts.
 
 That means Loom does not depend on a specific control plane. You can feed the directory with MagicDNS names, stable overlay IPs, or results from your own inventory service:
 
@@ -134,7 +134,7 @@ let configuration = LoomContainerConfiguration(
 )
 ```
 
-When a peer is visible through both the overlay and relay signaling, Loom prefers the direct overlay route and still preserves relay fallback if that host is temporarily unreachable.
+When a peer is visible through both the overlay and remote signaling, Loom prefers the direct overlay route and still preserves signaling fallback if that host is temporarily unreachable.
 
 ## Installation
 
@@ -229,7 +229,7 @@ struct ContentView: View {
 }
 ```
 
-That is the intended default. You can add CloudKit-backed peer sharing, trust, and relay publication through `LoomContainerConfiguration` without changing the SwiftUI-facing API shape.
+That is the intended default. You can add CloudKit-backed peer sharing, trust, and signaling publication through `LoomContainerConfiguration` without changing the SwiftUI-facing API shape.
 
 ## Build from primitives when needed
 

@@ -17,7 +17,7 @@ public enum LoomPeerFilter: Sendable {
     case overlay
     /// Include only peers visible through a shared CloudKit graph.
     case shared
-    /// Include only peers that currently publish relay-backed remote reachability.
+    /// Include only peers that currently publish signaling-backed remote reachability.
     case remoteAccessEnabled
 }
 

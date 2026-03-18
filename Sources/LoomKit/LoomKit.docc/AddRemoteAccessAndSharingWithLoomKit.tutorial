@@ -1,11 +1,11 @@
 @Tutorial(time: 25) {
     @Intro(title: "Add Remote Access and Sharing with LoomKit") {
-        In this tutorial, you will extend a SwiftUI-first LoomKit app with CloudKit peer visibility, relay-backed remote reachability publication, and app-owned share acceptance.
+        In this tutorial, you will extend a SwiftUI-first LoomKit app with CloudKit peer visibility, signaling-backed remote reachability publication, and app-owned share acceptance.
 
-        The important design constraint stays the same: nearby discovery, CloudKit, and relay all project into one `LoomPeerSnapshot` model instead of creating three unrelated code paths in the app.
+        The important design constraint stays the same: nearby discovery, CloudKit, and signaling all project into one `LoomPeerSnapshot` model instead of creating three unrelated code paths in the app.
     }
 
-    @Section(title: "Configure CloudKit and relay at the app boundary") {
+    @Section(title: "Configure CloudKit and signaling at the app boundary") {
         @ContentAndMedia {
             Keep the optional systems in the container configuration so the rest of the app can continue talking to `LoomContext`, `LoomQuery`, and `LoomConnectionHandle`.
         }
@@ -17,7 +17,7 @@
             }
 
             @Step {
-                Add relay configuration and choose the trust mode your app wants.
+                Add signaling configuration and choose the trust mode your app wants.
                 @Code(name: "RemoteStudioApp.swift", file: AddRemoteAccessAndSharingWithLoomKit-App-02.swift)
                 `LoomTrustMode` lets the app decide whether same-account or shared peers should skip manual trust prompts.
             }
@@ -31,7 +31,7 @@
 
     @Section(title: "Publish and consume remote reachability") {
         @ContentAndMedia {
-            Relay-backed reachability should feel like an extension of the same peer model, not like a separate runtime. Query peers normally, then start or stop publication explicitly through the context.
+            Signaling-backed reachability should feel like an extension of the same peer model, not like a separate runtime. Query peers normally, then start or stop publication explicitly through the context.
         }
 
         @Steps {
@@ -41,7 +41,7 @@
             }
 
             @Step {
-                Start and stop relay reachability publication from the context while reflecting the published state in SwiftUI.
+                Start and stop signaling reachability publication from the context while reflecting the published state in SwiftUI.
                 @Code(name: "RemoteAccessView.swift", file: AddRemoteAccessAndSharingWithLoomKit-RemoteAccessView-02.swift)
             }
 
