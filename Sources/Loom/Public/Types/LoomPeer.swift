@@ -124,7 +124,7 @@ public enum DeviceType: String, Codable, Sendable {
         case .mac: "Mac"
         case .iPad: "iPad"
         case .iPhone: "iPhone"
-        case .vision: "Apple Vision"
+        case .vision: "Apple Vision Pro"
         case .unknown: "Unknown"
         }
     }

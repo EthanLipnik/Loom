@@ -139,7 +139,8 @@ public final class LoomNode {
         enablePeerToPeer: Bool? = nil,
         requiredInterfaceType: NWInterface.InterfaceType? = nil,
         requiredLocalPort: UInt16? = nil,
-        queue: DispatchQueue = .global(qos: .userInitiated)
+        queue: DispatchQueue = .global(qos: .userInitiated),
+        onTrustPending: (@Sendable @MainActor () -> Void)? = nil
     ) async throws -> LoomAuthenticatedSession {
         // Pre-resolve .local mDNS hostnames to IP addresses so the
         // NWConnection doesn't stall in .waiting(ENETDOWN) on first use.
@@ -170,6 +171,7 @@ public final class LoomNode {
                 role: .initiator,
                 transportKind: transportKind
             )
+            await sess.setOnTrustPending(onTrustPending)
             return try await withTaskCancellationHandler {
                 _ = try await sess.start(
                     localHello: hello,
@@ -204,6 +206,9 @@ public final class LoomNode {
     ) async throws -> [LoomTransportKind: UInt16] {
         do {
             let identityManager = self.identityManager ?? LoomIdentityManager.shared
+            // Verify identity is accessible before accepting connections.
+            // Fails fast at startup if Keychain is unavailable.
+            _ = try await MainActor.run { try identityManager.currentIdentity() }
             let baseHello = try await helloProvider()
             let port = try await startAdvertising(
                 serviceName: serviceName,
@@ -222,17 +227,9 @@ public final class LoomNode {
                         )
                         onSession(session)
                     } catch {
-                        if error is LoomError || error is CancellationError {
-                            LoomLogger.session(
-                                "Authenticated tcp listener session handshake failed for \(serviceName): \(error.localizedDescription)"
-                            )
-                        } else {
-                            LoomLogger.error(
-                                .session,
-                                error: error,
-                                message: "Failed to start authenticated tcp listener session for \(serviceName): "
-                            )
-                        }
+                        LoomLogger.session(
+                            "Authenticated tcp listener session failed for \(serviceName): \(error)"
+                        )
                         await session.cancel()
                     }
                 }
@@ -273,17 +270,9 @@ public final class LoomNode {
                             )
                             onSession(session)
                         } catch {
-                            if error is LoomError || error is CancellationError {
-                                LoomLogger.session(
-                                    "Authenticated udp listener session handshake failed for \(serviceName): \(error.localizedDescription)"
-                                )
-                            } else {
-                                LoomLogger.error(
-                                    .session,
-                                    error: error,
-                                    message: "Failed to start authenticated udp listener session for \(serviceName): "
-                                )
-                            }
+                            LoomLogger.session(
+                                "Authenticated udp listener session failed for \(serviceName): \(error)"
+                            )
                             await session.cancel()
                         }
                     }
@@ -328,17 +317,9 @@ public final class LoomNode {
                         )
                         onSession(session)
                     } catch {
-                        if error is LoomError || error is CancellationError {
-                            LoomLogger.session(
-                                "Authenticated quic listener session handshake failed for \(serviceName): \(error.localizedDescription)"
-                            )
-                        } else {
-                            LoomLogger.error(
-                                .session,
-                                error: error,
-                                message: "Failed to start authenticated quic listener session for \(serviceName): "
-                            )
-                        }
+                        LoomLogger.session(
+                            "Authenticated quic listener session failed for \(serviceName): \(error)"
+                        )
                         await session.cancel()
                     }
                 }

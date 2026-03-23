@@ -40,4 +40,7 @@ public enum LoomMessageLimits {
 
     /// Maximum nonce length accepted by replay protection.
     public static let maxReplayNonceLength = 128
+
+    /// Maximum bytes for a trust status frame during the handshake.
+    public static let maxTrustStatusFrameBytes = 64
 }

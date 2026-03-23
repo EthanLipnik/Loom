@@ -213,6 +213,12 @@ public actor LoomTransferEngine {
                 )
             }
         }
+        for (id, state) in incomingTransfersByID where !state.isControlComplete {
+            incomingTransfersByID.removeValue(forKey: id)
+            state.task?.cancel()
+            state.handle.yield(progress(for: state.offer, bytesTransferred: state.bytesReceived, state: .failed))
+        }
+        incomingTransfersContinuation.finish()
     }
 
     private func handleControlMessage(_ message: LoomTransferControlMessage) async throws {
@@ -495,10 +501,6 @@ public actor LoomTransferEngine {
                     throw error
                 }
             }
-            try await stream.close()
-            if let finalState = outgoingTransfers[id] {
-                finalState.handle.yield(progress(for: finalState.offer, bytesTransferred: finalState.offer.byteLength, state: .completed))
-            }
             try await sendControlMessage(
                 LoomTransferControlMessage(
                     kind: .complete,
@@ -506,7 +508,9 @@ public actor LoomTransferEngine {
                     sha256Hex: state.offer.sha256Hex
                 )
             )
-            outgoingTransfers.removeValue(forKey: id)
+            try await stream.close()
+            let finalState = outgoingTransfers.removeValue(forKey: id)
+            finalState?.handle.yield(progress(for: state.offer, bytesTransferred: state.offer.byteLength, state: .completed))
             await scheduler.finishTransfer(id: id)
             LoomInstrumentation.record("loom.transfer.outgoing_complete")
             recordTransferStep("loom.transfer.complete.outgoing.\(resumeMode(for: resumeOffset))")

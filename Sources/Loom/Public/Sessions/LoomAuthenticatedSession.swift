@@ -109,6 +109,22 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
     }
 }
 
+/// Trust status frame exchanged during the Loom handshake between
+/// hello exchange and encryption setup.
+///
+/// The **receiver** (host) sends one or two of these frames:
+/// - If trust resolves quickly: a single `.trusted` or `.denied` frame.
+/// - If trust requires manual approval: a `.pendingApproval` frame first,
+///   then `.trusted` or `.denied` once the user responds.
+///
+/// The **initiator** (client) reads these frames to know the trust state
+/// without relying on timeout heuristics.
+public enum LoomHandshakeTrustStatus: UInt8, Codable, Sendable {
+    case pendingApproval = 0
+    case trusted = 1
+    case denied = 2
+}
+
 /// Authenticated Loom session that provides generic multiplexed streams.
 public actor LoomAuthenticatedSession: LoomSessionProtocol {
     /// Stable authenticated-session identifier for app-owned bookkeeping.
@@ -121,6 +137,15 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
 
     public private(set) var state: LoomAuthenticatedSessionState = .idle
     public private(set) var context: LoomAuthenticatedSessionContext?
+
+    /// Called on the initiator (client) when the receiver (host) signals
+    /// that trust evaluation is pending manual approval.
+    public var onTrustPending: (@Sendable @MainActor () -> Void)?
+
+    /// Sets the trust-pending callback from outside the actor.
+    public func setOnTrustPending(_ handler: (@Sendable @MainActor () -> Void)?) {
+        onTrustPending = handler
+    }
 
     private let transport: any LoomSessionTransport
     private let incomingStreamContinuation: AsyncStream<LoomMultiplexedStream>.Continuation
@@ -246,10 +271,15 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             break
         }
 
-        let trustEvaluation = await resolveTrustEvaluation(
-            for: peerIdentity,
-            trustProvider: trustProvider
-        )
+        let trustEvaluation: LoomTrustEvaluation
+        if role == .receiver {
+            trustEvaluation = try await resolveAndSignalTrust(
+                for: peerIdentity,
+                trustProvider: trustProvider
+            )
+        } else {
+            trustEvaluation = try await receiveHostTrustStatus()
+        }
         if trustEvaluation.decision == .denied {
             updateState(.failed("denied"))
             rawSession.cancel()
@@ -493,6 +523,87 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             )
         }
         return await trustProvider.evaluateTrustOutcome(for: peerIdentity)
+    }
+
+    // MARK: - Handshake Trust Status Signaling
+
+    /// Receiver (host) side: evaluate trust, signaling the peer if approval is pending.
+    ///
+    /// If trust resolves within 500ms, only the final status is sent.
+    /// If trust takes longer (e.g., manual approval dialog), a `.pendingApproval`
+    /// frame is sent first so the client can show a waiting indicator.
+    private func resolveAndSignalTrust(
+        for peerIdentity: LoomPeerIdentity,
+        trustProvider: (any LoomTrustProvider)?
+    ) async throws -> LoomTrustEvaluation {
+        let evaluation: LoomTrustEvaluation = await withTaskGroup(
+            of: LoomTrustEvaluation?.self
+        ) { group in
+            group.addTask {
+                await self.resolveTrustEvaluation(
+                    for: peerIdentity,
+                    trustProvider: trustProvider
+                )
+            }
+
+            group.addTask { [weak self] in
+                try? await Task.sleep(for: .milliseconds(500))
+                guard !Task.isCancelled, let self else { return nil }
+                try? await self.sendTrustStatus(.pendingApproval)
+                return nil
+            }
+
+            var result: LoomTrustEvaluation?
+            for await value in group {
+                if let value {
+                    result = value
+                    group.cancelAll()
+                    break
+                }
+            }
+            return result ?? LoomTrustEvaluation(
+                decision: .denied,
+                shouldShowAutoTrustNotice: false
+            )
+        }
+
+        let finalStatus: LoomHandshakeTrustStatus =
+            evaluation.decision == .denied ? .denied : .trusted
+        try await sendTrustStatus(finalStatus)
+        return evaluation
+    }
+
+    /// Initiator (client) side: receive trust status frames from the host.
+    private func receiveHostTrustStatus() async throws -> LoomTrustEvaluation {
+        while true {
+            let data = try await transport.receiveMessage(
+                maxBytes: LoomMessageLimits.maxTrustStatusFrameBytes
+            )
+            let status = try JSONDecoder().decode(
+                LoomHandshakeTrustStatus.self,
+                from: data
+            )
+            switch status {
+            case .pendingApproval:
+                await onTrustPending?()
+                continue
+            case .trusted:
+                return LoomTrustEvaluation(
+                    decision: .trusted,
+                    shouldShowAutoTrustNotice: false
+                )
+            case .denied:
+                return LoomTrustEvaluation(
+                    decision: .denied,
+                    shouldShowAutoTrustNotice: false
+                )
+            }
+        }
+    }
+
+    private func sendTrustStatus(_ status: LoomHandshakeTrustStatus) async throws {
+        let data = try JSONEncoder().encode(status)
+        try await transport.sendMessage(data)
     }
 
     private func updateState(_ newState: LoomAuthenticatedSessionState) {
