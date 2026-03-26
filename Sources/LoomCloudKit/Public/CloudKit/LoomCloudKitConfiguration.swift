@@ -28,13 +28,30 @@ import Loom
 /// - `name` (String) - Device display name
 /// - `deviceType` (String) - Device type (mac, iPad, iPhone, vision)
 /// - `lastSeen` (Date/Time) - Last activity timestamp
+/// - `identityKeyID` (String) - Identity key identifier
+/// - `identityPublicKey` (Bytes) - Public identity key
 ///
 /// **LoomPeer** (or your custom `peerRecordType`):
+/// - `deviceID` (String) - Stable device UUID
 /// - `name` (String) - Peer display name
 /// - `createdAt` (Date/Time) - Creation timestamp
+/// - `lastSeen` (Date/Time) - Last activity timestamp
+/// - `deviceType` (String) - Device type
+/// - `advertisementBlob` (Bytes) - Serialized peer advertisement
+/// - `identityPublicKey` (Bytes) - Public identity key
+/// - `remoteAccessEnabled` (Int64) - Whether remote access is on
+/// - `relaySessionID` (String) - Signaling session identifier
+/// - `bootstrapMetadataBlob` (Bytes) - Serialized bootstrap metadata
 ///
-/// 5. Add indexes for queryable fields (name, deviceType)
-/// 6. Deploy schema changes to production
+/// **LoomParticipantIdentity** (or your custom `participantIdentityRecordType`):
+/// - `keyID` (String) - Identity key identifier
+/// - `publicKey` (Bytes) - Public identity key
+/// - `lastSeen` (Date/Time) - Last activity timestamp
+///
+/// 5. Add indexes: `recordName` (Queryable) on all types, plus `deviceID` (Queryable) on LoomPeer
+///    and `keyID` (Queryable) on LoomParticipantIdentity
+/// 6. Deploy schema to production via **Deploy Schema to Production…** in the CloudKit Console.
+///    Production schema is additive — fields cannot be removed once deployed.
 ///
 public struct LoomCloudKitConfiguration: Sendable {
     /// CloudKit container identifier (e.g., "iCloud.com.yourcompany.YourApp").

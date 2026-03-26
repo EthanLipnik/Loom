@@ -126,3 +126,79 @@ Use `LoomCloudKitConfiguration` to own:
 - share title
 
 That keeps Loom reusable across apps with different schema and naming requirements.
+
+## Set up and deploy your CloudKit schema
+
+Before any of the above code works, your CloudKit container needs the right record types, fields, and indexes. The Development environment auto-creates schema when your app writes records for the first time, but Production does not — you must deploy explicitly.
+
+### 1. Enable CloudKit on your App ID
+
+1. Open [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/identifiers/list).
+2. Select your App ID, enable **iCloud**, and check **CloudKit**.
+3. Create or select a container (e.g. `iCloud.com.yourcompany.YourApp`).
+
+### 2. Create record types in the Development environment
+
+Open the [CloudKit Console](https://icloud.developer.apple.com/), select your container, and make sure the **Environment** toggle is set to **Development**.
+
+Create these record types with the fields listed below. If you customized the names via ``LoomCloudKitConfiguration``, use your custom names instead of the defaults.
+
+**LoomDevice** (or your custom `deviceRecordType`):
+
+| Field | Type |
+|---|---|
+| `name` | String |
+| `deviceType` | String |
+| `lastSeen` | Date/Time |
+| `identityKeyID` | String |
+| `identityPublicKey` | Bytes |
+
+**LoomPeer** (or your custom `peerRecordType`):
+
+| Field | Type |
+|---|---|
+| `deviceID` | String |
+| `name` | String |
+| `createdAt` | Date/Time |
+| `lastSeen` | Date/Time |
+| `deviceType` | String |
+| `advertisementBlob` | Bytes |
+| `identityPublicKey` | Bytes |
+| `remoteAccessEnabled` | Int(64) |
+| `relaySessionID` | String |
+| `bootstrapMetadataBlob` | Bytes |
+
+**LoomParticipantIdentity** (or your custom `participantIdentityRecordType`):
+
+| Field | Type |
+|---|---|
+| `keyID` | String |
+| `publicKey` | Bytes |
+| `lastSeen` | Date/Time |
+
+> Tip: You can skip the record-type creation step in the Console. Run your app in a debug build against the Development environment first and Loom will auto-create the schema by writing records. The `LoomCloudKitShareManager` retries with progressively fewer fields when the schema rejects undeployed columns, so even a partial schema works during development.
+
+### 3. Add indexes
+
+Still in the Development environment, open each record type and add indexes. At minimum:
+
+- **LoomDevice**: `recordName` (Queryable), `name` (Queryable)
+- **LoomPeer**: `recordName` (Queryable), `deviceID` (Queryable, Searchable)
+- **LoomParticipantIdentity**: `recordName` (Queryable), `keyID` (Queryable, Searchable)
+
+CloudKit requires at least one Queryable index per record type to support `CKQuery` operations.
+
+### 4. Deploy schema to Production
+
+Once you have verified everything works in Development:
+
+1. In the CloudKit Console, go to **Schema** in the left sidebar.
+2. Click **Deploy Schema to Production…** (or **Deploy Schema Changes…** depending on Console version) in the upper area of the schema page.
+3. Review the diff of record types, fields, and indexes that will be deployed.
+4. Confirm the deployment.
+
+> Important: Production schema is additive. You can add new record types and fields, but you cannot remove or rename fields that have already been deployed. Plan your field names carefully before deploying for the first time.
+
+### 5. Verify
+
+Switch the Environment toggle to **Production** and confirm your record types, fields, and indexes are all present. Your App Store and TestFlight builds use the Production environment automatically — only Xcode debug builds hit Development.
