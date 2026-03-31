@@ -39,6 +39,42 @@ struct LoomOrderedUnreliableSendQueueTests {
         recorder.completeSubmission(at: 1, with: nil)
     }
 
+    @Test("Queued sends stop submitting when outstanding budget is full and resume on completion")
+    func queuedSendsRespectOutstandingBudget() async throws {
+        let recorder = SubmissionRecorder()
+        let queue = LoomOrderedUnreliableSendQueue(
+            queue: DispatchQueue(label: "loom.tests.ordered-unreliable.budget", qos: .userInitiated),
+            maxOutstandingPackets: 2,
+            maxOutstandingBytes: 64 * 1024,
+            sendOperation: { data, completion in
+                recorder.record(data, completion: completion)
+            }
+        )
+
+        let first = Data(repeating: 0x01, count: 1200)
+        let second = Data(repeating: 0x02, count: 1200)
+        let third = Data(repeating: 0x03, count: 1200)
+
+        queue.enqueue(first) { _ in }
+        queue.enqueue(second) { _ in }
+        queue.enqueue(third) { _ in }
+
+        try await waitUntil("budget-limited initial submissions") {
+            recorder.submittedCount == 2
+        }
+        #expect(recorder.submittedPayloads == [first, second])
+
+        recorder.completeSubmission(at: 0, with: nil)
+
+        try await waitUntil("third submission released after completion") {
+            recorder.submittedCount == 3
+        }
+        #expect(recorder.submittedPayloads == [first, second, third])
+
+        recorder.completeSubmission(at: 1, with: nil)
+        recorder.completeSubmission(at: 2, with: nil)
+    }
+
     @Test("Queued sends surface connection failures through completion callbacks")
     func queuedSendsSurfaceFailures() async throws {
         let failure = AsyncResultBox<Error?>()
@@ -73,6 +109,8 @@ struct LoomOrderedUnreliableSendQueueTests {
 
         let queue = LoomOrderedUnreliableSendQueue(
             queue: DispatchQueue(label: "loom.tests.ordered-unreliable.close", qos: .userInitiated),
+            maxOutstandingPackets: 1,
+            maxOutstandingBytes: 64 * 1024,
             sendOperation: { data, completion in
                 recorder.record(data, completion: completion)
                 if recorder.submittedCount == 1 {
