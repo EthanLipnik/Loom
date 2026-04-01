@@ -161,6 +161,18 @@ public enum LoomHandshakeTrustStatus: UInt8, Codable, Sendable {
 
 /// Authenticated Loom session that provides generic multiplexed streams.
 public actor LoomAuthenticatedSession: LoomSessionProtocol {
+    private enum EnvelopeReceiveLane {
+        case reliable
+        case unreliable
+    }
+
+    private struct PendingUnopenedUnreliableStreamData {
+        var payloads: [Data]
+        var totalBytes: Int
+        var firstBufferedAt: CFAbsoluteTime
+        var lastBufferedAt: CFAbsoluteTime
+    }
+
     /// Stable authenticated-session identifier for app-owned bookkeeping.
     public nonisolated let id: UUID
     public let rawSession: LoomSession
@@ -207,6 +219,11 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
     private var currentRemoteEndpoint: NWEndpoint?
     private var currentPathSnapshot: LoomSessionNetworkPathSnapshot?
     private var transportObserversConfigured = false
+    private var pendingUnopenedUnreliableDataByStreamID: [UInt16: PendingUnopenedUnreliableStreamData] = [:]
+    private let pendingUnopenedUnreliableDataTTL: CFAbsoluteTime = 2.0
+    private let pendingUnopenedUnreliableDataMaxStreams = 8
+    private let pendingUnopenedUnreliableDataMaxPayloadsPerStream = 768
+    private let pendingUnopenedUnreliableDataMaxBytesPerStream = 2 * 1024 * 1024
 
     public init(
         rawSession: LoomSession,
@@ -426,7 +443,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                     maxBytes: LoomMessageLimits.maxFrameBytes
                 )
                 let envelope = try decryptEnvelope(data)
-                try await handleEnvelope(envelope)
+                try await handleEnvelope(envelope, lane: .reliable)
             }
         } catch {
             if case .cancelled = state {
@@ -446,7 +463,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                     maxBytes: LoomMessageLimits.maxFrameBytes
                 )
                 let envelope = try decryptEnvelope(data)
-                try await handleEnvelope(envelope)
+                try await handleEnvelope(envelope, lane: .unreliable)
             }
         } catch {
             if case .cancelled = state { return }
@@ -454,24 +471,138 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         }
     }
 
-    private func handleEnvelope(_ envelope: LoomSessionStreamEnvelope) async throws {
+    private func handleEnvelope(
+        _ envelope: LoomSessionStreamEnvelope,
+        lane: EnvelopeReceiveLane
+    ) async throws {
         switch envelope.kind {
         case .open:
             let stream = makeStream(id: envelope.streamID, label: envelope.label)
             streams[envelope.streamID] = stream
             incomingStreamContinuation.yield(stream)
             incomingStreamObservers.yield(stream)
+            flushPendingUnopenedUnreliablePayloads(
+                for: envelope.streamID,
+                to: stream
+            )
         case .data:
-            guard let stream = streams[envelope.streamID], let payload = envelope.payload else {
+            guard let payload = envelope.payload else {
+                throw LoomError.protocolError(
+                    "Received data envelope with no payload for Loom stream \(envelope.streamID)."
+                )
+            }
+            guard let stream = streams[envelope.streamID] else {
+                if lane == .unreliable,
+                   transport.receiveSemantics == .independentReliableAndUnreliable {
+                    bufferPendingUnopenedUnreliablePayload(
+                        payload,
+                        for: envelope.streamID
+                    )
+                    return
+                }
                 throw LoomError.protocolError("Received data for unknown Loom stream \(envelope.streamID).")
             }
             stream.yield(payload)
         case .close:
+            discardPendingUnopenedUnreliablePayloads(
+                for: envelope.streamID,
+                reason: "stream-closed-before-open"
+            )
             guard let stream = streams.removeValue(forKey: envelope.streamID) else {
                 return
             }
             stream.finishInbound()
         }
+    }
+
+    private func bufferPendingUnopenedUnreliablePayload(_ payload: Data, for streamID: UInt16) {
+        let now = CFAbsoluteTimeGetCurrent()
+        evictExpiredPendingUnopenedUnreliablePayloads(now: now)
+
+        var buffer = pendingUnopenedUnreliableDataByStreamID[streamID] ??
+            PendingUnopenedUnreliableStreamData(
+                payloads: [],
+                totalBytes: 0,
+                firstBufferedAt: now,
+                lastBufferedAt: now
+            )
+        let nextPayloadCount = buffer.payloads.count + 1
+        let nextTotalBytes = buffer.totalBytes + payload.count
+        guard nextPayloadCount <= pendingUnopenedUnreliableDataMaxPayloadsPerStream,
+              nextTotalBytes <= pendingUnopenedUnreliableDataMaxBytesPerStream else {
+            discardPendingUnopenedUnreliablePayloads(
+                for: streamID,
+                reason: "capacity-exceeded payloads=\(nextPayloadCount) bytes=\(nextTotalBytes)"
+            )
+            return
+        }
+
+        buffer.payloads.append(payload)
+        buffer.totalBytes = nextTotalBytes
+        buffer.lastBufferedAt = now
+        pendingUnopenedUnreliableDataByStreamID[streamID] = buffer
+        evictOldestPendingUnopenedUnreliablePayloadsIfNeeded()
+
+        if buffer.payloads.count == 1 {
+            LoomLogger.transport(
+                "Buffered unreliable payload for unopened Loom stream \(streamID) bytes=\(payload.count)"
+            )
+        }
+    }
+
+    private func flushPendingUnopenedUnreliablePayloads(
+        for streamID: UInt16,
+        to stream: LoomMultiplexedStream
+    ) {
+        guard let buffer = pendingUnopenedUnreliableDataByStreamID.removeValue(forKey: streamID) else {
+            return
+        }
+
+        for payload in buffer.payloads {
+            stream.yield(payload)
+        }
+
+        let ageMs = Int((CFAbsoluteTimeGetCurrent() - buffer.firstBufferedAt) * 1000)
+        LoomLogger.transport(
+            "Delivered buffered unreliable payloads for Loom stream \(streamID) count=\(buffer.payloads.count) bytes=\(buffer.totalBytes) ageMs=\(ageMs)"
+        )
+    }
+
+    private func evictExpiredPendingUnopenedUnreliablePayloads(now: CFAbsoluteTime) {
+        guard !pendingUnopenedUnreliableDataByStreamID.isEmpty else { return }
+
+        let expiredStreamIDs = pendingUnopenedUnreliableDataByStreamID.compactMap { streamID, buffer in
+            now - buffer.lastBufferedAt >= pendingUnopenedUnreliableDataTTL ? streamID : nil
+        }
+        for streamID in expiredStreamIDs {
+            discardPendingUnopenedUnreliablePayloads(for: streamID, reason: "expired-before-open")
+        }
+    }
+
+    private func evictOldestPendingUnopenedUnreliablePayloadsIfNeeded() {
+        let overflow = pendingUnopenedUnreliableDataByStreamID.count - pendingUnopenedUnreliableDataMaxStreams
+        guard overflow > 0 else { return }
+
+        let oldestStreamIDs = pendingUnopenedUnreliableDataByStreamID
+            .sorted { lhs, rhs in
+                lhs.value.firstBufferedAt < rhs.value.firstBufferedAt
+            }
+            .prefix(overflow)
+            .map(\.key)
+        for streamID in oldestStreamIDs {
+            discardPendingUnopenedUnreliablePayloads(for: streamID, reason: "stream-cap-exceeded")
+        }
+    }
+
+    private func discardPendingUnopenedUnreliablePayloads(for streamID: UInt16, reason: String) {
+        guard let buffer = pendingUnopenedUnreliableDataByStreamID.removeValue(forKey: streamID) else {
+            return
+        }
+
+        let ageMs = Int((CFAbsoluteTimeGetCurrent() - buffer.firstBufferedAt) * 1000)
+        LoomLogger.transport(
+            "Discarded buffered unreliable payloads for unopened Loom stream \(streamID) reason=\(reason) count=\(buffer.payloads.count) bytes=\(buffer.totalBytes) ageMs=\(ageMs)"
+        )
     }
 
     private func makeStream(id: UInt16, label: String?) -> LoomMultiplexedStream {
@@ -799,6 +930,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             stream.finishInbound()
         }
         streams.removeAll(keepingCapacity: false)
+        pendingUnopenedUnreliableDataByStreamID.removeAll(keepingCapacity: false)
         incomingStreamContinuation.finish()
         incomingStreamObservers.finish()
         stateObservers.finish()
@@ -811,6 +943,30 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
 
     package func setNextOutgoingStreamIDForTesting(_ value: UInt16) {
         nextOutgoingStreamID = value
+    }
+
+    package func injectUnreliableDataForTesting(streamID: UInt16, payload: Data) async throws {
+        try await handleEnvelope(
+            LoomSessionStreamEnvelope(
+                kind: .data,
+                streamID: streamID,
+                label: nil,
+                payload: payload
+            ),
+            lane: .unreliable
+        )
+    }
+
+    package func injectOpenForTesting(streamID: UInt16, label: String? = nil) async throws {
+        try await handleEnvelope(
+            LoomSessionStreamEnvelope(
+                kind: .open,
+                streamID: streamID,
+                label: label,
+                payload: nil
+            ),
+            lane: .reliable
+        )
     }
 }
 

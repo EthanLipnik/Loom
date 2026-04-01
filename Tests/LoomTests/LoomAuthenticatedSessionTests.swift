@@ -278,6 +278,123 @@ struct LoomAuthenticatedSessionTests {
     }
 
     @MainActor
+    @Test("UDP authenticated sessions buffer out-of-order unreliable data until open")
+    func udpSessionBuffersOutOfOrderUnreliableDataUntilOpen() async throws {
+        let pair = try await makeStartedUDPLoopbackPair()
+        defer {
+            Task {
+                await pair.stop()
+            }
+        }
+
+        let incomingStreamTask = Task<LoomMultiplexedStream?, Never> {
+            for await stream in pair.server.incomingStreams {
+                return stream
+            }
+            return nil
+        }
+
+        let expectedPayload = Data("buffered-before-open".utf8)
+        try await pair.server.injectUnreliableDataForTesting(
+            streamID: 41,
+            payload: expectedPayload
+        )
+        try await pair.server.injectOpenForTesting(streamID: 41, label: "video/buffered")
+
+        let incomingStream = try #require(await incomingStreamTask.value)
+        #expect(incomingStream.label == "video/buffered")
+        #expect(await firstPayload(from: incomingStream) == expectedPayload)
+        #expect(await pair.client.state == .ready)
+        #expect(await pair.server.state == .ready)
+    }
+
+    @MainActor
+    @Test("UDP authenticated sessions keep queued unreliable video payloads coherent on newly opened streams")
+    func udpSessionKeepsQueuedUnreliableVideoPayloadsCoherent() async throws {
+        let pair = try await makeStartedUDPLoopbackPair()
+        defer {
+            Task {
+                await pair.stop()
+            }
+        }
+
+        let incomingStreamTask = Task<LoomMultiplexedStream?, Never> {
+            for await stream in pair.server.incomingStreams {
+                return stream
+            }
+            return nil
+        }
+
+        let mediaStream = try await pair.client.openStream(label: "video/queued")
+        let serverMediaStream = try #require(await incomingStreamTask.value)
+        let expectedPayloads = (0 ..< 32).map { Data("udp-video-\($0)".utf8) }
+        let completionCount = AsyncBox<Int>()
+
+        let receivedPayloadsTask = Task {
+            await collectPayloads(from: serverMediaStream, count: expectedPayloads.count)
+        }
+
+        for payload in expectedPayloads {
+            mediaStream.sendUnreliableQueued(payload) { error in
+                #expect(error == nil)
+                Task {
+                    await completionCount.increment()
+                }
+            }
+        }
+
+        #expect(await receivedPayloadsTask.value == expectedPayloads)
+        let completed = try #require(await completionCount.takeCount(target: expectedPayloads.count, timeoutSeconds: 2.0))
+        #expect(completed == expectedPayloads.count)
+        #expect(await pair.client.state == .ready)
+        #expect(await pair.server.state == .ready)
+        try await mediaStream.close()
+    }
+
+    @MainActor
+    @Test("UDP authenticated sessions keep queued unreliable audio payloads coherent on newly opened streams")
+    func udpSessionKeepsQueuedUnreliableAudioPayloadsCoherent() async throws {
+        let pair = try await makeStartedUDPLoopbackPair()
+        defer {
+            Task {
+                await pair.stop()
+            }
+        }
+
+        let incomingStreamTask = Task<LoomMultiplexedStream?, Never> {
+            for await stream in pair.server.incomingStreams {
+                return stream
+            }
+            return nil
+        }
+
+        let audioStream = try await pair.client.openStream(label: "audio/queued")
+        let serverAudioStream = try #require(await incomingStreamTask.value)
+        let expectedPayloads = (0 ..< 24).map { Data("udp-audio-\($0)".utf8) }
+        let completionCount = AsyncBox<Int>()
+
+        let receivedPayloadsTask = Task {
+            await collectPayloads(from: serverAudioStream, count: expectedPayloads.count)
+        }
+
+        for payload in expectedPayloads {
+            audioStream.sendUnreliableQueued(payload) { error in
+                #expect(error == nil)
+                Task {
+                    await completionCount.increment()
+                }
+            }
+        }
+
+        #expect(await receivedPayloadsTask.value == expectedPayloads)
+        let completed = try #require(await completionCount.takeCount(target: expectedPayloads.count, timeoutSeconds: 2.0))
+        #expect(completed == expectedPayloads.count)
+        #expect(await pair.client.state == .ready)
+        #expect(await pair.server.state == .ready)
+        try await audioStream.close()
+    }
+
+    @MainActor
     @Test("UDP authenticated session blackhole surfaces a timeout failure")
     func udpBlackholeSurfacesTimeoutFailure() async throws {
         let listener = try NWListener(using: .udp, on: .any)
@@ -569,6 +686,99 @@ private func makeLoopbackPair(
         advertisement: LoomPeerAdvertisement(deviceType: .mac),
         supportedFeatures: serverFeatures
     )
+
+    return LoopbackSessionPair(
+        listener: listener,
+        clientIdentityManager: clientIdentityManager,
+        serverIdentityManager: serverIdentityManager,
+        clientHello: clientHello,
+        serverHello: serverHello,
+        client: client,
+        server: server
+    )
+}
+
+@MainActor
+private func makeStartedUDPLoopbackPair(
+    clientFeatures: [String] = LoomSessionHelloRequest.defaultFeatures,
+    serverFeatures: [String] = LoomSessionHelloRequest.defaultFeatures
+) async throws -> LoopbackSessionPair {
+    let clientIdentityManager = LoomIdentityManager(
+        service: "com.ethanlipnik.loom.tests.auth-client-udp.\(UUID().uuidString)",
+        account: "p256-signing",
+        synchronizable: false
+    )
+    let serverIdentityManager = LoomIdentityManager(
+        service: "com.ethanlipnik.loom.tests.auth-server-udp.\(UUID().uuidString)",
+        account: "p256-signing",
+        synchronizable: false
+    )
+
+    let listener = try NWListener(using: .udp, on: .any)
+    let acceptedConnection = AsyncBox<NWConnection>()
+    let readyPort = AsyncBox<UInt16>()
+
+    listener.newConnectionHandler = { connection in
+        Task {
+            await acceptedConnection.set(connection)
+        }
+    }
+    listener.stateUpdateHandler = { state in
+        if case .ready = state, let port = listener.port?.rawValue {
+            Task {
+                await readyPort.set(port)
+            }
+        }
+    }
+    listener.start(queue: .global(qos: .userInitiated))
+
+    let port = try #require(await readyPort.take())
+    let clientConnection = NWConnection(
+        host: "127.0.0.1",
+        port: NWEndpoint.Port(rawValue: port)!,
+        using: .udp
+    )
+    let client = LoomAuthenticatedSession(
+        rawSession: LoomSession(connection: clientConnection),
+        role: .initiator,
+        transportKind: .udp
+    )
+    let clientHello = LoomSessionHelloRequest(
+        deviceID: UUID(),
+        deviceName: "UDP Client",
+        deviceType: .mac,
+        advertisement: LoomPeerAdvertisement(deviceType: .mac),
+        supportedFeatures: clientFeatures
+    )
+    let serverHello = LoomSessionHelloRequest(
+        deviceID: UUID(),
+        deviceName: "UDP Server",
+        deviceType: .mac,
+        advertisement: LoomPeerAdvertisement(deviceType: .mac),
+        supportedFeatures: serverFeatures
+    )
+
+    let clientStartTask = Task {
+        try await client.start(
+            localHello: clientHello,
+            identityManager: clientIdentityManager
+        )
+    }
+
+    let serverConnection = try #require(await acceptedConnection.take())
+    let server = LoomAuthenticatedSession(
+        rawSession: LoomSession(connection: serverConnection),
+        role: .receiver,
+        transportKind: .udp
+    )
+    let serverStartTask = Task {
+        try await server.start(
+            localHello: serverHello,
+            identityManager: serverIdentityManager
+        )
+    }
+
+    _ = try await (clientStartTask.value, serverStartTask.value)
 
     return LoopbackSessionPair(
         listener: listener,
