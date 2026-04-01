@@ -100,6 +100,34 @@ struct LoomOrderedUnreliableSendQueueTests {
         #expect(code == .ENETDOWN)
     }
 
+    @Test("Default outstanding window does not packet-cap small local media bursts")
+    func defaultOutstandingWindowDoesNotPacketCapSmallMediaBursts() async throws {
+        let recorder = SubmissionRecorder()
+        let queue = LoomOrderedUnreliableSendQueue(
+            queue: DispatchQueue(label: "loom.tests.ordered-unreliable.defaults", qos: .userInitiated),
+            sendOperation: { data, completion in
+                recorder.record(data, completion: completion)
+            }
+        )
+
+        let packets = (0 ..< 64).map { index in
+            Data(repeating: UInt8(index & 0xFF), count: 1200)
+        }
+        for packet in packets {
+            queue.enqueue(packet) { _ in }
+        }
+
+        try await waitUntil("default queue submits the entire burst") {
+            recorder.submittedCount == packets.count
+        }
+
+        #expect(recorder.submittedPayloads == packets)
+
+        for index in packets.indices {
+            recorder.completeSubmission(at: index, with: nil)
+        }
+    }
+
     @Test("Closing queue fails pending sends promptly")
     func closingQueueFailsPendingSendsPromptly() async throws {
         let recorder = SubmissionRecorder()

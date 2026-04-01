@@ -83,6 +83,17 @@ It does not own product-specific:
 
 These sinks are generic and reusable. Higher-level packages add their own categories and context without changing Loom’s ownership model.
 
+### 3.5 UDP Session Transport
+
+`LoomReliableChannel` defines the authenticated-session UDP transport contract:
+
+- reliable control messages and unreliable datagrams may share a single UDP connection
+- reliable packets use selective acknowledgements, retransmission, and fragment reassembly
+- the receiver may emit an immediate dedicated ACK after an idle gap instead of waiting for the normal coalescing window
+- timeout decisions consider both retry budget and whether the peer is still actively sending traffic on the session
+
+The transport should fail truly dead peers promptly without collapsing a still-live session just because reliable control and high-rate unreliable traffic briefly contend for receive scheduling.
+
 ## 4. Layering Rule
 
 Packages above Loom should:

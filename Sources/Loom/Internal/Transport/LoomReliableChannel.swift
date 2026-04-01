@@ -33,6 +33,8 @@ package actor LoomReliableChannel: LoomSessionTransport {
     private var hasReceivedFirstPacket = false
     private var fragments: [FragmentKey: FragmentAssembly] = [:]
     private var needsAck = false
+    private var lastInboundPacketAt: CFAbsoluteTime?
+    private var lastDedicatedAckSentAt: CFAbsoluteTime?
 
     // MARK: - Delivery
 
@@ -59,6 +61,9 @@ package actor LoomReliableChannel: LoomSessionTransport {
     private let maxRetries = 5
     private let ackCoalesceInterval: Double = 0.02
     private let fragmentPruneInterval: Double = 5.0
+    private let immediateAckIdleThreshold: Double = 0.05
+    private let recentInboundTimeoutGrace: Double = 5.0
+    private let absolutePendingAckTimeout: Double = 15.0
 
     // MARK: - Lifecycle
 
@@ -395,15 +400,20 @@ package actor LoomReliableChannel: LoomSessionTransport {
 
     private struct PendingPacket {
         let packet: Data
+        let firstSentAt: CFAbsoluteTime
         var sentAt: CFAbsoluteTime
         var retryCount: Int
+        var hasLoggedTimeoutDeferral: Bool
     }
 
     private func trackPending(seq: UInt32, packet: Data) {
+        let now = CFAbsoluteTimeGetCurrent()
         pendingAcks[seq] = PendingPacket(
             packet: packet,
-            sentAt: CFAbsoluteTimeGetCurrent(),
-            retryCount: 0
+            firstSentAt: now,
+            sentAt: now,
+            retryCount: 0,
+            hasLoggedTimeoutDeferral: false
         )
     }
 
@@ -428,7 +438,16 @@ package actor LoomReliableChannel: LoomSessionTransport {
 
         for (seq, var pending) in pendingAcks {
             if now - pending.sentAt >= rto {
-                if pending.retryCount >= maxRetries {
+                let packetAge = now - pending.firstSentAt
+                let lastInboundPacketAge = lastInboundPacketAt.map { now - $0 }
+                if Self.shouldFailPendingReliablePacket(
+                    retryCount: pending.retryCount,
+                    maxRetries: maxRetries,
+                    packetAge: packetAge,
+                    lastInboundPacketAge: lastInboundPacketAge,
+                    recentInboundGrace: recentInboundTimeoutGrace,
+                    maximumPacketLifetime: absolutePendingAckTimeout
+                ) {
                     terminalFailure = LoomConnectionFailure(
                         reason: .timedOut,
                         detail: "Reliable UDP transport timed out awaiting acknowledgement."
@@ -436,6 +455,18 @@ package actor LoomReliableChannel: LoomSessionTransport {
                     failed = true
                     break
                 }
+
+                if pending.retryCount >= maxRetries,
+                   !pending.hasLoggedTimeoutDeferral {
+                    let inboundAgeMs = lastInboundPacketAge.map { Int(($0 * 1000).rounded()) } ?? -1
+                    let packetAgeMs = Int((packetAge * 1000).rounded())
+                    LoomLogger.transport(
+                        "Deferring reliable UDP timeout for seq \(seq) packetAgeMs=\(packetAgeMs) " +
+                            "lastInboundAgeMs=\(inboundAgeMs)"
+                    )
+                    pending.hasLoggedTimeoutDeferral = true
+                }
+
                 pending.retryCount += 1
                 pending.sentAt = now
 
@@ -500,6 +531,8 @@ package actor LoomReliableChannel: LoomSessionTransport {
         guard let header = LoomReliablePacketHeader.deserialize(from: data) else {
             return
         }
+        let now = CFAbsoluteTimeGetCurrent()
+        lastInboundPacketAt = now
 
         // Process piggyback acks
         if hasReceivedFirstPacket || header.flags.contains(.ackOnly) {
@@ -528,7 +561,15 @@ package actor LoomReliableChannel: LoomSessionTransport {
         // Record this sequence for our outgoing acks
         recordReceivedSequence(header.sequence)
         needsAck = true
-        scheduleAckIfNeeded()
+        if Self.shouldSendImmediateReliableAck(
+            lastAckSentAt: lastDedicatedAckSentAt,
+            now: now,
+            idleThreshold: immediateAckIdleThreshold
+        ) {
+            sendDedicatedAckIfNeeded(now: now)
+        } else {
+            scheduleAckIfNeeded()
+        }
 
         if header.flags.contains(.fragment) {
             handleFragment(header: header, payload: payload)
@@ -550,15 +591,43 @@ package actor LoomReliableChannel: LoomSessionTransport {
         }
     }
 
-    private func sendDedicatedAckIfNeeded() {
+    private func sendDedicatedAckIfNeeded(now: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()) {
         guard needsAck else { return }
         needsAck = false
+        lastDedicatedAckSentAt = now
         let header = LoomReliablePacketHeader(
             flags: .ackOnly,
             ackSequence: currentAckSequence(),
             ackBitmap: currentAckBitmap()
         )
         connection.send(content: header.serialize(), completion: .idempotent)
+    }
+
+    package nonisolated static func shouldSendImmediateReliableAck(
+        lastAckSentAt: CFAbsoluteTime?,
+        now: CFAbsoluteTime,
+        idleThreshold: CFAbsoluteTime
+    ) -> Bool {
+        guard let lastAckSentAt else { return true }
+        return now - lastAckSentAt >= idleThreshold
+    }
+
+    package nonisolated static func shouldFailPendingReliablePacket(
+        retryCount: Int,
+        maxRetries: Int,
+        packetAge: CFAbsoluteTime,
+        lastInboundPacketAge: CFAbsoluteTime?,
+        recentInboundGrace: CFAbsoluteTime,
+        maximumPacketLifetime: CFAbsoluteTime
+    ) -> Bool {
+        guard retryCount >= maxRetries else { return false }
+        if packetAge >= maximumPacketLifetime {
+            return true
+        }
+        guard let lastInboundPacketAge else {
+            return true
+        }
+        return lastInboundPacketAge >= recentInboundGrace
     }
 
     // MARK: - Fragment Reassembly

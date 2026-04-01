@@ -15,8 +15,8 @@ package final class LoomOrderedUnreliableSendQueue: @unchecked Sendable {
         let onComplete: @Sendable (NWError?) -> Void
     }
 
-    package static let defaultMaxOutstandingPackets = 32
-    package static let defaultMaxOutstandingBytes = 256 * 1024
+    package static let defaultMaxOutstandingPackets = 1024
+    package static let defaultMaxOutstandingBytes = 2 * 1024 * 1024
 
     private let queue: DispatchQueue
     private let sendOperation: @Sendable (Data, @escaping @Sendable (NWError?) -> Void) -> Void
