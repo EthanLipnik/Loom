@@ -36,6 +36,8 @@ struct LoomCloudKitPeerManagerTests {
         #expect(LoomCloudKitPeerManager.shouldIgnoreParticipantIdentityRecordFailure(CKError(.invalidArguments)))
         #expect(LoomCloudKitPeerManager.shouldIgnoreExistingPeerRecordQueryFailure(CKError(.unknownItem)))
         #expect(LoomCloudKitPeerManager.shouldIgnoreStaleOwnPeerCleanupFailure(CKError(.unknownItem)))
+        #expect(LoomCloudKitPeerManager.shouldIgnoreExistingPeerRecordQueryFailure(CKError(.zoneNotFound)))
+        #expect(LoomCloudKitPeerManager.shouldIgnoreStaleOwnPeerCleanupFailure(CKError(.zoneNotFound)))
     }
 
     @Test("Production schema rejection is classified for peer records")

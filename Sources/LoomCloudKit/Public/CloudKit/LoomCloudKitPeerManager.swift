@@ -365,7 +365,7 @@ public final class LoomCloudKitPeerManager {
             peerRecord = record
             return record
         } catch {
-            if Self.isUnknownItemCloudKitError(error) {
+            if Self.isMissingPeerRecordZoneCloudKitError(error) {
                 self.cachedPeerRecordName = nil
                 peerRecord = nil
                 return nil

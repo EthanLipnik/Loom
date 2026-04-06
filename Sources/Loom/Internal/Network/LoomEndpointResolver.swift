@@ -25,12 +25,15 @@ package enum LoomEndpointResolver {
     ///
     /// Non-local hostnames and raw IP addresses pass through unchanged.
     /// Resolution is raced against `timeout` to avoid blocking forever.
+    /// If pre-resolution fails, the unresolved `.local` hostname is returned
+    /// so Network.framework can still attempt service discovery itself.
     /// Results are cached in memory with a 5-minute TTL; set the
     /// `LOOM_SKIP_ENDPOINT_CACHE` environment variable to bypass.
     package static func resolveHostPort(
         host: String,
         port: UInt16,
-        timeout: Duration = .seconds(5)
+        timeout: Duration = .seconds(5),
+        resolver: @Sendable (String, Duration) async throws -> NWEndpoint.Host = resolveWithTimeout
     ) async throws -> NWEndpoint {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             throw LoomError.protocolError("Invalid port \(port)")
@@ -51,7 +54,19 @@ package enum LoomEndpointResolver {
             return .hostPort(host: entry.host, port: nwPort)
         }
 
-        let resolved = try await resolveWithTimeout(host: host, timeout: timeout)
+        let resolved: NWEndpoint.Host
+        do {
+            resolved = try await resolver(host, timeout)
+        } catch {
+            if error is CancellationError {
+                throw error
+            }
+            LoomLogger.transport(
+                "Failed to pre-resolve \(host): \(error.localizedDescription); " +
+                    "falling back to Network.framework resolution"
+            )
+            return .hostPort(host: NWEndpoint.Host(host), port: nwPort)
+        }
 
         if !skipCache {
             cache.setObject(

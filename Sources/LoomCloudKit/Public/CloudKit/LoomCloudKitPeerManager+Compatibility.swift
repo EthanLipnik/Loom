@@ -35,11 +35,11 @@ public extension LoomCloudKitPeerManager {
     }
 
     nonisolated static func shouldIgnoreExistingPeerRecordQueryFailure(_ error: Error) -> Bool {
-        isUnknownItemCloudKitError(error)
+        isMissingPeerRecordZoneCloudKitError(error)
     }
 
     nonisolated static func shouldIgnoreStaleOwnPeerCleanupFailure(_ error: Error) -> Bool {
-        isUnknownItemCloudKitError(error)
+        isMissingPeerRecordZoneCloudKitError(error)
     }
 
     nonisolated static func isMissingProductionSchemaRecordTypeError(
@@ -62,6 +62,37 @@ public extension LoomCloudKitPeerManager {
         let nsError = error as NSError
         guard nsError.domain == CKError.errorDomain else { return false }
         return nsError.code == CKError.Code.unknownItem.rawValue
+    }
+
+    nonisolated static func isMissingPeerRecordZoneCloudKitError(_ error: Error) -> Bool {
+        isUnknownItemCloudKitError(error) || isMissingPeerZoneCloudKitError(error)
+    }
+
+    nonisolated static func isMissingPeerZoneCloudKitError(_ error: Error) -> Bool {
+        isMissingPeerZoneCloudKitError(error as NSError)
+    }
+
+    private nonisolated static func isMissingPeerZoneCloudKitError(_ error: NSError) -> Bool {
+        if error.domain == CKError.errorDomain,
+           error.code == CKError.Code.zoneNotFound.rawValue {
+            return true
+        }
+
+        if let underlyingError = error.userInfo[NSUnderlyingErrorKey] as? NSError,
+           isMissingPeerZoneCloudKitError(underlyingError) {
+            return true
+        }
+
+        if let partialErrors = error.userInfo[CKPartialErrorsByItemIDKey] as? [AnyHashable: Any] {
+            for value in partialErrors.values {
+                guard let nestedError = value as? NSError else { continue }
+                if isMissingPeerZoneCloudKitError(nestedError) {
+                    return true
+                }
+            }
+        }
+
+        return false
     }
 
     private nonisolated static func cloudKitErrorMessages(for error: Error) -> [String] {
