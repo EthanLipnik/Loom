@@ -41,6 +41,7 @@ struct BonjourServiceIdentity: Hashable {
 
 final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetServiceDelegate {
     var onTXTRecordChanged: (@MainActor (BonjourServiceIdentity, [String: String]) -> Void)?
+    var onServiceResolved: (@MainActor (BonjourServiceIdentity, [NWEndpoint.Host]) -> Void)?
     var onServiceRemoved: (@MainActor (BonjourServiceIdentity) -> Void)?
 
     private let browser = NetServiceBrowser()
@@ -103,6 +104,14 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
     }
 
     func netServiceDidResolveAddress(_ sender: NetService) {
+        let identity = BonjourServiceIdentity(service: sender)
+        let hosts = Self.resolvedHosts(from: sender)
+        if !hosts.isEmpty {
+            Task { @MainActor [onServiceResolved] in
+                onServiceResolved?(identity, hosts)
+            }
+        }
+
         guard let txtData = sender.txtRecordData() else {
             return
         }
@@ -128,5 +137,43 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
             }
             result[entry.key] = value
         }
+    }
+
+    /// Extracts resolved IP addresses from a `NetService`'s address list,
+    /// preferring IPv4 addresses first.
+    private static func resolvedHosts(from service: NetService) -> [NWEndpoint.Host] {
+        guard let addresses = service.addresses, !addresses.isEmpty else {
+            return []
+        }
+
+        var ipv4Hosts: [NWEndpoint.Host] = []
+        var ipv6Hosts: [NWEndpoint.Host] = []
+
+        for addressData in addresses {
+            addressData.withUnsafeBytes { buffer in
+                guard let base = buffer.baseAddress else { return }
+                let family = base.assumingMemoryBound(to: sockaddr.self).pointee.sa_family
+                switch Int32(family) {
+                case AF_INET:
+                    let addr = base.assumingMemoryBound(to: sockaddr_in.self).pointee
+                    var sin_addr = addr.sin_addr
+                    let data = Data(bytes: &sin_addr, count: MemoryLayout<in_addr>.size)
+                    if let ipv4 = IPv4Address(data) {
+                        ipv4Hosts.append(.ipv4(ipv4))
+                    }
+                case AF_INET6:
+                    let addr = base.assumingMemoryBound(to: sockaddr_in6.self).pointee
+                    var sin6_addr = addr.sin6_addr
+                    let data = Data(bytes: &sin6_addr, count: MemoryLayout<in6_addr>.size)
+                    if let ipv6 = IPv6Address(data) {
+                        ipv6Hosts.append(.ipv6(ipv6))
+                    }
+                default:
+                    break
+                }
+            }
+        }
+
+        return ipv4Hosts + ipv6Hosts
     }
 }

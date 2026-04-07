@@ -25,6 +25,14 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
     /// Discovery advertisement published by the peer.
     public let advertisement: LoomPeerAdvertisement
 
+    /// IP addresses resolved via Bonjour service resolution.
+    ///
+    /// When a peer is discovered via mDNS, these are the actual IP addresses
+    /// returned by `NetService.resolve()`. IPv4 addresses appear first.
+    /// Consumers should prefer these over re-resolving the advertised hostname
+    /// to avoid platform-specific mDNS resolution failures (e.g. iOS).
+    public let resolvedAddresses: [NWEndpoint.Host]
+
     /// Convenience access to the host device backing this peer.
     public var deviceID: UUID {
         id.deviceID
@@ -40,13 +48,15 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
         name: String,
         deviceType: DeviceType,
         endpoint: NWEndpoint,
-        advertisement: LoomPeerAdvertisement
+        advertisement: LoomPeerAdvertisement,
+        resolvedAddresses: [NWEndpoint.Host] = []
     ) {
         self.id = id
         self.name = name
         self.deviceType = deviceType
         self.endpoint = endpoint
         self.advertisement = advertisement
+        self.resolvedAddresses = resolvedAddresses
     }
 
     public init(
@@ -55,14 +65,16 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
         name: String,
         deviceType: DeviceType,
         endpoint: NWEndpoint,
-        advertisement: LoomPeerAdvertisement
+        advertisement: LoomPeerAdvertisement,
+        resolvedAddresses: [NWEndpoint.Host] = []
     ) {
         self.init(
             id: LoomPeerID(deviceID: id, appID: appID),
             name: name,
             deviceType: deviceType,
             endpoint: endpoint,
-            advertisement: advertisement
+            advertisement: advertisement,
+            resolvedAddresses: resolvedAddresses
         )
     }
 
@@ -71,14 +83,16 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
         name: String,
         deviceType: DeviceType,
         endpoint: NWEndpoint,
-        advertisement: LoomPeerAdvertisement
+        advertisement: LoomPeerAdvertisement,
+        resolvedAddresses: [NWEndpoint.Host] = []
     ) {
         self.init(
             id: LoomPeerID(deviceID: id),
             name: name,
             deviceType: deviceType,
             endpoint: endpoint,
-            advertisement: advertisement
+            advertisement: advertisement,
+            resolvedAddresses: resolvedAddresses
         )
     }
 

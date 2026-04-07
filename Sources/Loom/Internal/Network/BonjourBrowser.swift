@@ -40,6 +40,7 @@ public final class LoomDiscovery {
     private let serviceType: String
     private var browseResultsByEndpoint: [NWEndpoint: NWBrowser.Result] = [:]
     private var txtRecordsByService: [BonjourServiceIdentity: [String: String]] = [:]
+    private var resolvedAddressesByService: [BonjourServiceIdentity: [NWEndpoint.Host]] = [:]
     private var peerCandidatesByDeviceID: [UUID: [NWEndpoint: LoomHostDiscoveryCandidate]] = [:]
     private var peerIDByEndpoint: [NWEndpoint: UUID] = [:]
     private var peersByID: [LoomPeerID: LoomPeer] = [:]
@@ -81,6 +82,9 @@ public final class LoomDiscovery {
         )
         txtRecordMonitor.onTXTRecordChanged = { [weak self] serviceIdentity, txtRecord in
             self?.handleTXTRecordUpdate(txtRecord, for: serviceIdentity)
+        }
+        txtRecordMonitor.onServiceResolved = { [weak self] serviceIdentity, hosts in
+            self?.handleServiceResolved(hosts, for: serviceIdentity)
         }
         txtRecordMonitor.onServiceRemoved = { [weak self] serviceIdentity in
             self?.handleTXTRecordRemoval(for: serviceIdentity)
@@ -126,6 +130,7 @@ public final class LoomDiscovery {
         isSearching = false
         browseResultsByEndpoint.removeAll()
         txtRecordsByService.removeAll()
+        resolvedAddressesByService.removeAll()
         peerCandidatesByDeviceID.removeAll()
         peerIDByEndpoint.removeAll()
         peersByID.removeAll()
@@ -174,17 +179,26 @@ public final class LoomDiscovery {
             peerName = name
         }
 
+        let resolvedAddresses: [NWEndpoint.Host]
+        if let serviceIdentity = BonjourServiceIdentity(endpoint: result.endpoint) {
+            resolvedAddresses = resolvedAddressesByService[serviceIdentity] ?? []
+        } else {
+            resolvedAddresses = []
+        }
+
         upsertBonjourPeer(
             peerName: peerName,
             endpoint: result.endpoint,
-            txtRecord: txtRecord(for: result)
+            txtRecord: txtRecord(for: result),
+            resolvedAddresses: resolvedAddresses
         )
     }
 
     private func upsertBonjourPeer(
         peerName: String,
         endpoint: NWEndpoint,
-        txtRecord: [String: String]
+        txtRecord: [String: String],
+        resolvedAddresses: [NWEndpoint.Host] = []
     ) {
         let advertisement = LoomPeerAdvertisement.from(txtRecord: txtRecord)
         if !txtRecord.isEmpty {
@@ -215,7 +229,8 @@ public final class LoomDiscovery {
             name: peerName,
             deviceType: normalizedAdvertisement.deviceType ?? .unknown,
             endpoint: endpoint,
-            advertisement: normalizedAdvertisement
+            advertisement: normalizedAdvertisement,
+            resolvedAddresses: resolvedAddresses
         )
 
         storeCandidate(candidate, for: endpoint, peerID: peerID)
@@ -265,8 +280,17 @@ public final class LoomDiscovery {
         refreshPeers(for: serviceIdentity)
     }
 
+    private func handleServiceResolved(_ hosts: [NWEndpoint.Host], for serviceIdentity: BonjourServiceIdentity) {
+        resolvedAddressesByService[serviceIdentity] = hosts
+        LoomLogger.discovery(
+            "Service resolved \(serviceIdentity.name): \(hosts.map { "\($0)" }.joined(separator: ", "))"
+        )
+        refreshPeers(for: serviceIdentity)
+    }
+
     private func handleTXTRecordRemoval(for serviceIdentity: BonjourServiceIdentity) {
         txtRecordsByService.removeValue(forKey: serviceIdentity)
+        resolvedAddressesByService.removeValue(forKey: serviceIdentity)
         refreshPeers(for: serviceIdentity)
     }
 
@@ -352,7 +376,8 @@ public final class LoomDiscovery {
                     directTransports: peer.advertisement.directTransports,
                     metadata: peer.advertisement.metadata
                 )
-                : peer.advertisement
+                : peer.advertisement,
+            resolvedAddresses: peer.resolvedAddresses
         )
         storeCandidate(candidate, for: peer.endpoint, peerID: peer.deviceID)
     }
@@ -360,12 +385,14 @@ public final class LoomDiscovery {
     package func upsertBonjourPeerForTesting(
         peerName: String,
         endpoint: NWEndpoint,
-        txtRecord: [String: String]
+        txtRecord: [String: String],
+        resolvedAddresses: [NWEndpoint.Host] = []
     ) {
         upsertBonjourPeer(
             peerName: peerName,
             endpoint: endpoint,
-            txtRecord: txtRecord
+            txtRecord: txtRecord,
+            resolvedAddresses: resolvedAddresses
         )
     }
 
@@ -396,7 +423,8 @@ public final class LoomDiscovery {
                 name: projection.displayName,
                 deviceType: preferredCandidate.deviceType,
                 endpoint: preferredCandidate.endpoint,
-                advertisement: projection.advertisement
+                advertisement: projection.advertisement,
+                resolvedAddresses: preferredCandidate.resolvedAddresses
             )
         }
         updatePeersList()
@@ -484,4 +512,5 @@ private struct LoomHostDiscoveryCandidate {
     let deviceType: DeviceType
     let endpoint: NWEndpoint
     let advertisement: LoomPeerAdvertisement
+    let resolvedAddresses: [NWEndpoint.Host]
 }
