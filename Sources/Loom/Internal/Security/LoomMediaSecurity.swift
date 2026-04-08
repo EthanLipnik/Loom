@@ -221,9 +221,9 @@ package enum LoomMediaSecurity {
     private static func seal(
         _ plaintext: UnsafeRawBufferPointer,
         key: SymmetricKey,
-        nonce: ChaChaPoly.Nonce
+        nonce: AES.GCM.Nonce
     ) throws -> Data {
-        let sealed = try ChaChaPoly.seal(dataView(plaintext), using: key, nonce: nonce)
+        let sealed = try AES.GCM.seal(dataView(plaintext), using: key, nonce: nonce)
         var payload = Data()
         payload.reserveCapacity(sealed.ciphertext.count + sealed.tag.count)
         payload.append(sealed.ciphertext)
@@ -234,7 +234,7 @@ package enum LoomMediaSecurity {
     private static func open<Payload: DataProtocol>(
         _ wirePayload: Payload,
         key: SymmetricKey,
-        nonce: ChaChaPoly.Nonce
+        nonce: AES.GCM.Nonce
     ) throws -> Data {
         guard wirePayload.count >= authTagLength else {
             throw LoomMediaSecurityError.invalidEncryptedPayloadLength
@@ -242,13 +242,13 @@ package enum LoomMediaSecurity {
         let ciphertextCount = wirePayload.count - authTagLength
         let ciphertext = wirePayload.prefix(ciphertextCount)
         let tag = wirePayload.suffix(authTagLength)
-        let box = try ChaChaPoly.SealedBox(
+        let box = try AES.GCM.SealedBox(
             nonce: nonce,
-            ciphertext: ciphertext,
-            tag: tag
+            ciphertext: Data(ciphertext),
+            tag: Data(tag)
         )
         do {
-            return try ChaChaPoly.open(box, using: key)
+            return try AES.GCM.open(box, using: key)
         } catch {
             throw LoomMediaSecurityError.decryptFailed
         }
@@ -257,7 +257,7 @@ package enum LoomMediaSecurity {
     private static func videoNonce(
         for header: FrameHeader,
         direction: LoomMediaDirection
-    ) throws -> ChaChaPoly.Nonce {
+    ) throws -> AES.GCM.Nonce {
         var nonce = [UInt8](repeating: 0, count: 12)
         nonce[0] = 1
         nonce[1] = direction.rawValue
@@ -272,7 +272,7 @@ package enum LoomMediaSecurity {
     private static func audioNonce(
         for header: AudioPacketHeader,
         direction: LoomMediaDirection
-    ) throws -> ChaChaPoly.Nonce {
+    ) throws -> AES.GCM.Nonce {
         var nonce = [UInt8](repeating: 0, count: 12)
         nonce[0] = 1
         nonce[1] = direction.rawValue
@@ -284,9 +284,9 @@ package enum LoomMediaSecurity {
         return try nonceFromBytes(nonce)
     }
 
-    private static func nonceFromBytes(_ bytes: [UInt8]) throws -> ChaChaPoly.Nonce {
+    private static func nonceFromBytes(_ bytes: [UInt8]) throws -> AES.GCM.Nonce {
         do {
-            return try ChaChaPoly.Nonce(data: Data(bytes))
+            return try AES.GCM.Nonce(data: Data(bytes))
         } catch {
             throw LoomMediaSecurityError.invalidNonce
         }

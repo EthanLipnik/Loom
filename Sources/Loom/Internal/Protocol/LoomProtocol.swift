@@ -44,7 +44,7 @@ package let loomHeaderSize: Int = 61
 /// Base fields (4+1+1+1+1+2+4+8+4+2+2+2+4+4+1+2+4 = 47).
 package let loomAudioHeaderSize: Int = 47
 
-/// AEAD authentication tag size (ChaCha20-Poly1305).
+/// AEAD authentication tag size (AES-256-GCM).
 package let loomMediaAuthTagSize: Int = 16
 
 /// Compute payload size from the configured maximum packet size.

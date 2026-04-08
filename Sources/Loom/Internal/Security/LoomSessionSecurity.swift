@@ -88,9 +88,9 @@ package struct LoomSessionSecurityContext: Sendable {
         trafficClass: LoomSessionTrafficClass
     ) throws -> Data {
         let key = sendKey(for: trafficClass)
-        let nonce = try ChaChaPoly.Nonce(data: Self.randomNonce())
+        let nonce = try AES.GCM.Nonce(data: Self.randomNonce())
         let aad = Data([trafficClass.rawValue])
-        let sealed = try ChaChaPoly.seal(
+        let sealed = try AES.GCM.seal(
             plaintext,
             using: key,
             nonce: nonce,
@@ -110,18 +110,18 @@ package struct LoomSessionSecurityContext: Sendable {
 
         let key = receiveKey(for: trafficClass)
         let nonceData = nonceAndCiphertextAndTag.prefix(Self.nonceSize)
-        let nonce = try ChaChaPoly.Nonce(data: nonceData)
+        let nonce = try AES.GCM.Nonce(data: nonceData)
         let rest = nonceAndCiphertextAndTag.dropFirst(Self.nonceSize)
         let ciphertext = rest.dropLast(Self.authTagSize)
         let tag = rest.suffix(Self.authTagSize)
 
-        let box = try ChaChaPoly.SealedBox(
+        let box = try AES.GCM.SealedBox(
             nonce: nonce,
-            ciphertext: ciphertext,
-            tag: tag
+            ciphertext: Data(ciphertext),
+            tag: Data(tag)
         )
         do {
-            return try ChaChaPoly.open(
+            return try AES.GCM.open(
                 box,
                 using: key,
                 authenticating: Data([trafficClass.rawValue])

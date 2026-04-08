@@ -46,7 +46,7 @@ public struct LoomBootstrapControlAuthEnvelope: Codable, Sendable, Equatable {
 
 /// Encrypted credential payload for bootstrap control.
 public struct LoomBootstrapEncryptedCredentialsPayload: Codable, Sendable, Equatable {
-    /// ChaCha20-Poly1305 combined payload (`ciphertext + auth tag + nonce` wrapper omitted).
+    /// AES-256-GCM combined payload (`nonce + ciphertext + auth tag`).
     public let combined: Data
 
     public init(combined: Data) {
@@ -171,8 +171,11 @@ public enum LoomBootstrapControlSecurity {
             timestampMs: timestampMs,
             nonce: nonce
         )
-        let sealed = try ChaChaPoly.seal(plaintext, using: key)
-        return LoomBootstrapEncryptedCredentialsPayload(combined: sealed.combined)
+        let sealed = try AES.GCM.seal(plaintext, using: key)
+        guard let combined = sealed.combined else {
+            throw LoomError.protocolError("Failed to create bootstrap credential payload.")
+        }
+        return LoomBootstrapEncryptedCredentialsPayload(combined: combined)
     }
 
     public static func decryptCredentials(
@@ -188,8 +191,8 @@ public enum LoomBootstrapControlSecurity {
             timestampMs: timestampMs,
             nonce: nonce
         )
-        let sealed = try ChaChaPoly.SealedBox(combined: payload.combined)
-        let plaintext = try ChaChaPoly.open(sealed, using: key)
+        let sealed = try AES.GCM.SealedBox(combined: payload.combined)
+        let plaintext = try AES.GCM.open(sealed, using: key)
         return try JSONDecoder().decode(LoomBootstrapCredentials.self, from: plaintext)
     }
 

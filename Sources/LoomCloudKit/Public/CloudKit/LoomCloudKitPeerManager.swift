@@ -158,7 +158,11 @@ public final class LoomCloudKitPeerManager {
         defer { isLoading = false }
         lastError = nil
 
-        try await ensureZone(CKRecordZone(zoneID: peerZoneID))
+        try await performRetryablePeerWrite(
+            operationName: "ensure peer zone"
+        ) {
+            try await ensureZone(CKRecordZone(zoneID: peerZoneID))
+        }
 
         while true {
             let record = try await fetchOrCreatePeerRecord(deviceID: deviceID)
@@ -175,10 +179,14 @@ public final class LoomCloudKitPeerManager {
             )
 
             do {
-                let storedRecord = try await persistPeerRecord(
-                    record,
-                    identityPublicKey: identityPublicKey
-                )
+                let storedRecord = try await performRetryablePeerWrite(
+                    operationName: "persist peer record"
+                ) {
+                    try await persistPeerRecord(
+                        record,
+                        identityPublicKey: identityPublicKey
+                    )
+                }
                 peerRecord = storedRecord
                 LoomLogger.cloud("Registered peer in CloudKit: \(storedRecord.recordID.recordName)")
                 return
@@ -214,25 +222,43 @@ public final class LoomCloudKitPeerManager {
     }
 
     public func updateLastSeen() async {
-        let cachedRecord: CKRecord?
-        do {
-            cachedRecord = try await fetchCachedPeerRecord()
-        } catch {
-            LoomLogger.error(.cloud, error: error, message: "Failed to load cached peer record for lastSeen update: ")
-            return
+        let record: CKRecord
+        if let peerRecord {
+            record = (peerRecord.copy() as? CKRecord) ?? peerRecord
+        } else {
+            let cachedRecord: CKRecord?
+            do {
+                cachedRecord = try await fetchCachedPeerRecord()
+            } catch {
+                if Self.shouldClearCachedPeerRecordAfterLastSeenFailure(error) {
+                    clearCachedPeerRecordForRecovery(
+                        reason: "lastSeen fetch failed",
+                        error: error
+                    )
+                    return
+                }
+                LoomLogger.error(.cloud, error: error, message: "Failed to load cached peer record for lastSeen update: ")
+                return
+            }
+            guard let cachedRecord else { return }
+            record = cachedRecord
         }
-        guard let record = cachedRecord else { return }
 
         record[LoomCloudKitPeerInfo.RecordKey.lastSeen.rawValue] = Date()
 
         do {
-            let saveResults = try await modifyRecords([record], [], .changedKeys)
+            let saveResults = try await performRetryablePeerWrite(
+                operationName: "update peer lastSeen"
+            ) {
+                try await modifyRecords([record], [], .changedKeys)
+            }
             peerRecord = try saveResults[record.recordID]?.get() ?? record
         } catch {
-            if Self.isUnknownItemCloudKitError(error) {
-                cachedPeerRecordName = nil
-                peerRecord = nil
-                LoomLogger.cloud("PeerManager: cached peer record was deleted; clearing registration cache")
+            if Self.shouldClearCachedPeerRecordAfterLastSeenFailure(error) {
+                clearCachedPeerRecordForRecovery(
+                    reason: "lastSeen save failed",
+                    error: error
+                )
                 return
             }
             LoomLogger.error(.cloud, error: error, message: "Failed to update peer lastSeen: ")
@@ -291,6 +317,15 @@ public final class LoomCloudKitPeerManager {
 
     private func refreshState() async throws {
         peerRecord = try await fetchRegisteredPeerRecord()
+    }
+
+    private func clearCachedPeerRecordForRecovery(
+        reason: String,
+        error: Error
+    ) {
+        cachedPeerRecordName = nil
+        peerRecord = nil
+        LoomLogger.cloud("PeerManager: clearing cached peer record after \(reason): \(error)")
     }
 
     private func fetchRegisteredPeerRecord() async throws -> CKRecord? {
@@ -372,6 +407,81 @@ public final class LoomCloudKitPeerManager {
             }
             throw error
         }
+    }
+
+    private nonisolated static func shouldClearCachedPeerRecordAfterLastSeenFailure(_ error: Error) -> Bool {
+        cloudKitErrors(for: error).contains { nsError in
+            guard let code = CKError.Code(rawValue: nsError.code) else {
+                return false
+            }
+
+            switch code {
+            case .unknownItem,
+                 .zoneNotFound,
+                 .userDeletedZone,
+                 .changeTokenExpired:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private func performRetryablePeerWrite<T>(
+        operationName: String,
+        operation: () async throws -> T
+    ) async throws -> T {
+        var attempt = 1
+
+        while true {
+            do {
+                return try await operation()
+            } catch {
+                guard let retryDelay = Self.retryDelayForPeerWriteCloudKitError(error, attempt: attempt) else {
+                    throw error
+                }
+
+                LoomLogger.cloud(
+                    "PeerManager: transient CloudKit failure during \(operationName); retrying attempt \(attempt) in \(retryDelay)"
+                )
+                attempt += 1
+                try await Task.sleep(for: retryDelay)
+            }
+        }
+    }
+
+    private nonisolated static func cloudKitErrors(for error: Error) -> [NSError] {
+        var collected: [NSError] = []
+        var visited = Set<ObjectIdentifier>()
+
+        func collect(from value: Any) {
+            switch value {
+            case let nsError as NSError:
+                let identifier = ObjectIdentifier(nsError)
+                guard visited.insert(identifier).inserted else { return }
+                if nsError.domain == CKError.errorDomain {
+                    collected.append(nsError)
+                }
+                for nestedValue in nsError.userInfo.values {
+                    collect(from: nestedValue)
+                }
+            case let nestedError as Error:
+                collect(from: nestedError as NSError)
+            case let array as [Any]:
+                for element in array {
+                    collect(from: element)
+                }
+            case let dictionary as [AnyHashable: Any]:
+                for nestedValue in dictionary.values {
+                    collect(from: nestedValue)
+                }
+            default:
+                break
+            }
+        }
+
+        collect(from: error)
+        return collected
     }
 
     @discardableResult

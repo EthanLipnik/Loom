@@ -247,6 +247,92 @@ struct LoomCloudKitPeerManagerTests {
 
         #expect(manager.peerRecord?.recordID.recordName == initialRecord.deviceID().uuidString)
     }
+
+    @MainActor
+    @Test("updateLastSeen reuses the in-memory peer record instead of refetching it")
+    func updateLastSeenUsesInMemoryPeerRecord() async throws {
+        let configuration = LoomCloudKitConfiguration(containerIdentifier: "iCloud.com.example.test")
+        let cloudKitManager = LoomCloudKitManager(configuration: configuration)
+        let existingRecord = makePeerRecord(
+            configuration: configuration,
+            recordName: "existing-peer-record",
+            deviceID: UUID(),
+            name: "Test Mac",
+            identityKeyID: "identity-key"
+        )
+        let tracker = InMemoryLastSeenTracker(configuration: configuration, existingRecord: existingRecord)
+        let manager = LoomCloudKitPeerManager(
+            cloudKitManager: cloudKitManager,
+            ensureZone: { _ in },
+            queryRecords: { query, zoneID in
+                try await tracker.queryRecords(query: query, zoneID: zoneID)
+            },
+            fetchRecord: { recordID in
+                try await tracker.fetchRecord(recordID: recordID)
+            },
+            modifyRecords: { records, deletions, savePolicy in
+                try await tracker.modifyRecords(
+                    records: records,
+                    deletions: deletions,
+                    savePolicy: savePolicy
+                )
+            }
+        )
+
+        try await manager.registerPeer(
+            deviceID: existingRecord.deviceID(),
+            name: "Test Mac",
+            advertisement: makeAdvertisement(deviceID: existingRecord.deviceID(), identityKeyID: "identity-key")
+        )
+        await manager.updateLastSeen()
+
+        #expect(await tracker.fetchCount() == 0)
+    }
+
+    @MainActor
+    @Test("updateLastSeen retries transient save failures without clearing the cached registration")
+    func updateLastSeenRetriesRecoverableFailure() async throws {
+        let configuration = LoomCloudKitConfiguration(containerIdentifier: "iCloud.com.example.test")
+        let cloudKitManager = LoomCloudKitManager(configuration: configuration)
+        let initialRecord = makePeerRecord(
+            configuration: configuration,
+            recordName: "server-generated-record",
+            deviceID: UUID(),
+            name: "Test Mac",
+            identityKeyID: "identity-key"
+        )
+        let tracker = RecoveryTracker(
+            configuration: configuration,
+            existingRecord: initialRecord,
+            failureCode: .zoneBusy
+        )
+        let manager = LoomCloudKitPeerManager(
+            cloudKitManager: cloudKitManager,
+            ensureZone: { _ in },
+            queryRecords: { query, zoneID in
+                try await tracker.queryRecords(query: query, zoneID: zoneID)
+            },
+            fetchRecord: { recordID in
+                try await tracker.fetchRecord(recordID: recordID)
+            },
+            modifyRecords: { records, deletions, savePolicy in
+                try await tracker.modifyRecords(
+                    records: records,
+                    deletions: deletions,
+                    savePolicy: savePolicy
+                )
+            }
+        )
+
+        try await manager.registerPeer(
+            deviceID: initialRecord.deviceID(),
+            name: "Test Mac",
+            advertisement: makeAdvertisement(deviceID: initialRecord.deviceID(), identityKeyID: "identity-key")
+        )
+        await manager.updateLastSeen()
+
+        #expect(manager.peerRecord?.recordID.recordName == initialRecord.recordID.recordName)
+    }
 }
 
 private actor RegistrationTracker {
@@ -351,13 +437,19 @@ private actor CleanupTracker {
 private actor RecoveryTracker {
     private let configuration: LoomCloudKitConfiguration
     private let existingRecord: CKRecord
+    private let failureCode: CKError.Code
     private var didRegisterExistingRecord = false
     private var shouldReturnExistingRecord = true
     private var shouldFailNextLastSeenSave = true
 
-    init(configuration: LoomCloudKitConfiguration, existingRecord: CKRecord) {
+    init(
+        configuration: LoomCloudKitConfiguration,
+        existingRecord: CKRecord,
+        failureCode: CKError.Code = .unknownItem
+    ) {
         self.configuration = configuration
         self.existingRecord = existingRecord
+        self.failureCode = failureCode
     }
 
     func queryRecords(
@@ -392,10 +484,51 @@ private actor RecoveryTracker {
         if record.recordID.recordName == existingRecord.recordID.recordName && shouldFailNextLastSeenSave {
             shouldFailNextLastSeenSave = false
             shouldReturnExistingRecord = false
-            throw CKError(.unknownItem)
+            throw CKError(failureCode)
         }
 
         return [record.recordID: .success(record)]
+    }
+}
+
+private actor InMemoryLastSeenTracker {
+    private let configuration: LoomCloudKitConfiguration
+    private let existingRecord: CKRecord
+    private var fetchInvocationCount = 0
+
+    init(configuration: LoomCloudKitConfiguration, existingRecord: CKRecord) {
+        self.configuration = configuration
+        self.existingRecord = existingRecord
+    }
+
+    func queryRecords(
+        query _: CKQuery,
+        zoneID _: CKRecordZone.ID
+    ) async throws -> [(CKRecord.ID, Result<CKRecord, Error>)] {
+        [(existingRecord.recordID, .success(existingRecord))]
+    }
+
+    func fetchRecord(recordID: CKRecord.ID) async throws -> CKRecord {
+        fetchInvocationCount += 1
+        if recordID.recordName == existingRecord.recordID.recordName {
+            return existingRecord
+        }
+        throw CKError(.unknownItem)
+    }
+
+    func modifyRecords(
+        records: [CKRecord],
+        deletions _: [CKRecord.ID],
+        savePolicy _: CKModifyRecordsOperation.RecordSavePolicy
+    ) async throws -> [CKRecord.ID: Result<CKRecord, Error>] {
+        guard let record = records.first(where: { $0.recordType == configuration.peerRecordType }) else {
+            return [:]
+        }
+        return [record.recordID: .success(record)]
+    }
+
+    func fetchCount() -> Int {
+        fetchInvocationCount
     }
 }
 

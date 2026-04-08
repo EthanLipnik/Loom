@@ -68,6 +68,38 @@ public extension LoomCloudKitPeerManager {
         isUnknownItemCloudKitError(error) || isMissingPeerZoneCloudKitError(error)
     }
 
+    nonisolated static func isRetryablePeerWriteCloudKitError(_ error: Error) -> Bool {
+        guard let cloudKitError = cloudKitError(from: error) else { return false }
+        switch cloudKitError.code {
+        case .networkUnavailable,
+             .networkFailure,
+             .serviceUnavailable,
+             .requestRateLimited,
+             .zoneBusy:
+            return true
+        default:
+            return false
+        }
+    }
+
+    nonisolated static func retryDelayForPeerWriteCloudKitError(
+        _ error: Error,
+        attempt: Int
+    ) -> Duration? {
+        guard isRetryablePeerWriteCloudKitError(error) else { return nil }
+        if let retryAfterSeconds = cloudKitRetryAfterSeconds(from: error) {
+            return .milliseconds(Int64((retryAfterSeconds * 1000).rounded(.up)))
+        }
+
+        let retrySchedule: [Duration] = [
+            .milliseconds(250),
+            .milliseconds(750),
+            .seconds(2),
+        ]
+        let normalizedAttempt = max(1, attempt)
+        return retrySchedule[min(normalizedAttempt - 1, retrySchedule.count - 1)]
+    }
+
     nonisolated static func isMissingPeerZoneCloudKitError(_ error: Error) -> Bool {
         isMissingPeerZoneCloudKitError(error as NSError)
     }
@@ -93,6 +125,48 @@ public extension LoomCloudKitPeerManager {
         }
 
         return false
+    }
+
+    private nonisolated static func cloudKitError(from error: Error) -> CKError? {
+        let nsError = error as NSError
+        if nsError.domain == CKError.errorDomain {
+            return error as? CKError ?? CKError(_nsError: nsError)
+        }
+        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+            return cloudKitError(from: underlyingError)
+        }
+        if let partialErrors = nsError.userInfo[CKPartialErrorsByItemIDKey] as? [AnyHashable: Any] {
+            for value in partialErrors.values {
+                guard let nestedError = value as? Error else { continue }
+                if let cloudKitError = cloudKitError(from: nestedError) {
+                    return cloudKitError
+                }
+            }
+        }
+        return nil
+    }
+
+    private nonisolated static func cloudKitRetryAfterSeconds(from error: Error) -> Double? {
+        let nsError = error as NSError
+        if let retryAfter = nsError.userInfo[CKErrorRetryAfterKey] as? NSNumber {
+            return retryAfter.doubleValue
+        }
+        if let retryAfter = nsError.userInfo[CKErrorRetryAfterKey] as? Double {
+            return retryAfter
+        }
+        if let underlyingError = nsError.userInfo[NSUnderlyingErrorKey] as? Error,
+           let retryAfter = cloudKitRetryAfterSeconds(from: underlyingError) {
+            return retryAfter
+        }
+        if let partialErrors = nsError.userInfo[CKPartialErrorsByItemIDKey] as? [AnyHashable: Any] {
+            for value in partialErrors.values {
+                guard let nestedError = value as? Error else { continue }
+                if let retryAfter = cloudKitRetryAfterSeconds(from: nestedError) {
+                    return retryAfter
+                }
+            }
+        }
+        return nil
     }
 
     private nonisolated static func cloudKitErrorMessages(for error: Error) -> [String] {
