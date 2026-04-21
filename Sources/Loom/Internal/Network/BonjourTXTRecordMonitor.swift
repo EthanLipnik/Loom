@@ -52,6 +52,7 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
     private var workerThread: Thread?
     private var monitorRunLoop: CFRunLoop?
     private var shouldStopWorker = false
+    private var didStopOnMonitorThread = false
     private var servicesByIdentity: [BonjourServiceIdentity: NetService] = [:]
 
     init(serviceType: String, enablePeerToPeer: Bool) {
@@ -68,6 +69,7 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
         }
 
         shouldStopWorker = false
+        didStopOnMonitorThread = false
         let thread = Thread(target: self, selector: #selector(runMonitorThread), object: nil)
         thread.name = "Loom Bonjour TXT monitor"
         workerThread = thread
@@ -92,17 +94,15 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
             return
         }
 
-        guard let runLoop else {
+        guard let runLoop, !thread.isFinished else {
+            clearWorkerReferences()
             return
         }
 
-        let semaphore = DispatchSemaphore(value: 0)
         CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue) { [weak self] in
             self?.stopOnMonitorThread()
-            semaphore.signal()
         }
         CFRunLoopWakeUp(runLoop)
-        _ = semaphore.wait(timeout: .now() + 1)
     }
 
     @objc private func runMonitorThread() {
@@ -138,6 +138,11 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
 
     @objc private func stopOnMonitorThread() {
         stateLock.lock()
+        guard !didStopOnMonitorThread else {
+            stateLock.unlock()
+            return
+        }
+        didStopOnMonitorThread = true
         shouldStopWorker = true
         stateLock.unlock()
 
@@ -155,11 +160,15 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
         }
         servicesByIdentity.removeAll()
 
+        clearWorkerReferences()
+        CFRunLoopStop(CFRunLoopGetCurrent())
+    }
+
+    private func clearWorkerReferences() {
         stateLock.lock()
         workerThread = nil
         monitorRunLoop = nil
         stateLock.unlock()
-        CFRunLoopStop(CFRunLoopGetCurrent())
     }
 
     private var shouldContinueRunning: Bool {
