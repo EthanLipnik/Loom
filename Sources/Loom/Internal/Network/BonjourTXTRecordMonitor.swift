@@ -46,7 +46,8 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
 
     private let serviceType: String
     private let enablePeerToPeer: Bool
-    private let stateLock = NSLock()
+    // MainActor callers request start/stop without blocking on the monitor thread's QoS.
+    private let stateQueue = DispatchQueue(label: "com.mirage.loom.bonjour-txt-monitor.state")
 
     private var browser: NetServiceBrowser?
     private var workerThread: Thread?
@@ -62,62 +63,63 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
     }
 
     func start() {
-        stateLock.lock()
-        guard workerThread == nil else {
-            stateLock.unlock()
-            return
+        stateQueue.async { [weak self] in
+            guard let self, self.workerThread == nil else {
+                return
+            }
+
+            self.shouldStopWorker = false
+            self.didStopOnMonitorThread = false
+            let thread = Thread(target: self, selector: #selector(Self.runMonitorThread), object: nil)
+            thread.name = "Loom Bonjour TXT monitor"
+            self.workerThread = thread
+
+            thread.start()
         }
-
-        shouldStopWorker = false
-        didStopOnMonitorThread = false
-        let thread = Thread(target: self, selector: #selector(runMonitorThread), object: nil)
-        thread.name = "Loom Bonjour TXT monitor"
-        workerThread = thread
-        stateLock.unlock()
-
-        thread.start()
     }
 
     func stop() {
-        stateLock.lock()
-        let thread = workerThread
-        let runLoop = monitorRunLoop
-        shouldStopWorker = true
-        stateLock.unlock()
+        stateQueue.async { [weak self] in
+            guard let self else {
+                return
+            }
 
-        guard let thread else {
-            return
-        }
+            self.shouldStopWorker = true
 
-        if Thread.current == thread {
-            stopOnMonitorThread()
-            return
-        }
+            guard let thread = self.workerThread else {
+                return
+            }
 
-        guard let runLoop, !thread.isFinished else {
-            clearWorkerReferences()
-            return
-        }
+            guard let runLoop = self.monitorRunLoop, !thread.isFinished else {
+                if thread.isFinished {
+                    self.clearWorkerReferencesOnStateQueue()
+                }
+                return
+            }
 
-        CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue) { [weak self] in
-            self?.stopOnMonitorThread()
+            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue) { [weak self] in
+                self?.stopOnMonitorThread()
+            }
+            CFRunLoopWakeUp(runLoop)
         }
-        CFRunLoopWakeUp(runLoop)
     }
 
     @objc private func runMonitorThread() {
         autoreleasepool {
             let runLoop = RunLoop.current
             let cfRunLoop = CFRunLoopGetCurrent()
-            stateLock.lock()
-            if shouldStopWorker {
-                workerThread = nil
-                monitorRunLoop = nil
-                stateLock.unlock()
+
+            let shouldStop = stateQueue.sync {
+                if shouldStopWorker {
+                    clearWorkerReferencesOnStateQueue()
+                    return true
+                }
+                monitorRunLoop = cfRunLoop
+                return false
+            }
+            if shouldStop {
                 return
             }
-            monitorRunLoop = cfRunLoop
-            stateLock.unlock()
 
             let browser = NetServiceBrowser()
             browser.delegate = self
@@ -137,14 +139,17 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
     }
 
     @objc private func stopOnMonitorThread() {
-        stateLock.lock()
-        guard !didStopOnMonitorThread else {
-            stateLock.unlock()
+        let shouldStop = stateQueue.sync {
+            guard !didStopOnMonitorThread else {
+                return false
+            }
+            didStopOnMonitorThread = true
+            shouldStopWorker = true
+            return true
+        }
+        guard shouldStop else {
             return
         }
-        didStopOnMonitorThread = true
-        shouldStopWorker = true
-        stateLock.unlock()
 
         let runLoop = RunLoop.current
         browser?.stop()
@@ -165,17 +170,20 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
     }
 
     private func clearWorkerReferences() {
-        stateLock.lock()
+        stateQueue.sync {
+            clearWorkerReferencesOnStateQueue()
+        }
+    }
+
+    private func clearWorkerReferencesOnStateQueue() {
         workerThread = nil
         monitorRunLoop = nil
-        stateLock.unlock()
     }
 
     private var shouldContinueRunning: Bool {
-        stateLock.lock()
-        let shouldStop = shouldStopWorker
-        stateLock.unlock()
-        return !shouldStop
+        stateQueue.sync {
+            !shouldStopWorker
+        }
     }
 
     func netServiceBrowser(_ browser: NetServiceBrowser, didFind service: NetService, moreComing: Bool) {
