@@ -104,6 +104,27 @@ struct LoomOverlayDirectoryTests {
         await secondServer.stop()
     }
 
+    @Test("Overlay probe timeout cancels stalled connection")
+    func probeTimeoutCancelsStalledConnection() async throws {
+        let listener = try await startBlackholeTCPServer()
+        defer {
+            listener.cancel()
+        }
+
+        let port = try #require(listener.port?.rawValue)
+        let start = ContinuousClock.now
+
+        await #expect(throws: Error.self) {
+            _ = try await LoomOverlayProbeClient.probe(
+                seed: LoomOverlaySeed(host: "127.0.0.1", probePort: port),
+                defaultPort: Loom.defaultOverlayProbePort,
+                timeout: .milliseconds(100)
+            )
+        }
+
+        #expect(start.duration(to: ContinuousClock.now) < .seconds(1))
+    }
+
     @MainActor
     @Test("Overlay directory suppresses duplicate semantic peer snapshots")
     func directorySuppressesDuplicateNotifications() async throws {
@@ -391,6 +412,30 @@ private func startOverlayProbeServer(
     throw lastError ?? LoomError.protocolError("Unable to reserve an overlay probe port.")
 }
 
+private func startBlackholeTCPServer() async throws -> NWListener {
+    let listener = try NWListener(using: .tcp, on: .any)
+    listener.newConnectionHandler = { connection in
+        connection.start(queue: .global(qos: .userInitiated))
+    }
+
+    return try await withCheckedThrowingContinuation { continuation in
+        let continuationBox = TestContinuationBox<NWListener>(continuation)
+        listener.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                continuationBox.resume(returning: listener)
+            case let .failed(error):
+                continuationBox.resume(throwing: error)
+            case .cancelled:
+                continuationBox.resume(throwing: LoomError.connectionFailed(CancellationError()))
+            default:
+                break
+            }
+        }
+        listener.start(queue: .global(qos: .userInitiated))
+    }
+}
+
 private func endpointHost(_ endpoint: NWEndpoint) -> String? {
     guard case let .hostPort(host, _) = endpoint else {
         return nil
@@ -403,4 +448,29 @@ private func endpointPort(_ endpoint: NWEndpoint) -> UInt16? {
         return nil
     }
     return port.rawValue
+}
+
+private final class TestContinuationBox<T: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<T, Error>?
+
+    init(_ continuation: CheckedContinuation<T, Error>) {
+        self.continuation = continuation
+    }
+
+    func resume(returning value: T) {
+        lock.lock()
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: value)
+    }
+
+    func resume(throwing error: Error) {
+        lock.lock()
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(throwing: error)
+    }
 }

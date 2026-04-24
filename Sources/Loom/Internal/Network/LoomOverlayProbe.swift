@@ -124,7 +124,12 @@ package enum LoomOverlayProbeClient {
         let framedConnection = LoomFramedConnection(connection: connection)
 
         do {
-            let responseData = try await withThrowingTimeout(timeout) {
+            let responseData = try await withThrowingTimeout(
+                timeout,
+                onTimeout: {
+                    connection.cancel()
+                }
+            ) {
                 try await framedConnection.startAndAwaitReady(queue: .global(qos: .userInitiated))
                 let request = LoomOverlayProbeRequest()
                 try await framedConnection.sendFrame(JSONEncoder().encode(request))
@@ -144,6 +149,7 @@ package enum LoomOverlayProbeClient {
 
 private func withThrowingTimeout<T: Sendable>(
     _ timeout: Duration,
+    onTimeout: @escaping @Sendable () -> Void,
     operation: @escaping @Sendable () async throws -> T
 ) async throws -> T {
     try await withThrowingTaskGroup(of: T.self) { group in
@@ -152,6 +158,7 @@ private func withThrowingTimeout<T: Sendable>(
         }
         group.addTask {
             try await Task.sleep(for: timeout)
+            onTimeout()
             throw LoomError.connectionFailed(CancellationError())
         }
 
