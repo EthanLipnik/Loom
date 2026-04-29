@@ -188,8 +188,8 @@ struct LoomDiscoveryTests {
     }
 
     @MainActor
-    @Test("Discovery promotes Bonjour peers from fallback identity to advertised metadata")
-    func discoveryPromotesBonjourPeersFromFallbackIdentityToAdvertisedMetadata() throws {
+    @Test("Discovery waits for Bonjour TXT identity before publishing peers")
+    func discoveryWaitsForBonjourTXTIdentityBeforePublishingPeers() throws {
         let discovery = LoomDiscovery()
         let endpoint = NWEndpoint.hostPort(
             host: "127.0.0.1",
@@ -218,13 +218,15 @@ struct LoomDiscoveryTests {
             txtRecord: [:]
         )
 
-        let fallbackPeer = try #require(discovery.discoveredPeers.first)
-        #expect(fallbackPeer.name == peerName)
-        #expect(fallbackPeer.deviceType == .unknown)
-        #expect(fallbackPeer.deviceID != deviceID)
-        #expect(fallbackPeer.advertisement.deviceID == nil)
-        #expect(fallbackPeer.advertisement.modelIdentifier == nil)
-        #expect(fallbackPeer.advertisement.iconName == nil)
+        #expect(discovery.discoveredPeers.isEmpty)
+
+        discovery.upsertBonjourPeerForTesting(
+            peerName: peerName,
+            endpoint: endpoint,
+            txtRecord: LoomPeerAdvertisement(deviceType: .mac).toTXTRecord()
+        )
+
+        #expect(discovery.discoveredPeers.isEmpty)
 
         discovery.upsertBonjourPeerForTesting(
             peerName: peerName,
@@ -244,7 +246,37 @@ struct LoomDiscoveryTests {
         #expect(resolvedPeer.advertisement.machineFamily == "Mac")
         #expect(resolvedPeer.advertisement.directTransports == [advertisedTransport])
         #expect(resolvedPeer.advertisement.metadata["loom.role"] == "host")
-        #expect(discovery.discoveredPeers.map(\.id).contains(fallbackPeer.id) == false)
+    }
+
+    @MainActor
+    @Test("Discovery removes Bonjour peers when TXT identity disappears")
+    func discoveryRemovesBonjourPeersWhenTXTIdentityDisappears() throws {
+        let discovery = LoomDiscovery()
+        let endpoint = NWEndpoint.hostPort(
+            host: "127.0.0.1",
+            port: NWEndpoint.Port(rawValue: 8801)!
+        )
+        let deviceID = UUID()
+        let txtRecord = LoomPeerAdvertisement(
+            deviceID: deviceID,
+            deviceType: .mac
+        ).toTXTRecord()
+
+        discovery.upsertBonjourPeerForTesting(
+            peerName: "Studio Mac",
+            endpoint: endpoint,
+            txtRecord: txtRecord
+        )
+
+        #expect(discovery.discoveredPeers.count == 1)
+
+        discovery.upsertBonjourPeerForTesting(
+            peerName: "Studio Mac",
+            endpoint: endpoint,
+            txtRecord: [:]
+        )
+
+        #expect(discovery.discoveredPeers.isEmpty)
     }
 
     @MainActor

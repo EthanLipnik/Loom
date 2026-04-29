@@ -8,7 +8,6 @@
 import Foundation
 import Network
 import Observation
-import CryptoKit
 
 /// Discovers Loom peers on the local network via Bonjour.
 @Observable
@@ -208,7 +207,11 @@ public final class LoomDiscovery {
             )
         }
 
-        let peerID = advertisement.deviceID ?? fallbackPeerID(endpoint: endpoint, peerName: peerName)
+        guard let peerID = advertisement.deviceID else {
+            removePeer(for: endpoint)
+            return
+        }
+
         guard peerID != localDeviceID else {
             removePeer(for: endpoint)
             return
@@ -235,23 +238,6 @@ public final class LoomDiscovery {
         )
 
         storeCandidate(candidate, for: endpoint, peerID: peerID)
-    }
-
-    private func fallbackPeerID(endpoint: NWEndpoint, peerName: String) -> UUID {
-        let source = "\(peerName)|\(endpoint.debugDescription)"
-        let digest = SHA256.hash(data: Data(source.utf8))
-        let bytes = Array(digest)
-        var uuidBytes = Array(bytes.prefix(16))
-        uuidBytes[6] = (uuidBytes[6] & 0x0F) | 0x40
-        uuidBytes[8] = (uuidBytes[8] & 0x3F) | 0x80
-
-        let uuid = uuid_t(
-            uuidBytes[0], uuidBytes[1], uuidBytes[2], uuidBytes[3],
-            uuidBytes[4], uuidBytes[5], uuidBytes[6], uuidBytes[7],
-            uuidBytes[8], uuidBytes[9], uuidBytes[10], uuidBytes[11],
-            uuidBytes[12], uuidBytes[13], uuidBytes[14], uuidBytes[15]
-        )
-        return UUID(uuid: uuid)
     }
 
     private func removePeer(for endpoint: NWEndpoint) {
