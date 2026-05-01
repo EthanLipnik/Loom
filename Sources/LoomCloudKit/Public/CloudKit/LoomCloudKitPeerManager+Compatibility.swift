@@ -9,6 +9,13 @@ import CloudKit
 import Foundation
 
 public extension LoomCloudKitPeerManager {
+    nonisolated static func shouldRetryRegistrationWithoutOverlayHints(
+        error: Error,
+        attemptedOverlayHintsWrite: Bool
+    ) -> Bool {
+        attemptedOverlayHintsWrite && isInvalidArgumentsCloudKitError(error)
+    }
+
     nonisolated static func shouldRetryRegistrationWithoutBootstrapMetadata(
         error: Error,
         attemptedBootstrapMetadataWrite: Bool

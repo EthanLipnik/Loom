@@ -20,6 +20,7 @@ public final class LoomCloudKitPeerManager {
         let attemptedOptionalPeerMetadataWrite: Bool
         let attemptedRichPeerMetadataWrite: Bool
         let attemptedBootstrapMetadataWrite: Bool
+        let attemptedOverlayHintsWrite: Bool
     }
 
     private let cloudKitManager: LoomCloudKitManager
@@ -33,6 +34,7 @@ public final class LoomCloudKitPeerManager {
 
     private var cachedPeerRecordName: String?
     private var cloudKitSchemaSupportsBootstrapMetadata = true
+    private var cloudKitSchemaSupportsOverlayHints = true
     private var cloudKitSchemaSupportsOptionalPeerMetadata = true
     private var cloudKitSchemaSupportsRichPeerMetadata = true
     private var cloudKitSchemaSupportsParticipantIdentityRecords = true
@@ -198,6 +200,14 @@ public final class LoomCloudKitPeerManager {
                 peerRecord = storedRecord
                 LoomLogger.cloud("Registered peer in CloudKit: \(storedRecord.recordID.recordName)")
                 return
+            } catch where Self.shouldRetryRegistrationWithoutOverlayHints(
+                error: error,
+                attemptedOverlayHintsWrite: populationAttempt.attemptedOverlayHintsWrite
+            ) {
+                cloudKitSchemaSupportsOverlayHints = false
+                LoomLogger.cloud(
+                    "ShareManager: schema rejected overlay hints; retrying peer registration without overlay hints"
+                )
             } catch where Self.shouldRetryRegistrationWithoutBootstrapMetadata(
                 error: error,
                 attemptedBootstrapMetadataWrite: populationAttempt.attemptedBootstrapMetadataWrite
@@ -538,12 +548,24 @@ public final class LoomCloudKitPeerManager {
             record[LoomCloudKitPeerInfo.RecordKey.bootstrapMetadataBlob.rawValue] = nil
         }
 
+        let attemptedOverlayHintsWrite = cloudKitSchemaSupportsOverlayHints && !overlayHints.isEmpty
+        if cloudKitSchemaSupportsOverlayHints {
+            if overlayHints.isEmpty {
+                record[LoomCloudKitPeerInfo.RecordKey.overlayHintsBlob.rawValue] = nil
+            } else {
+                record[LoomCloudKitPeerInfo.RecordKey.overlayHintsBlob.rawValue] = try? JSONEncoder().encode(overlayHints)
+            }
+        } else {
+            record[LoomCloudKitPeerInfo.RecordKey.overlayHintsBlob.rawValue] = nil
+        }
+
         record[LoomCloudKitPeerInfo.RecordKey.lastSeen.rawValue] = Date()
 
         return PeerRecordPopulationAttempt(
             attemptedOptionalPeerMetadataWrite: attemptedOptionalPeerMetadataWrite,
             attemptedRichPeerMetadataWrite: attemptedRichPeerMetadataWrite,
-            attemptedBootstrapMetadataWrite: attemptedBootstrapMetadataWrite
+            attemptedBootstrapMetadataWrite: attemptedBootstrapMetadataWrite,
+            attemptedOverlayHintsWrite: attemptedOverlayHintsWrite
         )
     }
 

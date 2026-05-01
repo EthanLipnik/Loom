@@ -35,12 +35,36 @@ public struct LoomSSHServerTrustConfiguration: Sendable, Equatable, Codable {
     /// Required SSH host principal, typically derived from the Loom device ID.
     public let requiredPrincipal: String
 
+    /// SHA256 fingerprints for raw SSH host keys trusted by the client.
+    public let trustedHostKeyFingerprints: [String]
+
     public init(
         trustedHostAuthorities: [String],
-        requiredPrincipal: String
+        requiredPrincipal: String,
+        trustedHostKeyFingerprints: [String] = []
     ) {
         self.trustedHostAuthorities = trustedHostAuthorities
         self.requiredPrincipal = requiredPrincipal
+        self.trustedHostKeyFingerprints = trustedHostKeyFingerprints
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case trustedHostAuthorities
+        case requiredPrincipal
+        case trustedHostKeyFingerprints
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        trustedHostAuthorities = try container.decode(
+            [String].self,
+            forKey: .trustedHostAuthorities
+        )
+        requiredPrincipal = try container.decode(String.self, forKey: .requiredPrincipal)
+        trustedHostKeyFingerprints = try container.decodeIfPresent(
+            [String].self,
+            forKey: .trustedHostKeyFingerprints
+        ) ?? []
     }
 
     /// Returns the canonical Loom SSH host principal for a device ID.
@@ -67,19 +91,27 @@ public struct LoomSSHServerTrustValidator: Sendable {
     public let configuration: LoomSSHServerTrustConfiguration
 
     private let authorityKeys: [NIOSSHPublicKey]
+    private let trustedHostKeyFingerprints: Set<String>
 
     public init(configuration: LoomSSHServerTrustConfiguration) throws {
         let requiredPrincipal = configuration.requiredPrincipal
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !requiredPrincipal.isEmpty else {
-            throw LoomSSHServerTrustError.invalidConfiguration("Required principal must not be empty.")
-        }
 
         let authorities = configuration.trustedHostAuthorities
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
-        guard !authorities.isEmpty else {
-            throw LoomSSHServerTrustError.invalidConfiguration("At least one host CA key is required.")
+        let fingerprints = configuration.trustedHostKeyFingerprints
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !authorities.isEmpty || !fingerprints.isEmpty else {
+            throw LoomSSHServerTrustError.invalidConfiguration(
+                "At least one host CA key or pinned host-key fingerprint is required."
+            )
+        }
+        if !authorities.isEmpty, requiredPrincipal.isEmpty {
+            throw LoomSSHServerTrustError.invalidConfiguration(
+                "Required principal must not be empty when host CAs are used."
+            )
         }
 
         do {
@@ -94,43 +126,74 @@ public struct LoomSSHServerTrustValidator: Sendable {
 
         self.configuration = LoomSSHServerTrustConfiguration(
             trustedHostAuthorities: authorities,
-            requiredPrincipal: requiredPrincipal
+            requiredPrincipal: requiredPrincipal,
+            trustedHostKeyFingerprints: fingerprints
         )
+        trustedHostKeyFingerprints = Set(fingerprints)
     }
 
     /// Validates a presented SSH host key and returns diagnostics about the certified leaf key.
     public func validate(hostKey: NIOSSHPublicKey) throws -> LoomSSHValidatedHostCertificate {
-        guard let certifiedHostKey = NIOSSHCertifiedPublicKey(hostKey) else {
-            throw LoomSSHServerTrustError.missingHostCertificate
-        }
-
-        do {
-            _ = try certifiedHostKey.validate(
-                principal: configuration.requiredPrincipal,
-                type: .host,
-                allowedAuthoritySigningKeys: authorityKeys,
-                acceptableCriticalOptions: []
-            )
-            guard certifiedHostKey.validPrincipals == [configuration.requiredPrincipal] else {
-                throw LoomSSHServerTrustError.invalidHostCertificate(
-                    "The certificate must contain exactly the required Loom principal."
+        if let certifiedHostKey = NIOSSHCertifiedPublicKey(hostKey) {
+            let fingerprint = try Self.hostKeyFingerprint(for: certifiedHostKey.key)
+            if trustedHostKeyFingerprints.contains(fingerprint) {
+                LoomLogger.ssh(
+                    "Validated SSH host certificate using pinned leaf key \(fingerprint)"
+                )
+                return LoomSSHValidatedHostCertificate(
+                    keyID: certifiedHostKey.keyID,
+                    principal: configuration.requiredPrincipal,
+                    hostKeyFingerprint: fingerprint
                 )
             }
 
-            let fingerprint = try Self.hostKeyFingerprint(for: certifiedHostKey.key)
+            guard !authorityKeys.isEmpty else {
+                throw LoomSSHServerTrustError.invalidHostCertificate(
+                    "The SSH host certificate leaf key is not pinned."
+                )
+            }
+
+            do {
+                _ = try certifiedHostKey.validate(
+                    principal: configuration.requiredPrincipal,
+                    type: .host,
+                    allowedAuthoritySigningKeys: authorityKeys,
+                    acceptableCriticalOptions: []
+                )
+                guard certifiedHostKey.validPrincipals == [configuration.requiredPrincipal] else {
+                    throw LoomSSHServerTrustError.invalidHostCertificate(
+                        "The certificate must contain exactly the required Loom principal."
+                    )
+                }
+
+                LoomLogger.ssh(
+                    "Validated SSH host certificate for \(configuration.requiredPrincipal) using leaf key \(fingerprint)"
+                )
+                return LoomSSHValidatedHostCertificate(
+                    keyID: certifiedHostKey.keyID,
+                    principal: configuration.requiredPrincipal,
+                    hostKeyFingerprint: fingerprint
+                )
+            } catch let error as LoomSSHServerTrustError {
+                throw error
+            } catch {
+                throw LoomSSHServerTrustError.invalidHostCertificate(error.localizedDescription)
+            }
+        }
+
+        let fingerprint = try Self.hostKeyFingerprint(for: hostKey)
+        if trustedHostKeyFingerprints.contains(fingerprint) {
             LoomLogger.ssh(
-                "Validated SSH host certificate for \(configuration.requiredPrincipal) using leaf key \(fingerprint)"
+                "Validated raw SSH host key using pinned fingerprint \(fingerprint)"
             )
             return LoomSSHValidatedHostCertificate(
-                keyID: certifiedHostKey.keyID,
+                keyID: "",
                 principal: configuration.requiredPrincipal,
                 hostKeyFingerprint: fingerprint
             )
-        } catch let error as LoomSSHServerTrustError {
-            throw error
-        } catch {
-            throw LoomSSHServerTrustError.invalidHostCertificate(error.localizedDescription)
         }
+
+        throw LoomSSHServerTrustError.missingHostCertificate
     }
 
     public static func hostKeyFingerprint(for hostKey: NIOSSHPublicKey) throws -> String {
@@ -144,6 +207,8 @@ public struct LoomSSHServerTrustValidator: Sendable {
         }
 
         let digest = SHA256.hash(data: keyData)
-        return "SHA256:\(Data(digest).base64EncodedString())"
+        let fingerprint = Data(digest).base64EncodedString()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "="))
+        return "SHA256:\(fingerprint)"
     }
 }

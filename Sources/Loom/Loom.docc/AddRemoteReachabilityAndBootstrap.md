@@ -95,6 +95,7 @@ Use ``LoomBootstrapMetadata`` to publish optional recovery channels such as:
 - SSH endpoints
 - a bootstrap control port
 - a preferred SSH port
+- pinned SSH host-key fingerprints
 - a Wake-on-LAN payload
 
 ```swift
@@ -107,6 +108,7 @@ let bootstrapMetadata = LoomBootstrapMetadata(
     ],
     sshPort: 22,
     controlPort: 9849,
+    sshHostKeyFingerprints: ["SHA256:..."],
     wakeOnLAN: .init(
         macAddress: "AA:BB:CC:DD:EE:FF",
         broadcastAddresses: ["192.168.1.255"]
@@ -137,7 +139,7 @@ That deterministic order is important when you want retries to feel predictable 
 Loom also ships focused clients for the other common recovery steps:
 
 - ``LoomDefaultWakeOnLANClient`` sends magic packets using ``LoomWakeOnLANInfo``
-- ``LoomDefaultSSHBootstrapClient`` requires an explicit ``LoomSSHServerTrustConfiguration`` and validates OpenSSH host certificates against your trusted host CA keys
+- ``LoomDefaultSSHBootstrapClient`` requires an explicit ``LoomSSHServerTrustConfiguration`` and validates either OpenSSH host certificates against trusted host CAs or raw host keys against pinned SHA256 fingerprints
 
 Those clients are deliberately narrow. Your app still decides:
 

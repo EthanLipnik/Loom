@@ -25,6 +25,7 @@ struct LoomBootstrapMetadataTests {
             ],
             sshPort: 22,
             controlPort: 9851,
+            sshHostKeyFingerprints: ["SHA256:test-fingerprint"],
             wakeOnLAN: LoomWakeOnLANInfo(
                 macAddress: "AA:BB:CC:DD:EE:FF",
                 broadcastAddresses: ["10.0.0.255", "192.168.1.255"]
@@ -37,7 +38,27 @@ struct LoomBootstrapMetadataTests {
         #expect(decoded == metadata)
         #expect(decoded.version == LoomBootstrapMetadata.currentVersion)
         #expect(decoded.endpoints.count == 2)
+        #expect(decoded.sshHostKeyFingerprints == ["SHA256:test-fingerprint"])
         #expect(decoded.wakeOnLAN?.broadcastAddresses.count == 2)
+    }
+
+    @Test("Bootstrap metadata decodes missing SSH host-key fingerprints as empty")
+    func bootstrapMetadataDecodesMissingSSHHostKeyFingerprintsAsEmpty() throws {
+        let json = """
+        {
+          "version": 4,
+          "enabled": true,
+          "supportsPreloginDaemon": false,
+          "endpoints": [],
+          "sshPort": 22,
+          "controlPort": null,
+          "wakeOnLAN": null
+        }
+        """.data(using: .utf8)!
+
+        let metadata = try JSONDecoder().decode(LoomBootstrapMetadata.self, from: json)
+
+        #expect(metadata.sshHostKeyFingerprints.isEmpty)
     }
 
     @Test("Wake-on-LAN magic packet format")
@@ -153,6 +174,25 @@ struct LoomBootstrapMetadataTests {
         } catch let error as LoomSSHServerTrustError {
             #expect(error == .missingHostCertificate)
         }
+    }
+
+    @Test("SSH validator accepts pinned raw host keys")
+    func sshValidatorAcceptsPinnedRawHostKey() throws {
+        let rawHostKey = try NIOSSHPublicKey(openSSHPublicKey: LoomSSHTestFixtures.rawHostKey)
+        let fingerprint = try LoomSSHServerTrustValidator.hostKeyFingerprint(for: rawHostKey)
+        #expect(fingerprint.hasPrefix("SHA256:"))
+        #expect(!fingerprint.hasSuffix("="))
+        let validator = try LoomSSHServerTrustValidator(
+            configuration: LoomSSHServerTrustConfiguration(
+                trustedHostAuthorities: [],
+                requiredPrincipal: "",
+                trustedHostKeyFingerprints: [fingerprint]
+            )
+        )
+
+        let validatedHost = try validator.validate(hostKey: rawHostKey)
+
+        #expect(validatedHost.hostKeyFingerprint == fingerprint)
     }
 
     @Test("SSH validator rejects wrong principal certificates")
