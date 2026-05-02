@@ -94,6 +94,7 @@ Use ``LoomBootstrapMetadata`` to publish optional recovery channels such as:
 
 - SSH endpoints
 - a bootstrap control port
+- a bootstrap control shared secret
 - a preferred SSH port
 - pinned SSH host-key fingerprints
 - a Wake-on-LAN payload
@@ -108,6 +109,7 @@ let bootstrapMetadata = LoomBootstrapMetadata(
     ],
     sshPort: 22,
     controlPort: 9849,
+    controlAuthSecret: "base64-shared-secret",
     sshHostKeyFingerprints: ["SHA256:..."],
     wakeOnLAN: .init(
         macAddress: "AA:BB:CC:DD:EE:FF",

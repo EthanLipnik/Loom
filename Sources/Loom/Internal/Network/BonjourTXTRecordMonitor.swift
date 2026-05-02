@@ -55,6 +55,7 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
     private var shouldStopWorker = false
     private var didStopOnMonitorThread = false
     private var servicesByIdentity: [BonjourServiceIdentity: NetService] = [:]
+    private var stopCompletions: [@Sendable () -> Void] = []
 
     init(serviceType: String, enablePeerToPeer: Bool) {
         self.serviceType = serviceType
@@ -78,15 +79,16 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
         }
     }
 
-    func stop() {
-        stateQueue.async { [weak self] in
-            guard let self else {
-                return
+    func stop(onStopped: (@Sendable () -> Void)? = nil) {
+        stateQueue.async { [self] in
+            if let onStopped {
+                stopCompletions.append(onStopped)
             }
-
             self.shouldStopWorker = true
 
             guard let thread = self.workerThread else {
+                let completions = self.drainStopCompletionsOnStateQueue()
+                completions.forEach { $0() }
                 return
             }
 
@@ -94,11 +96,13 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
                 if thread.isFinished {
                     self.clearWorkerReferencesOnStateQueue()
                 }
+                let completions = self.drainStopCompletionsOnStateQueue()
+                completions.forEach { $0() }
                 return
             }
 
-            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue) { [weak self] in
-                self?.stopOnMonitorThread()
+            CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue) { [self] in
+                self.stopOnMonitorThread()
             }
             CFRunLoopWakeUp(runLoop)
         }
@@ -170,14 +174,24 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
     }
 
     private func clearWorkerReferences() {
-        stateQueue.sync {
+        let completions = stateQueue.sync {
             clearWorkerReferencesOnStateQueue()
+            return drainStopCompletionsOnStateQueue()
+        }
+        for completion in completions {
+            completion()
         }
     }
 
     private func clearWorkerReferencesOnStateQueue() {
         workerThread = nil
         monitorRunLoop = nil
+    }
+
+    private func drainStopCompletionsOnStateQueue() -> [@Sendable () -> Void] {
+        let completions = stopCompletions
+        stopCompletions.removeAll()
+        return completions
     }
 
     private var shouldContinueRunning: Bool {

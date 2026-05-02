@@ -25,6 +25,7 @@ struct LoomBootstrapMetadataTests {
             ],
             sshPort: 22,
             controlPort: 9851,
+            controlAuthSecret: "daemon-secret",
             sshHostKeyFingerprints: ["SHA256:test-fingerprint"],
             wakeOnLAN: LoomWakeOnLANInfo(
                 macAddress: "AA:BB:CC:DD:EE:FF",
@@ -38,6 +39,7 @@ struct LoomBootstrapMetadataTests {
         #expect(decoded == metadata)
         #expect(decoded.version == LoomBootstrapMetadata.currentVersion)
         #expect(decoded.endpoints.count == 2)
+        #expect(decoded.controlAuthSecret == "daemon-secret")
         #expect(decoded.sshHostKeyFingerprints == ["SHA256:test-fingerprint"])
         #expect(decoded.wakeOnLAN?.broadcastAddresses.count == 2)
     }

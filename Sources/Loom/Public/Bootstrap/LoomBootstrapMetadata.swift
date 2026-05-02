@@ -68,7 +68,7 @@ public struct LoomWakeOnLANInfo: Codable, Hashable, Sendable {
 /// Bootstrap capability metadata stored with peer records.
 public struct LoomBootstrapMetadata: Codable, Hashable, Sendable {
     /// Metadata version for forward-compatible decoding.
-    public static let currentVersion = 5
+    public static let currentVersion = 6
 
     /// Metadata schema version.
     public let version: Int
@@ -82,6 +82,8 @@ public struct LoomBootstrapMetadata: Codable, Hashable, Sendable {
     public let sshPort: UInt16?
     /// Optional bootstrap control port for daemon handoff.
     public let controlPort: UInt16?
+    /// Shared secret used to encrypt pre-login daemon control requests.
+    public let controlAuthSecret: String?
     /// Pinned SHA256 fingerprints for SSH host-key validation.
     public let sshHostKeyFingerprints: [String]
     /// Wake-on-LAN metadata when available.
@@ -96,6 +98,7 @@ public struct LoomBootstrapMetadata: Codable, Hashable, Sendable {
     ///   - endpoints: Candidate endpoints for bootstrap connection attempts.
     ///   - sshPort: Preferred SSH port.
     ///   - controlPort: Preferred daemon control port.
+    ///   - controlAuthSecret: Shared secret used to encrypt daemon control requests.
     ///   - sshHostKeyFingerprints: Pinned SHA256 host-key fingerprints accepted for SSH bootstrap.
     ///   - wakeOnLAN: Optional Wake-on-LAN payload data.
     ///
@@ -118,6 +121,7 @@ public struct LoomBootstrapMetadata: Codable, Hashable, Sendable {
         endpoints: [LoomBootstrapEndpoint],
         sshPort: UInt16?,
         controlPort: UInt16?,
+        controlAuthSecret: String? = nil,
         sshHostKeyFingerprints: [String] = [],
         wakeOnLAN: LoomWakeOnLANInfo?
     ) {
@@ -127,6 +131,7 @@ public struct LoomBootstrapMetadata: Codable, Hashable, Sendable {
         self.endpoints = endpoints
         self.sshPort = sshPort
         self.controlPort = controlPort
+        self.controlAuthSecret = controlAuthSecret
         self.sshHostKeyFingerprints = sshHostKeyFingerprints
         self.wakeOnLAN = wakeOnLAN
     }
@@ -138,6 +143,7 @@ public struct LoomBootstrapMetadata: Codable, Hashable, Sendable {
         case endpoints
         case sshPort
         case controlPort
+        case controlAuthSecret
         case sshHostKeyFingerprints
         case wakeOnLAN
     }
@@ -150,6 +156,7 @@ public struct LoomBootstrapMetadata: Codable, Hashable, Sendable {
         endpoints = try container.decode([LoomBootstrapEndpoint].self, forKey: .endpoints)
         sshPort = try container.decodeIfPresent(UInt16.self, forKey: .sshPort)
         controlPort = try container.decodeIfPresent(UInt16.self, forKey: .controlPort)
+        controlAuthSecret = try container.decodeIfPresent(String.self, forKey: .controlAuthSecret)
         sshHostKeyFingerprints = try container.decodeIfPresent(
             [String].self,
             forKey: .sshHostKeyFingerprints

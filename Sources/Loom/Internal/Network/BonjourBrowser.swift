@@ -36,6 +36,8 @@ public final class LoomDiscovery {
 
     private var browser: NWBrowser?
     private var txtRecordMonitor: BonjourTXTRecordMonitor?
+    private var stoppingTXTRecordMonitors: [BonjourTXTRecordMonitor] = []
+    private var browserCanRefreshInPlace = false
     private let browserQueue = DispatchQueue(label: "com.mirage.loom.discovery.browser", qos: .utility)
     private let serviceType: String
     private var browseResultsByEndpoint: [NWEndpoint: NWBrowser.Result] = [:]
@@ -126,8 +128,8 @@ public final class LoomDiscovery {
     public func stopDiscovery() {
         browser?.cancel()
         browser = nil
-        txtRecordMonitor?.stop()
-        txtRecordMonitor = nil
+        browserCanRefreshInPlace = false
+        stopTXTRecordMonitor()
         isSearching = false
         browseResultsByEndpoint.removeAll()
         txtRecordsByService.removeAll()
@@ -140,13 +142,30 @@ public final class LoomDiscovery {
 
     private func handleBrowserState(_ state: NWBrowser.State) {
         switch state {
+        case .setup,
+             .waiting:
+            browserCanRefreshInPlace = true
         case .ready:
             isSearching = true
+            browserCanRefreshInPlace = true
         case .cancelled,
              .failed:
             isSearching = false
+            browserCanRefreshInPlace = false
         default:
             break
+        }
+    }
+
+    private func stopTXTRecordMonitor() {
+        guard let monitor = txtRecordMonitor else { return }
+        txtRecordMonitor = nil
+        stoppingTXTRecordMonitors.append(monitor)
+        monitor.stop { [weak self, weak monitor] in
+            Task { @MainActor [weak self, weak monitor] in
+                guard let self, let monitor else { return }
+                self.stoppingTXTRecordMonitors.removeAll { $0 === monitor }
+            }
         }
     }
 
@@ -335,6 +354,11 @@ public final class LoomDiscovery {
     public func refresh() {
         guard enableBonjour else {
             stopDiscovery()
+            return
+        }
+
+        guard browser == nil || !browserCanRefreshInPlace else {
+            LoomLogger.discovery("Discovery refresh skipped; Bonjour browser is already active")
             return
         }
 
