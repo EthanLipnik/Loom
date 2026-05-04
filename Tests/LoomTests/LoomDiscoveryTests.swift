@@ -28,6 +28,28 @@ struct LoomDiscoveryTests {
         #expect(discovery.discoveredPeers.isEmpty)
     }
 
+    @Test("TXT record monitor stop completion waits for worker teardown")
+    func txtRecordMonitorStopCompletionWaitsForWorkerTeardown() async throws {
+        for _ in 0..<5 {
+            let monitor = BonjourTXTRecordMonitor(
+                serviceType: "_loom-test._tcp.",
+                enablePeerToPeer: false
+            )
+
+            monitor.start()
+
+            let completedAfterWorkerFinished = try await withTimeout(.seconds(2)) {
+                await withCheckedContinuation { continuation in
+                    monitor.stop {
+                        continuation.resume(returning: monitor.hasFinishedWorkerThreadForTesting)
+                    }
+                }
+            }
+
+            #expect(completedAfterWorkerFinished)
+        }
+    }
+
     @MainActor
     @Test("Discovery deduplicates multiple endpoints for one device and prefers the best transport")
     func discoveryDeduplicatesLogicalPeers() throws {
@@ -326,5 +348,30 @@ struct LoomDiscoveryTests {
                 directTransports: directTransports
             )
         )
+    }
+}
+
+private enum LoomDiscoveryTestTimeout: Error {
+    case timedOut
+}
+
+private func withTimeout<T: Sendable>(
+    _ timeout: Duration,
+    operation: @escaping @Sendable () async throws -> T
+) async throws -> T {
+    try await withThrowingTaskGroup(of: T.self) { group in
+        group.addTask {
+            try await operation()
+        }
+        group.addTask {
+            try await Task.sleep(for: timeout)
+            throw LoomDiscoveryTestTimeout.timedOut
+        }
+
+        guard let result = try await group.next() else {
+            throw LoomDiscoveryTestTimeout.timedOut
+        }
+        group.cancelAll()
+        return result
     }
 }

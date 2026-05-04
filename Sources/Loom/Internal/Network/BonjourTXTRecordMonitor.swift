@@ -54,6 +54,7 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
     private var monitorRunLoop: CFRunLoop?
     private var shouldStopWorker = false
     private var didStopOnMonitorThread = false
+    private var didFinishWorkerThread = true
     private var servicesByIdentity: [BonjourServiceIdentity: NetService] = [:]
     private var stopCompletions: [@Sendable () -> Void] = []
 
@@ -71,6 +72,7 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
 
             self.shouldStopWorker = false
             self.didStopOnMonitorThread = false
+            self.didFinishWorkerThread = false
             let thread = Thread(target: self, selector: #selector(Self.runMonitorThread), object: nil)
             thread.name = "Loom Bonjour TXT monitor"
             self.workerThread = thread
@@ -92,12 +94,15 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
                 return
             }
 
-            guard let runLoop = self.monitorRunLoop, !thread.isFinished else {
-                if thread.isFinished {
-                    self.clearWorkerReferencesOnStateQueue()
-                }
+            if thread.isFinished {
+                self.didFinishWorkerThread = true
+                self.clearWorkerReferencesOnStateQueue()
                 let completions = self.drainStopCompletionsOnStateQueue()
                 completions.forEach { $0() }
+                return
+            }
+
+            guard let runLoop = self.monitorRunLoop else {
                 return
             }
 
@@ -110,12 +115,15 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
 
     @objc private func runMonitorThread() {
         autoreleasepool {
+            defer {
+                finishWorkerThread()
+            }
+
             let runLoop = RunLoop.current
             let cfRunLoop = CFRunLoopGetCurrent()
 
             let shouldStop = stateQueue.sync {
                 if shouldStopWorker {
-                    clearWorkerReferencesOnStateQueue()
                     return true
                 }
                 monitorRunLoop = cfRunLoop
@@ -169,12 +177,12 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
         }
         servicesByIdentity.removeAll()
 
-        clearWorkerReferences()
         CFRunLoopStop(CFRunLoopGetCurrent())
     }
 
-    private func clearWorkerReferences() {
+    private func finishWorkerThread() {
         let completions = stateQueue.sync {
+            didFinishWorkerThread = true
             clearWorkerReferencesOnStateQueue()
             return drainStopCompletionsOnStateQueue()
         }
@@ -197,6 +205,12 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
     private var shouldContinueRunning: Bool {
         stateQueue.sync {
             !shouldStopWorker
+        }
+    }
+
+    package var hasFinishedWorkerThreadForTesting: Bool {
+        stateQueue.sync {
+            didFinishWorkerThread
         }
     }
 
