@@ -50,4 +50,20 @@ struct LoomEndpointResolverTests {
         )
         #expect(endpoint.debugDescription == expectedEndpoint.debugDescription)
     }
+
+    @Test("Peer-to-peer local hosts bypass pre-resolution")
+    func peerToPeerLocalHostsBypassPreResolution() {
+        #expect(
+            !LoomEndpointResolver.shouldPreResolveLocalHost(
+                "ethansmacstudio.local",
+                enablePeerToPeer: true
+            )
+        )
+        #expect(
+            LoomEndpointResolver.shouldPreResolveLocalHost(
+                "ethansmacstudio.local",
+                enablePeerToPeer: false
+            )
+        )
+    }
 }

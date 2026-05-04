@@ -78,6 +78,15 @@ package enum LoomEndpointResolver {
         return .hostPort(host: resolved, port: nwPort)
     }
 
+    package static func shouldPreResolveLocalHost(
+        _ host: String,
+        enablePeerToPeer: Bool
+    ) -> Bool {
+        guard !enablePeerToPeer else { return false }
+        let lowered = host.lowercased()
+        return lowered.hasSuffix(".local") || lowered.hasSuffix(".local.")
+    }
+
     /// Removes all cached hostname resolutions.
     package static func clearCache() {
         cache.removeAllObjects()

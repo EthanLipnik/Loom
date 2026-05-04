@@ -183,9 +183,13 @@ public final class LoomNode {
         // Pre-resolve .local mDNS hostnames to IP addresses so the
         // NWConnection doesn't stall in .waiting(ENETDOWN) on first use.
         let resolvedEndpoint: NWEndpoint
+        let resolvedEnablePeerToPeer = enablePeerToPeer ?? configuration.enablePeerToPeer
         if case .hostPort(let host, let port) = endpoint,
            case .name(let hostname, _) = host,
-           hostname.lowercased().hasSuffix(".local") || hostname.lowercased().hasSuffix(".local.") {
+           LoomEndpointResolver.shouldPreResolveLocalHost(
+               hostname,
+               enablePeerToPeer: resolvedEnablePeerToPeer
+           ) {
             resolvedEndpoint = try await LoomEndpointResolver.resolveHostPort(
                 host: hostname,
                 port: port.rawValue
