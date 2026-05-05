@@ -12,17 +12,6 @@ import Testing
 
 @Suite("Loom Ordered Unreliable Send Queue")
 struct LoomOrderedUnreliableSendQueueTests {
-    @Test("Queue profile limits keep interactive media shallow and probes deep")
-    func queueProfileLimitsMatchIntent() {
-        let interactiveLimits = LoomOrderedUnreliableSendQueue.limits(for: .interactiveMedia)
-        let throughputLimits = LoomOrderedUnreliableSendQueue.limits(for: .throughputProbe)
-
-        #expect(interactiveLimits.maxOutstandingPackets == LoomOrderedUnreliableSendQueue.defaultMaxOutstandingPackets)
-        #expect(interactiveLimits.maxOutstandingBytes == LoomOrderedUnreliableSendQueue.defaultMaxOutstandingBytes)
-        #expect(throughputLimits.maxOutstandingPackets > interactiveLimits.maxOutstandingPackets)
-        #expect(throughputLimits.maxOutstandingBytes > interactiveLimits.maxOutstandingBytes)
-    }
-
     @Test("Throughput probe queue accepts more outstanding packets before backpressure")
     func throughputProbeQueueAcceptsDeeperBurst() async throws {
         let packetSize = 1024

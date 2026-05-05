@@ -20,11 +20,13 @@ struct LoomDiscoveryTests {
         discovery.startDiscovery()
 
         #expect(discovery.isSearching == false)
+        #expect(discovery.isBrowserReady == false)
         #expect(discovery.discoveredPeers.isEmpty)
 
         discovery.refresh()
 
         #expect(discovery.isSearching == false)
+        #expect(discovery.isBrowserReady == false)
         #expect(discovery.discoveredPeers.isEmpty)
     }
 

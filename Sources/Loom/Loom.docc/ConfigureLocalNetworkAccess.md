@@ -28,6 +28,8 @@ Replace `_yourapp._tcp` with the Bonjour service type you pass to ``LoomNetworkC
 
 Both keys are required. If either is missing, the system denies Bonjour operations and `NWBrowser` transitions to a failed state with error `-65555 (kDNSServiceErr_NoAuth)`.
 
+When browsing fails for that reason, `LoomDiscovery` reports the denial through its `localNetworkAccessDenied` state and `onLocalNetworkAccessDeniedChanged` callback so clients can switch from onboarding into recovery UI.
+
 ## App Store Distribution
 
 Apps distributed through the App Store or using App Sandbox need an additional entitlement:

@@ -19,6 +19,9 @@ public final class LoomDiscovery {
     /// Whether discovery is currently active
     public private(set) var isSearching: Bool = false
 
+    /// Whether Bonjour browsing has reached the ready state.
+    public private(set) var isBrowserReady: Bool = false
+
     /// Whether peer-to-peer WiFi discovery is enabled
     public var enablePeerToPeer: Bool = true
 
@@ -30,6 +33,12 @@ public final class LoomDiscovery {
 
     /// Callback invoked whenever discovered peers change.
     public var onPeersChanged: (([LoomPeer]) -> Void)?
+
+    /// Callback invoked when the local network access denial state changes.
+    public var onLocalNetworkAccessDeniedChanged: ((Bool) -> Void)?
+
+    /// Whether Bonjour browsing is currently marked as denied by local network privacy.
+    public private(set) var localNetworkAccessDenied = false
 
     /// Additional peer-change observers keyed by registration token.
     private var peersChangedObservers: [UUID: ([LoomPeer]) -> Void] = [:]
@@ -131,6 +140,7 @@ public final class LoomDiscovery {
         browserCanRefreshInPlace = false
         stopTXTRecordMonitor()
         isSearching = false
+        isBrowserReady = false
         browseResultsByEndpoint.removeAll()
         txtRecordsByService.removeAll()
         resolvedAddressesByService.removeAll()
@@ -148,13 +158,36 @@ public final class LoomDiscovery {
         case .ready:
             isSearching = true
             browserCanRefreshInPlace = true
-        case .cancelled,
-             .failed:
+            isBrowserReady = true
+            setLocalNetworkAccessDenied(false)
+        case .cancelled:
             isSearching = false
             browserCanRefreshInPlace = false
+            isBrowserReady = false
+        case let .failed(error):
+            isSearching = false
+            browserCanRefreshInPlace = false
+            isBrowserReady = false
+            setLocalNetworkAccessDenied(Self.isLocalNetworkAccessDenied(error))
         default:
             break
         }
+    }
+
+    private func setLocalNetworkAccessDenied(_ value: Bool) {
+        guard localNetworkAccessDenied != value else { return }
+        localNetworkAccessDenied = value
+        onLocalNetworkAccessDeniedChanged?(value)
+    }
+
+    private static func isLocalNetworkAccessDenied(_ error: Error) -> Bool {
+        if let nwError = error as? NWError,
+           case let .dns(code) = nwError {
+            return code == -65_555
+        }
+
+        let nsError = error as NSError
+        return nsError.domain == NetService.errorDomain && nsError.code == -65_555
     }
 
     private func stopTXTRecordMonitor() {

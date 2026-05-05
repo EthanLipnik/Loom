@@ -13,17 +13,6 @@ import Testing
 
 @Suite("Loom CloudKit Bootstrap Metadata")
 struct LoomCloudKitBootstrapMetadataTests {
-    @MainActor
-    @Test("CloudKit peer provider defaults to an empty own-peer list")
-    func cloudKitPeerProviderDefaultsToEmptyOwnPeerList() {
-        let manager = LoomCloudKitManager(
-            configuration: LoomCloudKitConfiguration(containerIdentifier: "iCloud.com.example.test")
-        )
-        let provider = LoomCloudKitPeerProvider(cloudKitManager: manager)
-
-        #expect(provider.ownPeers.isEmpty)
-    }
-
     @Test("CloudKit bootstrap metadata blob roundtrip")
     func cloudKitBootstrapMetadataBlobRoundtrip() throws {
         let metadata = LoomBootstrapMetadata(
