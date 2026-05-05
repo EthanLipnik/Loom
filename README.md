@@ -120,8 +120,10 @@ That means Loom does not depend on a specific control plane. You can feed the di
 let configuration = LoomContainerConfiguration(
     serviceType: "_studio._tcp",
     serviceName: "Studio Mac",
+    ports: LoomKitPortConfiguration(
+        overlayProbePort: 9952
+    ),
     overlayDirectory: LoomOverlayDirectoryConfiguration(
-        probePort: Loom.defaultOverlayProbePort,
         refreshInterval: .seconds(30),
         probeTimeout: .seconds(2),
         seedProvider: {

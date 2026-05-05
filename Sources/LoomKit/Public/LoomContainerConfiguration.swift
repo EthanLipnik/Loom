@@ -44,6 +44,11 @@ public struct LoomContainerConfiguration: Sendable {
     public let enablePeerToPeer: Bool
     /// Direct transports this container should listen on and advertise.
     public let enabledDirectTransports: Set<LoomTransportKind>
+    /// Listener ports requested by this container.
+    ///
+    /// Direct listener ports always map into Loom's network configuration. The overlay probe port is used
+    /// when ``overlayDirectory`` is enabled and its configuration omits an explicit `probePort`.
+    public let ports: LoomKitPortConfiguration
     /// App-defined metadata published with the local advertisement.
     public let advertisementMetadata: [String: String]
     /// Feature flags advertised for compatibility filtering.
@@ -70,6 +75,7 @@ public struct LoomContainerConfiguration: Sendable {
         trust: LoomTrustMode = .manualOnly,
         enablePeerToPeer: Bool = true,
         enabledDirectTransports: Set<LoomTransportKind> = Set(LoomTransportKind.allCases),
+        ports: LoomKitPortConfiguration = .default,
         advertisementMetadata: [String: String] = [:],
         supportedFeatures: [String] = [],
         bootstrapMetadataProvider: BootstrapMetadataProvider? = nil,
@@ -88,6 +94,7 @@ public struct LoomContainerConfiguration: Sendable {
         self.trust = trust
         self.enablePeerToPeer = enablePeerToPeer
         self.enabledDirectTransports = enabledDirectTransports
+        self.ports = ports
         self.advertisementMetadata = advertisementMetadata
         self.supportedFeatures = Array(
             Set(

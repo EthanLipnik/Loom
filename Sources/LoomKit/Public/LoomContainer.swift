@@ -30,19 +30,24 @@ public final class LoomContainer {
         guard !trimmedServiceName.isEmpty else {
             throw LoomKitError(message: "LoomKit service name must not be empty.")
         }
+        let resolvedOverlayDirectory = Self.resolvedOverlayDirectoryConfiguration(
+            configuration.overlayDirectory,
+            ports: configuration.ports
+        )
 
         self.configuration = LoomContainerConfiguration(
             serviceType: trimmedServiceType,
             serviceName: trimmedServiceName,
             deviceIDSuiteName: configuration.deviceIDSuiteName,
             cloudKit: configuration.cloudKit,
-            overlayDirectory: configuration.overlayDirectory,
+            overlayDirectory: resolvedOverlayDirectory,
             remoteSignaling: configuration.remoteSignaling,
             appGroup: configuration.appGroup,
             trustProvider: configuration.trustProvider,
             trust: configuration.trust,
             enablePeerToPeer: configuration.enablePeerToPeer,
             enabledDirectTransports: configuration.enabledDirectTransports,
+            ports: configuration.ports,
             advertisementMetadata: configuration.advertisementMetadata,
             supportedFeatures: configuration.supportedFeatures,
             bootstrapMetadataProvider: configuration.bootstrapMetadataProvider,
@@ -56,7 +61,10 @@ public final class LoomContainer {
         )
         let networkConfiguration = LoomNetworkConfiguration(
             serviceType: trimmedServiceType,
-            overlayProbePort: configuration.overlayDirectory?.probePort,
+            controlPort: self.configuration.ports.tcpPort,
+            quicPort: self.configuration.ports.quicPort,
+            udpPort: self.configuration.ports.udpPort,
+            overlayProbePort: self.configuration.overlayDirectory?.probePort,
             enablePeerToPeer: configuration.enablePeerToPeer,
             enabledDirectTransports: configuration.enabledDirectTransports,
             directConnectionPolicy: configuration.directConnectionPolicy
@@ -183,6 +191,24 @@ public final class LoomContainer {
             participantIdentityRecordType: configuration.participantIdentityRecordType,
             deviceIDKey: configuration.deviceIDKey,
             deviceIDSuiteName: configuration.deviceIDSuiteName ?? deviceIDSuiteName
+        )
+    }
+
+    private static func resolvedOverlayDirectoryConfiguration(
+        _ overlayDirectory: LoomOverlayDirectoryConfiguration?,
+        ports: LoomKitPortConfiguration
+    ) -> LoomOverlayDirectoryConfiguration? {
+        guard let overlayDirectory else {
+            return nil
+        }
+        guard overlayDirectory.usesDefaultProbePort else {
+            return overlayDirectory
+        }
+        return LoomOverlayDirectoryConfiguration(
+            probePort: ports.overlayProbePort,
+            refreshInterval: overlayDirectory.refreshInterval,
+            probeTimeout: overlayDirectory.probeTimeout,
+            seedProvider: overlayDirectory.seedProvider
         )
     }
 }

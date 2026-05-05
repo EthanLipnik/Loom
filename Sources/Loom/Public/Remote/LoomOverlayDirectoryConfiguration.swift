@@ -20,16 +20,18 @@ public struct LoomOverlayDirectoryConfiguration: Sendable {
     public let refreshInterval: Duration
     /// Per-seed timeout applied to the TCP probe.
     public let probeTimeout: Duration
+    package let usesDefaultProbePort: Bool
 
     public init(
-        probePort: UInt16 = Loom.defaultOverlayProbePort,
+        probePort: UInt16? = nil,
         refreshInterval: Duration = .seconds(30),
         probeTimeout: Duration = .seconds(2),
         seedProvider: @escaping SeedProvider
     ) {
         self.seedProvider = seedProvider
-        self.probePort = probePort
+        self.probePort = probePort ?? Loom.defaultOverlayProbePort
         self.refreshInterval = refreshInterval
         self.probeTimeout = probeTimeout
+        self.usesDefaultProbePort = probePort == nil
     }
 }

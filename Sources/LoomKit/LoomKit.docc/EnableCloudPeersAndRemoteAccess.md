@@ -41,6 +41,24 @@ That ordering matters because the app-facing API stays stable while LoomKit stil
 
 Use ``LoomContainerConfiguration/enabledDirectTransports`` when a container should publish only a subset of Loom's direct transports. Use ``LoomContainerConfiguration/directConnectionPolicy`` when a container should keep Loom's resolution behavior but customize path order, transport order, local candidate racing, or a local-discovery host override.
 
+Use ``LoomContainerConfiguration/ports`` when a container needs fixed listener ports. TCP, UDP, and QUIC default to `0`, which lets the system assign available ephemeral ports. Overlay probing defaults to Loom's overlay probe port when ``LoomContainerConfiguration/overlayDirectory`` is enabled and the overlay configuration omits its own `probePort`:
+
+```swift
+let configuration = LoomContainerConfiguration(
+    serviceName: "Example Mac",
+    ports: LoomKitPortConfiguration(
+        udpPort: 9951,
+        quicPort: 9952,
+        overlayProbePort: 9953
+    ),
+    overlayDirectory: LoomOverlayDirectoryConfiguration(
+        seedProvider: {
+            [LoomOverlaySeed(host: "example-mac.tailnet.example")]
+        }
+    )
+)
+```
+
 ## Trust Modes
 
 Use ``LoomTrustMode`` to decide how much approval friction to keep:

@@ -17,7 +17,7 @@ The usual setup is:
 2. feed ``LoomOverlayDirectory`` with MagicDNS names or stable tailnet IP addresses
 3. let Loom race the overlay candidate before falling back to signaling
 
-If you are using `LoomKit`, setting `overlayDirectory` on the container configuration is enough. The container wires the same probe port into the underlying ``LoomNode`` automatically.
+If you are using `LoomKit`, setting `overlayDirectory` on the container configuration is enough. When the overlay configuration omits `probePort`, the container uses Loom's default overlay probe port and wires that same probe port into the underlying ``LoomNode`` automatically.
 
 ```swift
 let container = try LoomContainer(
@@ -25,7 +25,6 @@ let container = try LoomContainer(
         serviceType: "_studio._tcp",
         serviceName: "Studio Mac",
         overlayDirectory: LoomOverlayDirectoryConfiguration(
-            probePort: Loom.defaultOverlayProbePort,
             refreshInterval: .seconds(30),
             probeTimeout: .seconds(2),
             seedProvider: {
@@ -33,6 +32,25 @@ let container = try LoomContainer(
                     LoomOverlaySeed(host: "studio-mac.tailnet.example"),
                     LoomOverlaySeed(host: "100.64.0.25"),
                 ]
+            }
+        )
+    )
+)
+```
+
+Use `LoomKitPortConfiguration` when a LoomKit app needs a different listener port:
+
+```swift
+let container = try LoomContainer(
+    for: LoomContainerConfiguration(
+        serviceType: "_studio._tcp",
+        serviceName: "Studio Mac",
+        ports: LoomKitPortConfiguration(
+            overlayProbePort: 9952
+        ),
+        overlayDirectory: LoomOverlayDirectoryConfiguration(
+            seedProvider: {
+                [LoomOverlaySeed(host: "studio-mac.tailnet.example")]
             }
         )
     )

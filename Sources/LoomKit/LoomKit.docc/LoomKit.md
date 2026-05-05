@@ -52,6 +52,7 @@ The documentation is organized the same way:
 - ``LoomContext``
 - ``LoomQuery``
 - ``LoomContainerConfiguration``
+- ``LoomKitPortConfiguration``
 - ``LoomConnectionHandle``
 - ``LoomPeerSnapshot``
 - ``LoomConnectionSnapshot``
