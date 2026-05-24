@@ -7,10 +7,32 @@
 
 @testable import Loom
 import Foundation
+import Network
 import Testing
 
 @Suite("Loom Node Advertisement")
 struct LoomNodeAdvertisementTests {
+    @MainActor
+    @Test("Node creates QUIC LoomConnection for QUIC direct transport")
+    func nodeCreatesQUICConnectionForQUICTransport() throws {
+        let node = LoomNode()
+        let endpoint = NWEndpoint.hostPort(
+            host: "127.0.0.1",
+            port: try #require(NWEndpoint.Port(rawValue: 9))
+        )
+
+        let connection = try node.makeConnection(
+            to: endpoint,
+            using: .quic,
+            enablePeerToPeer: false
+        )
+
+        guard case .quic = connection else {
+            Issue.record("Expected LoomConnection.quic for QUIC direct transport.")
+            return
+        }
+    }
+
     @Test("Advertisement leaves hostName unset when no explicit host name is provided")
     func advertisementLeavesHostNameUnsetWithoutExplicitValue() {
         let advertisement = LoomPeerAdvertisement(
@@ -60,8 +82,7 @@ struct LoomNodeAdvertisementTests {
             serviceName: "Mirage Host"
         )
 
-        let expectedTransports: Set<LoomTransportKind> = LoomNode.quicAvailable ? [.udp, .quic] : [.udp]
-        #expect(Set(initial.directTransports.map(\.transportKind)) == expectedTransports)
+        #expect(Set(initial.directTransports.map(\.transportKind)) == [.udp, .quic])
         #expect(initial.directTransports.contains { $0.transportKind == .tcp } == false)
     }
 
@@ -90,11 +111,9 @@ struct LoomNodeAdvertisementTests {
             serviceName: "Mirage Host"
         )
 
-        let expectedTransports: Set<LoomTransportKind> = LoomNode.quicAvailable ? [.tcp, .udp, .quic] : [.tcp, .udp]
-        let expectedQUICPort: UInt16? = LoomNode.quicAvailable ? 5678 : nil
-        #expect(Set(updated.directTransports.map(\.transportKind)) == expectedTransports)
+        #expect(Set(updated.directTransports.map(\.transportKind)) == [.tcp, .udp, .quic])
         #expect(updated.directTransports.first { $0.transportKind == .udp }?.port == 1234)
-        #expect(updated.directTransports.first { $0.transportKind == .quic }?.port == expectedQUICPort)
+        #expect(updated.directTransports.first { $0.transportKind == .quic }?.port == 5678)
         #expect(updated.directTransports.first { $0.transportKind == .tcp }?.port == 9012)
     }
 

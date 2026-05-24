@@ -73,15 +73,9 @@ public struct LoomRemoteSignalingConfiguration: Sendable {
     }
 }
 
-/// Transport type for a remote connectivity candidate.
-public enum LoomRemoteCandidateTransport: String, Sendable, Codable {
-    case tcp
-    case quic
-}
-
 /// Remote endpoint candidate published by signaling.
 public struct LoomRemoteCandidate: Sendable, Codable, Hashable {
-    public let transport: LoomRemoteCandidateTransport
+    public let transport: LoomTransportKind
     public let address: String
     public let port: UInt16
 
@@ -92,7 +86,7 @@ public struct LoomRemoteCandidate: Sendable, Codable, Hashable {
     ///   - address: Candidate hostname or IP.
     ///   - port: Candidate listening port.
     public init(
-        transport: LoomRemoteCandidateTransport,
+        transport: LoomTransportKind,
         address: String,
         port: UInt16
     ) {
@@ -496,7 +490,7 @@ public final class LoomRemoteSignalingClient {
         ),
               let sig = try? identityManager.sign(workerPayload) else { return nil }
 
-        var headers: [(String, String)] = [
+        let headers: [(String, String)] = [
             ("\(headerPrefix)-session-id", sessionID),
             ("\(headerPrefix)-app-id", appAuth.appID),
             ("\(headerPrefix)-app-timestamp-ms", "\(timestampMs)"),
@@ -693,7 +687,7 @@ private func parseCandidates(_ rawValue: Any?) -> [LoomRemoteCandidate] {
     }
     return array.compactMap { candidateObject in
         guard let transportRaw = candidateObject["transport"] as? String,
-              let transport = LoomRemoteCandidateTransport(rawValue: transportRaw),
+              let transport = LoomTransportKind(rawValue: transportRaw),
               let address = candidateObject["address"] as? String else {
             return nil
         }

@@ -45,7 +45,7 @@ Authenticated Loom sessions also expose transport-facing metadata that higher-le
 - <doc:UseTailscaleAndCustomOverlays>
 - <doc:TransferLargeObjects>
 - ``LoomNode``
-- ``LoomSession``
+- ``LoomConnection``
 - ``LoomAuthenticatedSession``
 - ``LoomConnectionCoordinator``
 - ``LoomTransferEngine``

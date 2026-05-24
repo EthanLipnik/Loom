@@ -144,7 +144,7 @@ Add Loom to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/EthanLipnik/Loom.git", from: "1.4.0")
+    .package(url: "https://github.com/EthanLipnik/Loom.git", from: "2.0.0")
 ]
 ```
 
@@ -271,8 +271,8 @@ That split is what keeps Loom reusable instead of turning it into someone else's
 ## Requirements
 
 - Swift 6.2+
-- macOS 14+
-- iOS 17.4+
+- macOS 26+
+- iOS 26+
 - visionOS 26+
 
 ## Local network setup

@@ -42,8 +42,6 @@ public struct LoomAuthenticatedSessionContext: Sendable, Codable, Equatable {
         self.transportKind = transportKind
         self.transportDiagnostics = transportDiagnostics ?? LoomTransportDiagnostics(
             selectedTransportKind: transportKind,
-            nativeQUICSupported: false,
-            nativeQUICActive: false,
             usableDatagramSize: nil,
             serviceClass: nil,
             receiveSemantics: "unknown"
@@ -56,23 +54,17 @@ public struct LoomAuthenticatedSessionContext: Sendable, Codable, Equatable {
 /// Transport capability and selection diagnostics captured at authenticated-session setup.
 public struct LoomTransportDiagnostics: Sendable, Codable, Equatable {
     public let selectedTransportKind: LoomTransportKind
-    public let nativeQUICSupported: Bool
-    public let nativeQUICActive: Bool
     public let usableDatagramSize: Int?
     public let serviceClass: String?
     public let receiveSemantics: String
 
     public init(
         selectedTransportKind: LoomTransportKind,
-        nativeQUICSupported: Bool,
-        nativeQUICActive: Bool,
         usableDatagramSize: Int?,
         serviceClass: String?,
         receiveSemantics: String
     ) {
         self.selectedTransportKind = selectedTransportKind
-        self.nativeQUICSupported = nativeQUICSupported
-        self.nativeQUICActive = nativeQUICActive
         self.usableDatagramSize = usableDatagramSize
         self.serviceClass = serviceClass
         self.receiveSemantics = receiveSemantics
@@ -387,7 +379,6 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
 
     /// Stable authenticated-session identifier for app-owned bookkeeping.
     public nonisolated let id: UUID
-    public let rawSession: LoomSession?
     public let role: LoomSessionRole
     public let transportKind: LoomTransportKind
 
@@ -416,6 +407,8 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         onBootstrapProgress = handler
     }
 
+    private let connection: LoomConnection
+    private let nwConnection: NWConnection?
     private let transport: any LoomSessionTransport
     private let incomingStreamContinuation: AsyncStream<LoomMultiplexedStream>.Continuation
     private let incomingStreamObservers = LoomAsyncBroadcaster<LoomMultiplexedStream>()
@@ -440,62 +433,54 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
     private let recentlyClosedStreamTTL: CFAbsoluteTime = 2.0
     private let recentlyClosedStreamMaxCount = 64
     private let transportEndpointDescription: String
-    private let nativeQUICRemoteEndpoint: NWEndpoint?
-    private let nativeQUICPathSnapshotProvider: (@Sendable () -> LoomSessionNetworkPathSnapshot?)?
+    private let quicRemoteEndpoint: NWEndpoint?
+    private let quicPathSnapshotProvider: (@Sendable () -> LoomSessionNetworkPathSnapshot?)?
     private let transportServiceClassDescription: String?
     private let transportUsableDatagramSize: Int?
 
     public init(
-        rawSession: LoomSession,
-        role: LoomSessionRole,
-        transportKind: LoomTransportKind,
-        serviceClass: NWParameters.ServiceClass? = nil
-    ) {
-        id = UUID()
-        self.rawSession = rawSession
-        self.role = role
-        self.transportKind = transportKind
-        switch transportKind {
-        case .tcp:
-            transport = LoomFramedConnection(connection: rawSession.connection)
-        case .udp:
-            transport = LoomReliableChannel(connection: rawSession.connection)
-        case .quic:
-            transport = LoomFramedConnection(connection: rawSession.connection)
-        }
-        transportEndpointDescription = rawSession.endpoint.debugDescription
-        nativeQUICRemoteEndpoint = nil
-        nativeQUICPathSnapshotProvider = nil
-        transportServiceClassDescription = serviceClass.map(Self.serviceClassDescription(_:))
-        transportUsableDatagramSize = transportKind == .udp ? Loom.defaultMaxPacketSize : nil
-        let (stream, continuation) = AsyncStream.makeStream(of: LoomMultiplexedStream.self)
-        incomingStreams = stream
-        incomingStreamContinuation = continuation
-        nextOutgoingStreamID = role == .initiator ? 1 : 2
-    }
-
-    @available(macOS 26.0, iOS 26.0, visionOS 26.0, tvOS 26.0, watchOS 26.0, *)
-    public init(
-        nativeQUICConnection: NetworkConnection<QUIC>,
+        connection: LoomConnection,
         role: LoomSessionRole,
         remoteEndpoint: NWEndpoint? = nil,
         serviceClass: NWParameters.ServiceClass? = nil
     ) {
         id = UUID()
-        rawSession = nil
+        self.connection = connection
         self.role = role
-        transportKind = .quic
-        transport = LoomNativeQUICSessionTransport(
-            connection: nativeQUICConnection,
-            role: role
-        )
-        transportEndpointDescription = (remoteEndpoint ?? nativeQUICConnection.remoteEndpoint)?.debugDescription ?? "native-quic"
-        nativeQUICRemoteEndpoint = remoteEndpoint ?? nativeQUICConnection.remoteEndpoint
-        nativeQUICPathSnapshotProvider = {
-            nativeQUICConnection.currentPath.map(LoomSessionNetworkPathSnapshot.init(path:))
+        switch connection {
+        case let .tcp(connection):
+            nwConnection = connection
+            transportKind = .tcp
+            transport = LoomFramedConnection(connection: connection)
+            transportEndpointDescription = (remoteEndpoint ?? connection.endpoint).debugDescription
+            quicRemoteEndpoint = nil
+            quicPathSnapshotProvider = nil
+            transportServiceClassDescription = serviceClass.map(Self.serviceClassDescription(_:))
+            transportUsableDatagramSize = nil
+        case let .udp(connection):
+            nwConnection = connection
+            transportKind = .udp
+            transport = LoomReliableChannel(connection: connection)
+            transportEndpointDescription = (remoteEndpoint ?? connection.endpoint).debugDescription
+            quicRemoteEndpoint = nil
+            quicPathSnapshotProvider = nil
+            transportServiceClassDescription = serviceClass.map(Self.serviceClassDescription(_:))
+            transportUsableDatagramSize = Loom.defaultMaxPacketSize
+        case let .quic(connection):
+            nwConnection = nil
+            transportKind = .quic
+            transport = LoomQUICSessionTransport(
+                connection: connection,
+                role: role
+            )
+            transportEndpointDescription = (remoteEndpoint ?? connection.remoteEndpoint)?.debugDescription ?? "quic"
+            quicRemoteEndpoint = remoteEndpoint ?? connection.remoteEndpoint
+            quicPathSnapshotProvider = {
+                connection.currentPath.map(LoomSessionNetworkPathSnapshot.init(path:))
+            }
+            transportServiceClassDescription = serviceClass.map(Self.serviceClassDescription(_:))
+            transportUsableDatagramSize = LoomQUICTransportFactory.defaultMaxDatagramFrameSize
         }
-        transportServiceClassDescription = serviceClass.map(Self.serviceClassDescription(_:))
-        transportUsableDatagramSize = LoomNativeQUICTransportFactory.defaultMaxDatagramFrameSize
         let (stream, continuation) = AsyncStream.makeStream(of: LoomMultiplexedStream.self)
         incomingStreams = stream
         incomingStreamContinuation = continuation
@@ -529,7 +514,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
 
     /// Returns the latest remote endpoint observed for this session's transport.
     public var remoteEndpoint: NWEndpoint? {
-        currentRemoteEndpoint ?? currentPathSnapshot?.remoteEndpoint ?? rawSession?.endpoint ?? nativeQUICRemoteEndpoint
+        currentRemoteEndpoint ?? currentPathSnapshot?.remoteEndpoint ?? nwConnection?.endpoint ?? quicRemoteEndpoint
     }
 
     /// Returns the latest transport-path snapshot observed for this session.
@@ -540,8 +525,6 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
     private func transportDiagnosticsSnapshot() -> LoomTransportDiagnostics {
         LoomTransportDiagnostics(
             selectedTransportKind: transportKind,
-            nativeQUICSupported: LoomNode.nativeQUICAvailable,
-            nativeQUICActive: transportKind == .quic && rawSession == nil,
             usableDatagramSize: transportUsableDatagramSize,
             serviceClass: transportServiceClassDescription,
             receiveSemantics: Self.receiveSemanticsDescription(transport.receiveSemantics)
@@ -629,8 +612,10 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             switch encryptionPolicy {
             case .required:
                 guard encryptionNegotiated else {
-                    updateState(.failed("missing-session-encryption"))
-                    rawSession?.cancel()
+                    finishSession(
+                        state: .failed("missing-session-encryption"),
+                        cancelUnderlyingConnection: true
+                    )
                     throw LoomError.protocolError("Peer does not support Loom authenticated session encryption.")
                 }
             case .optional:
@@ -647,8 +632,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                 trustEvaluation = try await receiveHostTrustStatus()
             }
             if trustEvaluation.decision != .trusted {
-                updateState(.failed("denied"))
-                rawSession?.cancel()
+                finishSession(state: .failed("denied"), cancelUnderlyingConnection: true)
                 throw LoomError.authenticationFailed
             }
 
@@ -686,6 +670,10 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             return context
         } catch {
             updateBootstrapFailure(reason: error.localizedDescription)
+            finishSession(
+                state: .failed(error.localizedDescription),
+                cancelUnderlyingConnection: true
+            )
             throw error
         }
     }
@@ -744,8 +732,8 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         return stream
     }
 
-    /// Creates a direct local-UDP priority input endpoint for this authenticated
-    /// session.
+    /// Creates a direct local datagram priority input endpoint for this
+    /// authenticated session.
     public func makePriorityInputEndpoint() throws -> LoomPriorityInputEndpoint {
         guard case .ready = state else {
             throw LoomError.protocolError("Authenticated Loom session is not ready.")
@@ -760,7 +748,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             pathSnapshot: currentPathSnapshot,
             remoteEndpoint: remoteEndpoint
         ) else {
-            throw LoomError.protocolError("Priority input lane is only available on local UDP transports.")
+            throw LoomError.protocolError("Priority input lane is only available on local datagram transports.")
         }
         guard encryptionEnabled, let securityContext else {
             throw LoomError.protocolError("Priority input lane requires Loom session encryption.")
@@ -1324,30 +1312,55 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
     private func configureTransportObserversIfNeeded() {
         guard !transportObserversConfigured else { return }
         transportObserversConfigured = true
-        guard let rawSession else {
-            currentRemoteEndpoint = nativeQUICRemoteEndpoint
-            if let snapshot = nativeQUICPathSnapshotProvider?() {
+        guard let nwConnection else {
+            currentRemoteEndpoint = quicRemoteEndpoint
+            if let snapshot = quicPathSnapshotProvider?() {
                 applyTransportPathSnapshot(snapshot)
+            }
+            Task { [weak self, transport] in
+                await transport.setObservationHandler { [weak self] observation in
+                    Task {
+                        await self?.handleTransportObservation(observation)
+                    }
+                }
             }
             return
         }
-        currentRemoteEndpoint = rawSession.endpoint
+        currentRemoteEndpoint = nwConnection.endpoint
 
-        if let path = rawSession.connection.currentPath {
+        if let path = nwConnection.currentPath {
             applyTransportPathSnapshot(LoomSessionNetworkPathSnapshot(path: path))
         }
 
-        rawSession.connection.pathUpdateHandler = { [weak self] path in
+        nwConnection.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
             Task {
                 await self.handleTransportPathUpdate(path)
             }
         }
-        rawSession.connection.stateUpdateHandler = { [weak self] state in
+        nwConnection.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             Task {
                 await self.handleUnderlyingConnectionState(state)
             }
+        }
+    }
+
+    private func handleTransportObservation(_ observation: LoomSessionTransportObservation) {
+        switch observation {
+        case let .path(snapshot):
+            applyTransportPathSnapshot(snapshot)
+        case let .failed(reason):
+            if case .failed = state { return }
+            if case .cancelled = state { return }
+            finishSession(
+                state: .failed(reason),
+                cancelUnderlyingConnection: false
+            )
+        case .cancelled:
+            if case .cancelled = state { return }
+            if case .failed = state { return }
+            finishSession(state: .cancelled, cancelUnderlyingConnection: false)
         }
     }
 
@@ -1395,9 +1408,6 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         updateState(newState)
         readTask?.cancel()
         unreliableReadTask?.cancel()
-        Task {
-            await transport.cancelPendingUnreliableSends()
-        }
         for stream in streams.values {
             stream.finishQueuedOutbound()
             stream.finishInbound()
@@ -1411,7 +1421,14 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         bootstrapProgressObservers.finish()
         pathObservers.finish()
         if cancelUnderlyingConnection {
-            rawSession?.cancel()
+            Task {
+                await transport.closeTransport()
+            }
+            connection.backingNWConnection?.cancel()
+        } else {
+            Task {
+                await transport.cancelPendingUnreliableSends()
+            }
         }
     }
 

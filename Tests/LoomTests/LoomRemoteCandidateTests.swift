@@ -1,5 +1,5 @@
 //
-//  LoomRemoteCandidateTransportTests.swift
+//  LoomRemoteCandidateTests.swift
 //  Loom
 //
 //  Created by Ethan Lipnik on 3/9/26.
@@ -9,14 +9,42 @@
 import Foundation
 import Testing
 
-@Suite("Loom Remote Candidate Transport")
-struct LoomRemoteCandidateTransportTests {
+@Suite("Loom Remote Candidates")
+struct LoomRemoteCandidateTests {
     @Test("TCP remote candidates round-trip through codable")
     func tcpCandidateRoundTrips() throws {
         let candidate = LoomRemoteCandidate(
             transport: .tcp,
             address: "203.0.113.10",
             port: 22
+        )
+
+        let encoded = try JSONEncoder().encode(candidate)
+        let decoded = try JSONDecoder().decode(LoomRemoteCandidate.self, from: encoded)
+
+        #expect(decoded == candidate)
+    }
+
+    @Test("QUIC remote candidates round-trip through codable")
+    func quicCandidateRoundTrips() throws {
+        let candidate = LoomRemoteCandidate(
+            transport: .quic,
+            address: "203.0.113.20",
+            port: 443
+        )
+
+        let encoded = try JSONEncoder().encode(candidate)
+        let decoded = try JSONDecoder().decode(LoomRemoteCandidate.self, from: encoded)
+
+        #expect(decoded == candidate)
+    }
+
+    @Test("UDP remote candidates round-trip through codable")
+    func udpCandidateRoundTrips() throws {
+        let candidate = LoomRemoteCandidate(
+            transport: .udp,
+            address: "203.0.113.30",
+            port: 5000
         )
 
         let encoded = try JSONEncoder().encode(candidate)

@@ -14,3 +14,24 @@ public enum LoomTransportKind: String, Codable, CaseIterable, Sendable {
     case udp
 }
 
+package extension LoomTransportKind {
+    var directConnectionRank: Int {
+        switch self {
+        case .udp:
+            return 0
+        case .quic:
+            return 1
+        case .tcp:
+            return 2
+        }
+    }
+
+    var usesDatagramPath: Bool {
+        switch self {
+        case .udp, .quic:
+            return true
+        case .tcp:
+            return false
+        }
+    }
+}

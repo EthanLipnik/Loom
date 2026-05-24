@@ -18,12 +18,12 @@ When CloudKit is enabled, LoomKit merges nearby peers and CloudKit-visible peers
 
 ## Add Signaling For Remote Joins
 
-Set ``LoomContainerConfiguration/relay`` when you want signaling-backed remote reachability outside the local network:
+Set ``LoomContainerConfiguration/remoteSignaling`` when you want signaling-backed remote reachability outside the local network:
 
 ```swift
 let configuration = LoomContainerConfiguration(
     serviceName: "Example Mac",
-    relay: relayConfiguration
+    remoteSignaling: remoteSignalingConfiguration
 )
 ```
 

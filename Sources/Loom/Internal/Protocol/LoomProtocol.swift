@@ -17,7 +17,7 @@ package let loomSupportedFeatures: LoomFeatureSet = [
     .controlMessageRouting,
     .protocolNegotiation,
     .identityAuthV2,
-    .udpRegistrationAuthV1,
+    .datagramRegistrationAuthV1,
     .encryptedMediaV1
 ]
 

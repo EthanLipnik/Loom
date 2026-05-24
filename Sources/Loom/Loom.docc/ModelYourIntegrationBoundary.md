@@ -18,7 +18,7 @@ In practice, a higher-level service usually owns:
 - one app-owned stable device identifier
 - one app-owned advertisement builder
 - zero or one trust provider
-- the code that maps `NWConnection` or ``LoomSession`` into your protocol
+- the code that maps ``LoomAuthenticatedSession`` streams into your protocol
 
 That keeps Loom focused on transport primitives while your package or app owns policy.
 
@@ -63,14 +63,13 @@ Good examples of app-owned state:
 
 ## Keep product protocol above Loom
 
-``LoomSession`` intentionally stays thin. It wraps the connection lifecycle, but it does not define:
+``LoomAuthenticatedSession`` intentionally stays transport-focused. It owns the signed session setup, encryption, and multiplexed streams, but it does not define:
 
-- your handshake
 - your message framing
 - your reconnect semantics
-- your stream multiplexing
+- your product stream semantics
 
-`MirageKit` uses Loom for the accepted session and then immediately layers its own hello exchange, signature validation, feature negotiation, and media setup above that session. That separation is why Loom remains reusable.
+`MirageKit` uses Loom for the authenticated session and then layers its own feature negotiation, media setup, and product protocol above that session. That separation is why Loom remains reusable.
 
 If you are debating whether a type belongs in Loom, ask a simple question:
 

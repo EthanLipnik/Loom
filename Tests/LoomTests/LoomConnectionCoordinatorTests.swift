@@ -17,7 +17,7 @@ struct LoomConnectionCoordinatorTests {
         let node = LoomNode(
             configuration: LoomNetworkConfiguration(
                 directConnectionPolicy: LoomDirectConnectionPolicy(
-                    preferredRemoteTransportOrder: [.quic, .tcp]
+                    preferredTransportOrder: [.quic, .tcp]
                 )
             )
         )
@@ -38,14 +38,9 @@ struct LoomConnectionCoordinatorTests {
 
         let plan = try await coordinator.makePlan(localPeer: peer)
 
-        if LoomNode.quicAvailable {
-            #expect(plan.targets.map(\.transportKind) == [.quic, .tcp])
-            #expect(plan.targets.first?.endpoint == .hostPort(host: "127.0.0.1", port: 5555))
-            #expect(plan.targets.last?.endpoint == .hostPort(host: "127.0.0.1", port: 4444))
-        } else {
-            #expect(plan.targets.map(\.transportKind) == [.tcp])
-            #expect(plan.targets.first?.endpoint == .hostPort(host: "127.0.0.1", port: 4444))
-        }
+        #expect(plan.targets.map(\.transportKind) == [.quic, .tcp])
+        #expect(plan.targets.first?.endpoint == .hostPort(host: "127.0.0.1", port: 5555))
+        #expect(plan.targets.last?.endpoint == .hostPort(host: "127.0.0.1", port: 4444))
     }
 
     @MainActor
@@ -54,7 +49,7 @@ struct LoomConnectionCoordinatorTests {
         let node = LoomNode(
             configuration: LoomNetworkConfiguration(
                 directConnectionPolicy: LoomDirectConnectionPolicy(
-                    preferredRemoteTransportOrder: [.quic, .tcp],
+                    preferredTransportOrder: [.quic, .tcp],
                     localDiscoveryHostOverride: "127.0.0.1"
                 )
             )
@@ -76,14 +71,9 @@ struct LoomConnectionCoordinatorTests {
 
         let plan = try await coordinator.makePlan(localPeer: peer)
 
-        if LoomNode.quicAvailable {
-            #expect(plan.targets.map(\.transportKind) == [.quic, .tcp])
-            #expect(plan.targets.first?.endpoint == .hostPort(host: "127.0.0.1", port: 5555))
-            #expect(plan.targets.last?.endpoint == .hostPort(host: "127.0.0.1", port: 4444))
-        } else {
-            #expect(plan.targets.map(\.transportKind) == [.tcp])
-            #expect(plan.targets.first?.endpoint == .hostPort(host: "127.0.0.1", port: 4444))
-        }
+        #expect(plan.targets.map(\.transportKind) == [.quic, .tcp])
+        #expect(plan.targets.first?.endpoint == .hostPort(host: "127.0.0.1", port: 5555))
+        #expect(plan.targets.last?.endpoint == .hostPort(host: "127.0.0.1", port: 4444))
     }
 
     @MainActor
@@ -93,7 +83,7 @@ struct LoomConnectionCoordinatorTests {
             configuration: LoomNetworkConfiguration(
                 directConnectionPolicy: LoomDirectConnectionPolicy(
                     preferredLocalPathOrder: [.wired, .wifi, .awdl, .other],
-                    preferredRemoteTransportOrder: [.quic, .tcp]
+                    preferredTransportOrder: [.quic, .tcp]
                 )
             )
         )
@@ -115,16 +105,11 @@ struct LoomConnectionCoordinatorTests {
 
         let plan = try await coordinator.makePlan(localPeer: peer)
 
-        if LoomNode.quicAvailable {
-            #expect(plan.targets.map(\.endpoint) == [
-                .hostPort(host: "127.0.0.1", port: 7777),
-                .hostPort(host: "127.0.0.1", port: 6666),
-                .hostPort(host: "127.0.0.1", port: 5555),
-            ])
-        } else {
-            #expect(plan.targets.map(\.transportKind) == [.tcp])
-            #expect(plan.targets.first?.endpoint == .hostPort(host: "127.0.0.1", port: 4444))
-        }
+        #expect(plan.targets.map(\.endpoint) == [
+            .hostPort(host: "127.0.0.1", port: 7777),
+            .hostPort(host: "127.0.0.1", port: 6666),
+            .hostPort(host: "127.0.0.1", port: 5555),
+        ])
     }
 
     @Test("Peer advertisements round-trip direct transport hints through TXT records")
@@ -155,7 +140,7 @@ struct LoomConnectionCoordinatorTests {
             let node = LoomNode(
                 configuration: LoomNetworkConfiguration(
                     directConnectionPolicy: LoomDirectConnectionPolicy(
-                        preferredRemoteTransportOrder: [.quic, .tcp],
+                        preferredTransportOrder: [.quic, .tcp],
                         racesLocalCandidates: true,
                         racesRemoteCandidates: false
                     )
@@ -185,11 +170,7 @@ struct LoomConnectionCoordinatorTests {
             )
 
             #expect(await session.transportKind == .tcp)
-            if LoomNode.quicAvailable {
-                #expect(await attemptRecorder.attempts() == [.quic, .tcp])
-            } else {
-                #expect(await attemptRecorder.attempts() == [.tcp])
-            }
+            #expect(await attemptRecorder.attempts() == [.quic, .tcp])
         }
     }
 
@@ -200,7 +181,7 @@ struct LoomConnectionCoordinatorTests {
         let node = LoomNode(
             configuration: LoomNetworkConfiguration(
                 directConnectionPolicy: LoomDirectConnectionPolicy(
-                    preferredRemoteTransportOrder: [.quic, .tcp],
+                    preferredTransportOrder: [.quic, .tcp],
                     racesLocalCandidates: false,
                     racesRemoteCandidates: false
                 )
@@ -229,13 +210,8 @@ struct LoomConnectionCoordinatorTests {
             localPeer: makeCoordinatorTestPeer()
         )
 
-        if LoomNode.quicAvailable {
-            #expect(await session.transportKind == .quic)
-            #expect(await attemptRecorder.attempts() == [.quic])
-        } else {
-            #expect(await session.transportKind == .tcp)
-            #expect(await attemptRecorder.attempts() == [.tcp])
-        }
+        #expect(await session.transportKind == .quic)
+        #expect(await attemptRecorder.attempts() == [.quic])
     }
 
     @MainActor
@@ -245,7 +221,7 @@ struct LoomConnectionCoordinatorTests {
             configuration: LoomNetworkConfiguration(
                 enablePeerToPeer: false,
                 directConnectionPolicy: LoomDirectConnectionPolicy(
-                    preferredRemoteTransportOrder: [.quic, .tcp],
+                    preferredTransportOrder: [.quic, .tcp],
                     racesLocalCandidates: false,
                     racesRemoteCandidates: false
                 )
@@ -281,10 +257,13 @@ struct LoomConnectionCoordinatorTests {
             signalingSessionID: "relay-session"
         )
 
-        let expectedSources: [LoomConnectionTargetSource] = LoomNode.quicAvailable
-            ? [.localDiscovery, .localDiscovery, .overlayDirectory, .overlayDirectory, .remoteSignaling]
-            : [.localDiscovery, .overlayDirectory, .remoteSignaling]
-        #expect(plan.targets.map(\.source) == expectedSources)
+        #expect(plan.targets.map(\.source) == [
+            .localDiscovery,
+            .localDiscovery,
+            .overlayDirectory,
+            .overlayDirectory,
+            .remoteSignaling,
+        ])
     }
 
     @MainActor
@@ -333,7 +312,7 @@ struct LoomConnectionCoordinatorTests {
                     configuration: LoomNetworkConfiguration(
                         enablePeerToPeer: false,
                         directConnectionPolicy: LoomDirectConnectionPolicy(
-                            preferredRemoteTransportOrder: [.quic, .tcp],
+                            preferredTransportOrder: [.quic, .tcp],
                             racesLocalCandidates: false,
                             racesRemoteCandidates: false
                         )
@@ -434,15 +413,32 @@ private func makeCoordinatorTestHello() -> LoomSessionHelloRequest {
 private func makeCoordinatorTestSession(
     transportKind: LoomTransportKind
 ) -> LoomAuthenticatedSession {
+    if transportKind == .quic {
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: 9)!)
+        let connection = try! LoomQUICTransportFactory.makeConnection(
+            to: endpoint,
+            enablePeerToPeer: false,
+            requiredInterface: nil,
+            requiredInterfaceType: nil,
+            requiredLocalPort: nil,
+            quicALPN: ["loom"],
+            serviceClass: .interactiveVideo
+        )
+        return LoomAuthenticatedSession(
+            connection: .quic(connection),
+            role: .initiator
+        )
+    }
+
     let connection = NWConnection(
         host: "127.0.0.1",
         port: NWEndpoint.Port(rawValue: 9)!,
-        using: .tcp
+        using: transportKind == .tcp ? .tcp : .udp
     )
+    let loomConnection: LoomConnection = transportKind == .tcp ? .tcp(connection) : .udp(connection)
     return LoomAuthenticatedSession(
-        rawSession: LoomSession(connection: connection),
-        role: .initiator,
-        transportKind: transportKind
+        connection: loomConnection,
+        role: .initiator
     )
 }
 

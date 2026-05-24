@@ -816,9 +816,8 @@ struct LoomAuthenticatedSessionTests {
             using: .udp
         )
         let session = LoomAuthenticatedSession(
-            rawSession: LoomSession(connection: connection),
-            role: .initiator,
-            transportKind: .udp
+            connection: .udp(connection),
+            role: .initiator
         )
         let progressObserver = await session.makeBootstrapProgressObserver()
         defer {
@@ -928,9 +927,8 @@ struct LoomAuthenticatedSessionTests {
             using: .udp
         )
         let session = LoomAuthenticatedSession(
-            rawSession: LoomSession(connection: connection),
-            role: .initiator,
-            transportKind: .udp
+            connection: .udp(connection),
+            role: .initiator
         )
         let progressObserver = await session.makeBootstrapProgressObserver()
         defer {
@@ -1001,9 +999,8 @@ struct LoomAuthenticatedSessionTests {
             using: .udp
         )
         let session = LoomAuthenticatedSession(
-            rawSession: LoomSession(connection: connection),
-            role: .initiator,
-            transportKind: .udp
+            connection: .udp(connection),
+            role: .initiator
         )
         let progressObserver = await session.makeBootstrapProgressObserver()
         defer {
@@ -1247,14 +1244,12 @@ private func makeLoopbackPair(
     }))
 
     let client = LoomAuthenticatedSession(
-        rawSession: LoomSession(connection: clientConnection),
-        role: .initiator,
-        transportKind: .tcp
+        connection: .tcp(clientConnection),
+        role: .initiator
     )
     let server = LoomAuthenticatedSession(
-        rawSession: LoomSession(connection: serverConnection),
-        role: .receiver,
-        transportKind: .tcp
+        connection: .tcp(serverConnection),
+        role: .receiver
     )
 
     let clientHello = LoomSessionHelloRequest(
@@ -1326,9 +1321,8 @@ private func makeStartedUDPLoopbackPair(
         using: .udp
     )
     let client = LoomAuthenticatedSession(
-        rawSession: LoomSession(connection: clientConnection),
-        role: .initiator,
-        transportKind: .udp
+        connection: .udp(clientConnection),
+        role: .initiator
     )
     let clientHello = LoomSessionHelloRequest(
         deviceID: UUID(),
@@ -1355,9 +1349,8 @@ private func makeStartedUDPLoopbackPair(
 
     let serverConnection = try #require(await acceptedConnection.take())
     let server = LoomAuthenticatedSession(
-        rawSession: LoomSession(connection: serverConnection),
-        role: .receiver,
-        transportKind: .udp
+        connection: .udp(serverConnection),
+        role: .receiver
     )
     let serverStartTask = Task {
         try await server.start(

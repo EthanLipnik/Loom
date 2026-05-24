@@ -25,11 +25,11 @@ package struct LoomMediaPacketKey {
 
 package struct LoomMediaSecurityContext: Sendable {
     package let sessionKey: Data
-    package let udpRegistrationToken: Data
+    package let datagramRegistrationToken: Data
 
-    package init(sessionKey: Data, udpRegistrationToken: Data) {
+    package init(sessionKey: Data, datagramRegistrationToken: Data) {
         self.sessionKey = sessionKey
-        self.udpRegistrationToken = udpRegistrationToken
+        self.datagramRegistrationToken = datagramRegistrationToken
     }
 }
 
@@ -68,9 +68,9 @@ package enum LoomMediaSecurity {
         clientKeyID: String,
         hostNonce: String,
         clientNonce: String,
-        udpRegistrationToken: Data
+        datagramRegistrationToken: Data
     ) throws -> LoomMediaSecurityContext {
-        guard udpRegistrationToken.count == registrationTokenLength else {
+        guard datagramRegistrationToken.count == registrationTokenLength else {
             throw LoomMediaSecurityError.invalidRegistrationTokenLength
         }
         let salt = derivationSalt(
@@ -89,7 +89,7 @@ package enum LoomMediaSecurity {
         )
         return LoomMediaSecurityContext(
             sessionKey: key,
-            udpRegistrationToken: udpRegistrationToken
+            datagramRegistrationToken: datagramRegistrationToken
         )
     }
 

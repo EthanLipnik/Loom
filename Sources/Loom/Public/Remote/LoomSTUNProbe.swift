@@ -72,7 +72,7 @@ public enum LoomSTUNProbe {
     /// is symmetric and a relay is required.
     ///
     /// - Parameters:
-    ///   - localPort: The QUIC listener port to probe from.
+    ///   - localPort: The datagram listener port to probe from.
     ///   - timeout: Per-probe timeout.
     /// - Returns: Detected NAT mapping type.
     public static func detectNATType(

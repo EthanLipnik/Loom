@@ -24,12 +24,15 @@ public struct LoomOverlayDirectoryConfiguration: Sendable {
     public let probeAttempts: Int
     /// Delay between retry attempts for a seed that did not respond.
     public let probeRetryDelay: Duration
+    /// Policy used to rank direct transports when several seeds describe the same peer.
+    public let directConnectionPolicy: LoomDirectConnectionPolicy
     package let usesDefaultProbePort: Bool
 
     public init(
         probePort: UInt16? = nil,
         refreshInterval: Duration = .seconds(30),
         probeTimeout: Duration = .seconds(2),
+        directConnectionPolicy: LoomDirectConnectionPolicy = .default,
         seedProvider: @escaping SeedProvider
     ) {
         self.init(
@@ -38,6 +41,7 @@ public struct LoomOverlayDirectoryConfiguration: Sendable {
             probeTimeout: probeTimeout,
             probeAttempts: 1,
             probeRetryDelay: .zero,
+            directConnectionPolicy: directConnectionPolicy,
             seedProvider: seedProvider
         )
     }
@@ -48,6 +52,7 @@ public struct LoomOverlayDirectoryConfiguration: Sendable {
         probeTimeout: Duration = .seconds(2),
         probeAttempts: Int,
         probeRetryDelay: Duration = .zero,
+        directConnectionPolicy: LoomDirectConnectionPolicy = .default,
         seedProvider: @escaping SeedProvider
     ) {
         let usesDefaultProbePort = probePort == nil
@@ -57,6 +62,7 @@ public struct LoomOverlayDirectoryConfiguration: Sendable {
         self.probeTimeout = probeTimeout
         self.probeAttempts = max(1, probeAttempts)
         self.probeRetryDelay = probeRetryDelay
+        self.directConnectionPolicy = directConnectionPolicy
         self.usesDefaultProbePort = usesDefaultProbePort
     }
 }

@@ -1,6 +1,6 @@
 @Tutorial(time: 30) {
     @Intro(title: "Build a Client Service on Loom") {
-        In this tutorial, you will build the client-side runtime that owns discovery, tracks candidate peers, connects to a selected peer, and hands the resulting `LoomSession` into your own protocol layer.
+        In this tutorial, you will build the client-side runtime that owns discovery, tracks candidate peers, connects to a selected peer, and hands the resulting `LoomAuthenticatedSession` into your own protocol layer.
 
         The client should mirror the host structurally: use Loom for discovery and transport, but keep product state and reconnect policy above the package.
     }
@@ -56,12 +56,12 @@
 
     @Section(title: "Connect and hand off to your protocol layer") {
         @ContentAndMedia {
-            Once the client chooses a peer, Loom's job is to establish the raw transport. Your client service owns everything above that.
+            Once the client chooses a peer, Loom's job is to establish the authenticated transport. Your client service owns everything above that.
         }
 
         @Steps {
             @Step {
-                Connect using the discovered endpoint, wrap the `NWConnection` in a `LoomSession`, and hand the session to your client handshake.
+                Connect using the discovered endpoint, choose a transport kind, and hand the authenticated session to your client protocol.
                 @Code(name: "MyClientService.swift", file: BuildAClientServiceOnLoom-Connect.swift)
                 Preserve anything discovery told you about the selected peer, such as the expected `identityKeyID`, so the handshake can verify that expectation.
             }
@@ -73,7 +73,7 @@
             }
 
             @Step {
-                Once the client can browse and connect, the next layer is a signed handshake that turns a raw session into an authenticated peer relationship.
+                Once the client can browse and connect, the next layer is product policy that decides how to use the authenticated peer relationship.
                 @Code(name: "MyClientService.swift", file: BuildAClientServiceOnLoom-Disconnect.swift)
             }
         }

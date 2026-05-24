@@ -21,7 +21,7 @@ public enum LoomHolePunch {
     /// NAT mapping is active.
     ///
     /// - Parameters:
-    ///   - localPort: The local UDP port to send from (typically the QUIC listener port).
+    ///   - localPort: The local UDP port to send from.
     ///   - address: The remote peer's STUN-mapped public IP address.
     ///   - port: The remote peer's STUN-mapped public port.
     ///   - count: Number of packets to send (default 3).
@@ -101,7 +101,7 @@ public enum LoomHolePunch {
         count: Int = 3
     ) async {
         await withTaskGroup(of: Void.self) { group in
-            for candidate in candidates where candidate.transport == .quic {
+            for candidate in candidates where candidate.transport.usesDatagramPath {
                 group.addTask {
                     await punch(
                         from: localPort,
@@ -116,7 +116,7 @@ public enum LoomHolePunch {
 
     /// Sends hole-punch packets continuously until the returned task is cancelled.
     ///
-    /// Each iteration sends a burst of packets to every QUIC candidate, then
+    /// Each iteration sends a burst of packets to every datagram candidate, then
     /// sleeps for `interval` before repeating.  Cancel the returned task to stop.
     ///
     /// - Parameters:

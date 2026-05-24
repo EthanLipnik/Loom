@@ -63,7 +63,7 @@ struct LoomOverlayProbeServerTests {
                 $0.transportKind == .tcp && $0.port == tcpPort
             }))
             #expect(response.advertisement.directTransports.contains(where: { $0.transportKind == .udp }))
-            #expect(response.advertisement.directTransports.contains(where: { $0.transportKind == .quic }) == LoomNode.quicAvailable)
+            #expect(response.advertisement.directTransports.contains(where: { $0.transportKind == .quic }))
         } catch {
             await node.stopAdvertising()
             throw error

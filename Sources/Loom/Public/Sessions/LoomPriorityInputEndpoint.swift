@@ -7,7 +7,7 @@
 
 import Foundation
 
-/// Direct local-UDP input lane for latency-sensitive application input.
+/// Direct local datagram input lane for latency-sensitive application input.
 ///
 /// Priority input payloads are encrypted with their own traffic class and are
 /// delivered outside the normal multiplexed stream receive actor. Realtime

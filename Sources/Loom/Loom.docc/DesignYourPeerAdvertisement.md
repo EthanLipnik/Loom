@@ -19,7 +19,7 @@ These fields are worth filling when you have them:
 - `modelIdentifier`
 - `iconName`
 - `machineFamily`
-- `directTransports` when you need Loom-owned TCP or QUIC listener hints
+- `directTransports` when you need Loom-owned TCP, UDP, or QUIC listener hints
 
 Those values are useful across discovery, trust evaluation, and CloudKit registration.
 

@@ -1,6 +1,5 @@
 import Foundation
 import Loom
-import Network
 
 @MainActor
 final class MyClientService {
@@ -18,7 +17,7 @@ final class MyClientService {
     private(set) var peers: [LoomPeer] = []
     private(set) var selectedPeerID: UUID?
     private(set) var connectionState: ConnectionState = .disconnected
-    private(set) var session: LoomSession?
+    private(set) var session: LoomAuthenticatedSession?
     private let reconnectDelay: Duration = .seconds(1)
 
     init() {

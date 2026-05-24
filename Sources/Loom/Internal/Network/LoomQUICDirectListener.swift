@@ -1,5 +1,5 @@
 //
-//  LoomNativeQUICDirectListener.swift
+//  LoomQUICDirectListener.swift
 //  Loom
 //
 //  Created by Ethan Lipnik on 5/21/26.
@@ -8,8 +8,7 @@
 import Foundation
 import Network
 
-@available(macOS 26.0, iOS 26.0, visionOS 26.0, tvOS 26.0, watchOS 26.0, *)
-package final class LoomNativeQUICDirectListener: @unchecked Sendable {
+package actor LoomQUICDirectListener: LoomDirectTransportListener {
     private let enablePeerToPeer: Bool
     private let quicALPN: [String]
     private let serviceClass: NWParameters.ServiceClass
@@ -28,9 +27,9 @@ package final class LoomNativeQUICDirectListener: @unchecked Sendable {
 
     package func start(
         port requestedPort: UInt16,
-        onConnection: @escaping @Sendable (NetworkConnection<QUIC>) -> Void
+        onConnection: @escaping LoomDirectConnectionHandler
     ) async throws -> UInt16 {
-        let listener = try LoomNativeQUICTransportFactory.makeListener(
+        let listener = try LoomQUICTransportFactory.makeListener(
             port: requestedPort,
             enablePeerToPeer: enablePeerToPeer,
             quicALPN: quicALPN,
@@ -39,7 +38,7 @@ package final class LoomNativeQUICDirectListener: @unchecked Sendable {
         self.listener = listener
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let box = LoomNativeQUICListenerReadyContinuationBox(continuation: continuation)
+            let box = LoomQUICListenerReadyContinuationBox(continuation: continuation)
             listener.onStateUpdate { _, state in
                 switch state {
                 case .ready:
@@ -50,12 +49,12 @@ package final class LoomNativeQUICDirectListener: @unchecked Sendable {
                     box.complete(
                         .failure(
                             LoomError.connectionFailed(
-                                LoomConnectionFailure(reason: .cancelled, detail: "Native QUIC listener cancelled.")
+                                LoomConnectionFailure(reason: .cancelled, detail: "QUIC listener cancelled.")
                             )
                         )
                     )
                 case let .waiting(error):
-                    LoomLogger.transport("Native QUIC listener waiting: \(error)")
+                    LoomLogger.transport("QUIC listener waiting: \(error)")
                 case .setup:
                     break
                 @unknown default:
@@ -66,19 +65,19 @@ package final class LoomNativeQUICDirectListener: @unchecked Sendable {
             runTask = Task { [listener] in
                 do {
                     try await listener.run { connection in
-                        onConnection(connection)
+                        onConnection(.quic(connection))
                     }
                 } catch {
                     box.complete(.failure(LoomError.connectionFailed(LoomConnectionFailure.classify(error))))
-                    LoomLogger.transport("Native QUIC listener stopped: \(error)")
+                    LoomLogger.transport("QUIC listener stopped: \(error)")
                 }
             }
         }
 
         guard let port = listener.port?.rawValue else {
-            throw LoomError.protocolError("Native QUIC listener started without a bound port.")
+            throw LoomError.protocolError("QUIC listener started without a bound port.")
         }
-        LoomLogger.transport("Native QUIC listener started on port \(port)")
+        LoomLogger.transport("QUIC listener started on port \(port)")
         return port
     }
 
@@ -89,8 +88,7 @@ package final class LoomNativeQUICDirectListener: @unchecked Sendable {
     }
 }
 
-@available(macOS 26.0, iOS 26.0, visionOS 26.0, tvOS 26.0, watchOS 26.0, *)
-private final class LoomNativeQUICListenerReadyContinuationBox: @unchecked Sendable {
+private final class LoomQUICListenerReadyContinuationBox: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Void, Error>?
 

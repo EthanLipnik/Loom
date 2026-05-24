@@ -22,8 +22,8 @@ package struct LoomFeatureSet: OptionSet, Sendable, Codable {
     package static let protocolNegotiation = LoomFeatureSet(rawValue: 1 << 1)
     /// Endpoints enforce signed identity handshake metadata.
     package static let identityAuthV2 = LoomFeatureSet(rawValue: 1 << 2)
-    /// Endpoints support authenticated UDP registration tokens.
-    package static let udpRegistrationAuthV1 = LoomFeatureSet(rawValue: 1 << 3)
+    /// Endpoints support authenticated datagram registration tokens.
+    package static let datagramRegistrationAuthV1 = LoomFeatureSet(rawValue: 1 << 3)
     /// Endpoints support end-to-end encrypted media payloads.
     package static let encryptedMediaV1 = LoomFeatureSet(rawValue: 1 << 4)
 }

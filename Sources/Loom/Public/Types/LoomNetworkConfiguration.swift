@@ -23,7 +23,7 @@ public struct LoomNetworkConfiguration: Sendable {
     public var enabledDirectTransports: Set<LoomTransportKind>
     public var directConnectionPolicy: LoomDirectConnectionPolicy
     public var quicALPN: [String]
-    public var directUDPServiceClass: NWParameters.ServiceClass
+    public var directDatagramServiceClass: NWParameters.ServiceClass
 
     public init(
         serviceType: String = Loom.serviceType,
@@ -39,7 +39,7 @@ public struct LoomNetworkConfiguration: Sendable {
         enabledDirectTransports: Set<LoomTransportKind> = Set(LoomTransportKind.allCases),
         directConnectionPolicy: LoomDirectConnectionPolicy = .default,
         quicALPN: [String] = ["loom"],
-        directUDPServiceClass: NWParameters.ServiceClass = .interactiveVideo
+        directDatagramServiceClass: NWParameters.ServiceClass = .interactiveVideo
     ) {
         self.serviceType = serviceType
         self.controlPort = controlPort
@@ -54,7 +54,7 @@ public struct LoomNetworkConfiguration: Sendable {
         self.enabledDirectTransports = enabledDirectTransports
         self.directConnectionPolicy = directConnectionPolicy
         self.quicALPN = quicALPN
-        self.directUDPServiceClass = directUDPServiceClass
+        self.directDatagramServiceClass = directDatagramServiceClass
     }
 
     public init(
@@ -70,7 +70,7 @@ public struct LoomNetworkConfiguration: Sendable {
         requireEncryptedMediaOnLocalNetwork: Bool = false,
         enabledDirectTransports: Set<LoomTransportKind>,
         quicALPN: [String] = ["loom"],
-        directUDPServiceClass: NWParameters.ServiceClass = .interactiveVideo
+        directDatagramServiceClass: NWParameters.ServiceClass = .interactiveVideo
     ) {
         self.init(
             serviceType: serviceType,
@@ -86,7 +86,7 @@ public struct LoomNetworkConfiguration: Sendable {
             enabledDirectTransports: enabledDirectTransports,
             directConnectionPolicy: .default,
             quicALPN: quicALPN,
-            directUDPServiceClass: directUDPServiceClass
+            directDatagramServiceClass: directDatagramServiceClass
         )
     }
 
@@ -102,7 +102,7 @@ public struct LoomNetworkConfiguration: Sendable {
         requireEncryptedMediaOnLocalNetwork: Bool = false,
         enabledDirectTransports: Set<LoomTransportKind>,
         quicALPN: [String] = ["loom"],
-        directUDPServiceClass: NWParameters.ServiceClass = .interactiveVideo
+        directDatagramServiceClass: NWParameters.ServiceClass = .interactiveVideo
     ) {
         self.init(
             serviceType: serviceType,
@@ -118,7 +118,7 @@ public struct LoomNetworkConfiguration: Sendable {
             enabledDirectTransports: enabledDirectTransports,
             directConnectionPolicy: .default,
             quicALPN: quicALPN,
-            directUDPServiceClass: directUDPServiceClass
+            directDatagramServiceClass: directDatagramServiceClass
         )
     }
 

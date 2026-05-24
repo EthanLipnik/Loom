@@ -1,12 +1,11 @@
 import Foundation
 import Loom
-import Network
 
 @MainActor
 final class MyHostService {
     enum State: Equatable {
         case idle
-        case advertising(controlPort: UInt16)
+        case advertising(ports: [LoomTransportKind: UInt16])
         case failed(String)
     }
 

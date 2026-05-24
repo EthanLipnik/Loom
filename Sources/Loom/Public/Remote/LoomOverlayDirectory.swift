@@ -189,7 +189,7 @@ public final class LoomOverlayDirectory {
         var resolvedPeers: [LoomPeer] = []
         for (deviceID, deviceCandidates) in candidatesByDeviceID {
             guard deviceID != localDeviceID,
-                  let preferredCandidate = deviceCandidates.min(by: Self.isPreferredCandidate(_:_:))
+                  let preferredCandidate = deviceCandidates.min(by: isPreferredCandidate(_:_:))
             else {
                 continue
             }
@@ -204,7 +204,7 @@ public final class LoomOverlayDirectory {
                         id: projection.peerID,
                         name: projection.displayName,
                         deviceType: preferredCandidate.deviceType,
-                        endpoint: Self.endpoint(
+                        endpoint: endpoint(
                             host: preferredCandidate.host,
                             advertisement: projection.advertisement
                         ),
@@ -296,7 +296,7 @@ public final class LoomOverlayDirectory {
         return nil
     }
 
-    private static func endpoint(
+    private func endpoint(
         host: String,
         advertisement: LoomPeerAdvertisement
     ) -> NWEndpoint {
@@ -308,34 +308,53 @@ public final class LoomOverlayDirectory {
         )
     }
 
-    private static func isPreferredCandidate(
+    private func isPreferredCandidate(
         _ lhs: LoomOverlayDirectoryCandidate,
         _ rhs: LoomOverlayDirectoryCandidate
     ) -> Bool {
-        let leftHasQUIC = lhs.advertisement.directTransports.contains { $0.transportKind == .quic }
-        let rightHasQUIC = rhs.advertisement.directTransports.contains { $0.transportKind == .quic }
-        if leftHasQUIC != rightHasQUIC {
-            return leftHasQUIC
+        let leftPreferredTransport = lhs.advertisement.directTransports.min(by: isPreferredTransport(_:_:))
+        let rightPreferredTransport = rhs.advertisement.directTransports.min(by: isPreferredTransport(_:_:))
+        switch (leftPreferredTransport, rightPreferredTransport) {
+        case let (left?, right?):
+            if isPreferredTransport(left, right) {
+                return true
+            }
+            if isPreferredTransport(right, left) {
+                return false
+            }
+        case (.some, nil):
+            return true
+        case (nil, .some):
+            return false
+        case (nil, nil):
+            break
         }
         return lhs.host < rhs.host
     }
 
-    private static func isPreferredTransport(
+    private func isPreferredTransport(
         _ lhs: LoomDirectTransportAdvertisement,
         _ rhs: LoomDirectTransportAdvertisement
     ) -> Bool {
-        transportRank(lhs.transportKind) < transportRank(rhs.transportKind)
+        let leftPathIndex = pathRank(lhs.pathKind)
+        let rightPathIndex = pathRank(rhs.pathKind)
+        if leftPathIndex != rightPathIndex {
+            return leftPathIndex < rightPathIndex
+        }
+        let leftTransportIndex = transportRank(lhs.transportKind)
+        let rightTransportIndex = transportRank(rhs.transportKind)
+        if leftTransportIndex != rightTransportIndex {
+            return leftTransportIndex < rightTransportIndex
+        }
+        return lhs.port < rhs.port
     }
 
-    private static func transportRank(_ transportKind: LoomTransportKind) -> Int {
-        switch transportKind {
-        case .udp:
-            0
-        case .quic:
-            1
-        case .tcp:
-            2
-        }
+    private func pathRank(_ pathKind: LoomDirectPathKind?) -> Int {
+        configuration.directConnectionPolicy.preferredLocalPathOrder.firstIndex(of: pathKind ?? .other) ?? Int.max
+    }
+
+    private func transportRank(_ transportKind: LoomTransportKind) -> Int {
+        configuration.directConnectionPolicy.preferredTransportOrder.firstIndex(of: transportKind) ?? Int.max
     }
 
     private func publishDiscoveredPeers(_ peers: [LoomPeer]) {

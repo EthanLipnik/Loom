@@ -12,9 +12,9 @@ import PackageDescription
 let package = Package(
     name: "Loom",
     platforms: [
-        .macOS(.v14),
-        .iOS("17.4"),
-        .visionOS(.v26),
+        .macOS("26.0"),
+        .iOS("26.0"),
+        .visionOS("26.0"),
     ],
     products: [
         .library(

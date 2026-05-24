@@ -1,5 +1,5 @@
 //
-//  LoomNativeQUICTransportFactory.swift
+//  LoomQUICTransportFactory.swift
 //  Loom
 //
 //  Created by Ethan Lipnik on 5/21/26.
@@ -10,8 +10,7 @@ import Foundation
 import Network
 import Security
 
-@available(macOS 26.0, iOS 26.0, visionOS 26.0, tvOS 26.0, watchOS 26.0, *)
-package enum LoomNativeQUICTransportFactory {
+package enum LoomQUICTransportFactory {
     package static let defaultMaxDatagramFrameSize = 1200
 
     package static func makeConnection(
@@ -63,9 +62,9 @@ package enum LoomNativeQUICTransportFactory {
         serviceClass: NWParameters.ServiceClass,
         requiresLocalIdentity: Bool
     ) throws -> NWParametersBuilder<QUIC> {
-        let tlsIdentity = LoomQUICTLSConfiguration.makeIdentity(commonName: "Loom Native QUIC")
+        let tlsIdentity = LoomQUICTLSConfiguration.makeIdentity(commonName: "Loom QUIC")
         if requiresLocalIdentity, tlsIdentity == nil {
-            throw LoomNativeQUICTransportFactoryError.tlsIdentityUnavailable
+            throw LoomQUICTransportFactoryError.tlsIdentityUnavailable
         }
         var builder = NWParametersBuilder.parameters {
             Self.configureTLS(
@@ -104,20 +103,19 @@ package enum LoomNativeQUICTransportFactory {
         if let identity {
             configured = configured.tls.localIdentity(identity)
         } else {
-            LoomLogger.transport("Native QUIC TLS identity unavailable; handshake may fail before Loom authentication")
+            LoomLogger.transport("QUIC TLS identity unavailable; handshake may fail before Loom authentication")
         }
         return configured
     }
 }
 
-@available(macOS 26.0, iOS 26.0, visionOS 26.0, tvOS 26.0, watchOS 26.0, *)
-private enum LoomNativeQUICTransportFactoryError: Error, LocalizedError {
+private enum LoomQUICTransportFactoryError: Error, LocalizedError {
     case tlsIdentityUnavailable
 
     var errorDescription: String? {
         switch self {
         case .tlsIdentityUnavailable:
-            "Native QUIC listener could not create a local TLS identity"
+            "QUIC listener could not create a local TLS identity"
         }
     }
 }
@@ -154,7 +152,7 @@ package enum LoomQUICTLSConfiguration {
         guard let privateKey = SecKeyCreateRandomKey(keyAttributes as CFDictionary, &keyError),
               let publicKey = SecKeyCopyPublicKey(privateKey),
               let publicKeyData = SecKeyCopyExternalRepresentation(publicKey, nil) as Data? else {
-            LoomLogger.transport("Failed to create native QUIC TLS key: \(String(describing: keyError?.takeRetainedValue()))")
+            LoomLogger.transport("Failed to create QUIC TLS key: \(String(describing: keyError?.takeRetainedValue()))")
             return nil
         }
 
@@ -165,7 +163,7 @@ package enum LoomQUICTLSConfiguration {
         ), let certificate = SecCertificateCreateWithData(nil, certificateData as CFData),
               let identity = SecIdentityCreate(nil, certificate, privateKey),
               let protocolIdentity = sec_identity_create(identity) else {
-            LoomLogger.transport("Failed to create native QUIC TLS identity")
+            LoomLogger.transport("Failed to create QUIC TLS identity")
             return nil
         }
         return protocolIdentity
@@ -199,7 +197,7 @@ package enum LoomQUICTLSConfiguration {
             tbsCertificate as CFData,
             &signError
         ) as Data? else {
-            LoomLogger.transport("Failed to sign native QUIC TLS certificate: \(String(describing: signError?.takeRetainedValue()))")
+            LoomLogger.transport("Failed to sign QUIC TLS certificate: \(String(describing: signError?.takeRetainedValue()))")
             return nil
         }
 

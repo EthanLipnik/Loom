@@ -1,10 +1,10 @@
 # Build a Signaling Service
 
-Deploy and integrate a lightweight signaling backend so peers on different networks can exchange candidates and establish direct QUIC connections through NAT.
+Deploy and integrate a lightweight signaling backend so peers on different networks can exchange candidates and establish direct Loom connections through NAT.
 
 ## Overview
 
-Remote signaling is the coordination layer between two peers that cannot discover each other via Bonjour. A small HTTP service stores session state, relays connectivity candidates between host and client, and mediates the hole-punch timing that makes direct QUIC connections possible.
+Remote signaling is the coordination layer between two peers that cannot discover each other via Bonjour. A small HTTP service stores session state, relays connectivity candidates between host and client, and mediates the hole-punch timing that makes direct datagram connections possible.
 
 Loom provides ``LoomRemoteSignalingClient`` for the Swift side. This article documents the signaling HTTP API so you can deploy the reference Cloudflare Worker implementation, build a compatible backend in another stack, or implement non-Swift clients.
 
@@ -12,9 +12,9 @@ The architecture has three cooperating pieces:
 
 1. **Signaling service** — stores session state and mediates candidate exchange
 2. **Host** — advertises presence, publishes STUN-mapped candidates, polls for clients, and hole-punches
-3. **Client** — joins a session, publishes its own candidates, hole-punches the host, and initiates the QUIC connection
+3. **Client** — joins a session, publishes its own candidates, hole-punches the host, and initiates the direct connection
 
-All three share one critical invariant: the client must use the **same local UDP port** for STUN, hole-punch, and QUIC so the NAT binding stays valid across the entire flow.
+Datagram transports share one critical invariant: the client must use the **same local UDP port** for STUN, hole-punch, and the Loom connection so the NAT binding stays valid across the entire flow.
 
 ## Configure the Swift client
 
@@ -106,7 +106,7 @@ await LoomHolePunch.punchAll(
     candidates: presence.peerCandidates
 )
 
-// 5. Connect via the coordinator (binds QUIC to the same port)
+// 5. Connect via the coordinator (binds datagram transports to the same port)
 let session = try await coordinator.connect(
     hello: hello,
     signalingSessionID: sessionID,
@@ -114,7 +114,7 @@ let session = try await coordinator.connect(
 )
 ```
 
-Using the same port for all three steps is what makes NAT traversal work. ``LoomSTUNProbe/run(host:port:localPort:timeout:)`` binds the probe to a specific port. ``LoomHolePunch/punchAll(from:candidates:count:)`` sends hole-punch packets from that port. ``LoomConnectionCoordinator/connect(hello:localPeer:overlayPeer:signalingSessionID:requiredLocalPort:)`` binds the QUIC connection to that port via `NWParameters.requiredLocalEndpoint`.
+Using the same port for all three steps is what makes NAT traversal work. ``LoomSTUNProbe/run(host:port:localPort:timeout:)`` binds the probe to a specific port. ``LoomHolePunch/punchAll(from:candidates:count:)`` sends hole-punch packets from that port. ``LoomConnectionCoordinator/connect(hello:localPeer:overlayPeer:signalingSessionID:requiredLocalPort:)`` binds datagram connection attempts to that port through the OS 26 Network parameter builders.
 
 ## Signaling HTTP API
 
@@ -132,7 +132,7 @@ Candidates describe how a peer can be reached directly:
 }
 ```
 
-`transport` is `"quic"` or `"tcp"`. `address` is an IPv4 or IPv6 string. `port` is an integer from 1 to 65535. Each side can publish up to 8 candidates.
+`transport` is `"tcp"`, `"udp"`, or `"quic"`. `address` is an IPv4 or IPv6 string. `port` is an integer from 1 to 65535. Each side can publish up to 8 candidates.
 
 ### POST /v1/session/create
 
@@ -321,7 +321,7 @@ func startSignalingLoop(
 ) -> Task<Void, Never> {
     Task {
         while !Task.isCancelled {
-            // Collect STUN-mapped candidates from the QUIC listener port
+            // Collect STUN-mapped candidates from datagram listener ports
             let candidates = await LoomDirectCandidateCollector.collect(
                 configuration: node.configuration,
                 listeningPorts: [.quic: quicPort]
@@ -380,7 +380,7 @@ The fast-check loop fills idle time between heartbeats. Without it, the host onl
 
 ## Wire up the client connection
 
-The client picks a port, probes STUN, joins, hole-punches, and connects with retries. The coordinator handles the actual QUIC connection:
+The client picks a port, probes STUN, joins, hole-punches, and connects with retries. The coordinator handles the actual Loom connection:
 
 ```swift
 func connectToRemoteHost(
@@ -446,7 +446,7 @@ func connectToRemoteHost(
 }
 ```
 
-The retry loop is important. NAT hole-punching is a race — the host and client need to punch each other's NAT before the QUIC handshake. If the first attempt misses the timing window, re-punching and retrying after a few seconds usually succeeds because the host's fast-check loop has had time to find the client's candidates and punch back.
+The retry loop is important. NAT hole-punching is a race: the host and client need to punch each other's NAT before the datagram handshake. If the first attempt misses the timing window, re-punching and retrying after a few seconds usually succeeds because the host's fast-check loop has had time to find the client's candidates and punch back.
 
 ## Build and deploy your own signaling service
 

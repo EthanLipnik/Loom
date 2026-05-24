@@ -254,8 +254,8 @@ struct LoomOverlayDirectoryTests {
     }
 
     @MainActor
-    @Test("Overlay directory collapses duplicate seeds and prefers QUIC-capable peers")
-    func directoryPrefersQUICCandidateWhenSeedsDuplicateOnePeer() async throws {
+    @Test("Overlay directory collapses duplicate seeds using configured transport policy")
+    func directoryPrefersCandidateUsingTransportPolicyWhenSeedsDuplicateOnePeer() async throws {
         let deviceID = UUID(uuidString: "00000000-0000-0000-0000-000000000013")!
         let (tcpServer, tcpPort) = try await startOverlayProbeServer(
             response: LoomOverlayProbeResponse(
@@ -289,6 +289,9 @@ struct LoomOverlayDirectoryTests {
             configuration: LoomOverlayDirectoryConfiguration(
                 refreshInterval: .seconds(3600),
                 probeTimeout: .seconds(2),
+                directConnectionPolicy: LoomDirectConnectionPolicy(
+                    preferredTransportOrder: [.tcp, .quic, .udp]
+                ),
                 seedProvider: {
                     [
                         LoomOverlaySeed(host: "127.0.0.1", probePort: tcpPort),
@@ -304,12 +307,10 @@ struct LoomOverlayDirectoryTests {
             #expect(directory.discoveredPeers.count == 1)
             let peer = try #require(directory.discoveredPeers.first)
             #expect(
-                peer.advertisement.directTransports.contains {
-                    $0.transportKind == LoomTransportKind.quic
-                }
+                peer.advertisement.directTransports.map(\.transportKind) == [.tcp]
             )
-            #expect(endpointHost(peer.endpoint) == "localhost")
-            #expect(endpointPort(peer.endpoint) == quicPort)
+            #expect(endpointHost(peer.endpoint) == "127.0.0.1")
+            #expect(endpointPort(peer.endpoint) == 41013)
         } catch {
             await tcpServer.stop()
             await quicServer.stop()

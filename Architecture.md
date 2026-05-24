@@ -18,8 +18,8 @@ Loom is a standalone Swift package with two products:
 
 Supported platforms:
 
-- macOS 14+
-- iOS 17.4+
+- macOS 26+
+- iOS 26+
 - visionOS 26+
 
 External dependencies:
@@ -57,7 +57,8 @@ It does not own product-specific:
 ### 3.1 Node and Session
 
 - `LoomNode` is the main entry point.
-- `LoomSession` represents an established connection lifecycle.
+- `LoomConnection` models TCP, UDP, and QUIC direct connections.
+- `LoomAuthenticatedSession` represents an established encrypted session lifecycle.
 - `LoomPeer` is the discovered or remote-resolved peer model.
 
 `LoomNode` composes discovery, identity, trust, and transport policy into a single object higher-level packages can own directly.
@@ -71,7 +72,7 @@ It does not own product-specific:
 
 ### 3.3 Remote and Bootstrap
 
-- `LoomRelayClient` handles signaling-backed remote coordination.
+- `LoomRemoteSignalingClient` handles signaling-backed remote coordination.
 - `LoomSTUNProbe` discovers external candidate information.
 - `LoomBootstrapEndpointResolver`, `LoomBootstrapControlClient`, `LoomWakeOnLANClient`, and `LoomSSHBootstrapClient` support peer recovery and bootstrap flows.
 
@@ -83,16 +84,16 @@ It does not own product-specific:
 
 These sinks are generic and reusable. Higher-level packages add their own categories and context without changing Loom’s ownership model.
 
-### 3.5 UDP Session Transport
+### 3.5 Datagram Session Transports
 
-`LoomReliableChannel` defines the authenticated-session UDP transport contract:
+`LoomReliableChannel` and `LoomQUICSessionTransport` define authenticated-session datagram transport contracts:
 
-- reliable control messages and unreliable datagrams may share a single UDP connection
-- reliable packets use selective acknowledgements, retransmission, and fragment reassembly
-- the receiver may emit an immediate dedicated ACK after an idle gap instead of waiting for the normal coalescing window
-- timeout decisions consider both retry budget and whether the peer is still actively sending traffic on the session
+- reliable control messages and unreliable datagrams are available through one authenticated session API
+- UDP reliability uses selective acknowledgements, retransmission, and fragment reassembly
+- QUIC reliability uses bidirectional streams and native datagrams
+- timeout and cancellation decisions consider both control and datagram activity
 
-The transport should fail truly dead peers promptly without collapsing a still-live session just because reliable control and high-rate unreliable traffic briefly contend for receive scheduling.
+Datagram transports should fail truly dead peers promptly without collapsing a still-live session just because reliable control and high-rate unreliable traffic briefly contend for receive scheduling.
 
 ## 4. Layering Rule
 

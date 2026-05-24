@@ -6,7 +6,7 @@
     }
 
     @Chapter(name: "Core Integration") {
-        Build the app-owned host and client services that sit above Loom, then define a signed handshake that turns raw sessions into trustworthy peers.
+        Build the app-owned host and client services that sit above Loom, then define the signed hello that lets authenticated sessions become trustworthy peers.
 
         @Image(source: "TutorialCoreIntegration.svg", alt: "Diagram of host and client services layered above Loom.")
 

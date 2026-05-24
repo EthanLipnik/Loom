@@ -1,5 +1,5 @@
 //
-//  LoomNativeQUICSessionTransport.swift
+//  LoomQUICSessionTransport.swift
 //  Loom
 //
 //  Created by Ethan Lipnik on 5/21/26.
@@ -9,8 +9,7 @@ import Dispatch
 import Foundation
 import Network
 
-@available(macOS 26.0, iOS 26.0, visionOS 26.0, tvOS 26.0, watchOS 26.0, *)
-package actor LoomNativeQUICSessionTransport: LoomSessionTransport {
+package actor LoomQUICSessionTransport: LoomSessionTransport {
     package let receiveSemantics: LoomSessionReceiveSemantics = .independentReliableAndUnreliable
 
     private let connection: NetworkConnection<QUIC>
@@ -21,6 +20,7 @@ package actor LoomNativeQUICSessionTransport: LoomSessionTransport {
     private var queuedUnreliableSenders: [LoomQueuedUnreliableSendProfile: LoomOrderedUnreliableSendQueue] = [:]
     private var inboundStreamTask: Task<Void, Never>?
     private var datagramReceiveTask: Task<Void, Never>?
+    private var observationHandler: (@Sendable (LoomSessionTransportObservation) -> Void)?
     private var isClosed = false
 
     private let unreliableDeliveryStream: AsyncStream<Data>
@@ -82,7 +82,7 @@ package actor LoomNativeQUICSessionTransport: LoomSessionTransport {
 
     package func sendUnreliable(_ data: Data) async throws {
         guard let datagrams else {
-            throw LoomError.protocolError("Native QUIC datagram channel is not ready.")
+            throw LoomError.protocolError("QUIC datagram channel is not ready.")
         }
         try await datagrams.send(data)
     }
@@ -93,7 +93,7 @@ package actor LoomNativeQUICSessionTransport: LoomSessionTransport {
         onComplete: @escaping @Sendable (Error?) -> Void
     ) async {
         guard datagrams != nil else {
-            onComplete(LoomError.protocolError("Native QUIC datagram channel is not ready."))
+            onComplete(LoomError.protocolError("QUIC datagram channel is not ready."))
             return
         }
 
@@ -115,42 +115,60 @@ package actor LoomNativeQUICSessionTransport: LoomSessionTransport {
     package func receiveUnreliable(maxBytes: Int) async throws -> Data {
         for await message in unreliableDeliveryStream {
             if message.count > maxBytes {
-                throw LoomError.protocolError("Received native QUIC datagram exceeds limit: \(message.count) > \(maxBytes)")
+                throw LoomError.protocolError("Received QUIC datagram exceeds limit: \(message.count) > \(maxBytes)")
             }
             return message
         }
         throw LoomError.connectionFailed(
-            LoomConnectionFailure(reason: .cancelled, detail: "Native QUIC datagram receive cancelled.")
+            LoomConnectionFailure(reason: .cancelled, detail: "QUIC datagram receive cancelled.")
         )
     }
 
     package func receivePriorityUnreliable(maxBytes: Int) async throws -> Data {
         for await message in priorityUnreliableDeliveryStream {
             if message.count > maxBytes {
-                throw LoomError.protocolError("Received native QUIC priority datagram exceeds limit: \(message.count) > \(maxBytes)")
+                throw LoomError.protocolError("Received QUIC priority datagram exceeds limit: \(message.count) > \(maxBytes)")
             }
             return message
         }
         throw LoomError.connectionFailed(
-            LoomConnectionFailure(reason: .cancelled, detail: "Native QUIC priority datagram receive cancelled.")
+            LoomConnectionFailure(reason: .cancelled, detail: "QUIC priority datagram receive cancelled.")
         )
     }
 
     package func cancelPendingUnreliableSends() async {
-        isClosed = true
-        inboundStreamTask?.cancel()
-        datagramReceiveTask?.cancel()
         for sender in queuedUnreliableSenders.values {
             sender.close()
         }
+    }
+
+    package func closeTransport() async {
+        isClosed = true
+        inboundStreamTask?.cancel()
+        datagramReceiveTask?.cancel()
+        await cancelPendingUnreliableSends()
         unreliableDeliveryContinuation?.finish()
         priorityUnreliableDeliveryContinuation?.finish()
     }
 
+    package func setObservationHandler(
+        _ handler: (@Sendable (LoomSessionTransportObservation) -> Void)?
+    ) async {
+        observationHandler = handler
+        if let snapshot = connection.currentPath.map(LoomSessionNetworkPathSnapshot.init(path:)) {
+            handler?(.path(snapshot))
+        }
+    }
+
     private func awaitConnectionReady() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let box = LoomNativeQUICReadyContinuationBox(continuation: continuation)
-            connection.onStateUpdate { _, state in
+            let box = LoomQUICReadyContinuationBox(continuation: continuation)
+            connection.onStateUpdate { [weak self] _, state in
+                if let self {
+                    Task {
+                        await self.handleConnectionStateUpdate(state)
+                    }
+                }
                 switch state {
                 case .ready:
                     box.complete(.success(()))
@@ -160,12 +178,12 @@ package actor LoomNativeQUICSessionTransport: LoomSessionTransport {
                     box.complete(
                         .failure(
                             LoomError.connectionFailed(
-                                LoomConnectionFailure(reason: .cancelled, detail: "Native QUIC connection cancelled.")
+                                LoomConnectionFailure(reason: .cancelled, detail: "QUIC connection cancelled.")
                             )
                         )
                     )
                 case let .waiting(error):
-                    LoomLogger.transport("Native QUIC connection waiting: \(error)")
+                    LoomLogger.transport("QUIC connection waiting: \(error)")
                     if LoomFramedConnection.shouldFailAfterWaiting(error) {
                         DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
                             box.complete(.failure(LoomError.connectionFailed(LoomConnectionFailure.classify(error))))
@@ -178,6 +196,21 @@ package actor LoomNativeQUICSessionTransport: LoomSessionTransport {
                 }
             }
             _ = connection.start()
+        }
+    }
+
+    private func handleConnectionStateUpdate(_ state: NetworkChannel<QUIC>.State) {
+        if let snapshot = connection.currentPath.map(LoomSessionNetworkPathSnapshot.init(path:)) {
+            observationHandler?(.path(snapshot))
+        }
+
+        switch state {
+        case let .failed(error):
+            observationHandler?(.failed(error.localizedDescription))
+        case .cancelled:
+            observationHandler?(.cancelled)
+        default:
+            break
         }
     }
 
@@ -197,7 +230,7 @@ package actor LoomNativeQUICSessionTransport: LoomSessionTransport {
         var iterator = stream.makeAsyncIterator()
         guard let inboundStream = try await iterator.next() else {
             throw LoomError.connectionFailed(
-                LoomConnectionFailure(reason: .closed, detail: "Native QUIC connection closed before opening a control stream.")
+                LoomConnectionFailure(reason: .closed, detail: "QUIC connection closed before opening a control stream.")
             )
         }
         return inboundStream
@@ -245,14 +278,14 @@ package actor LoomNativeQUICSessionTransport: LoomSessionTransport {
         let datagrams = datagrams
         let sender = LoomOrderedUnreliableSendQueue(
             queue: DispatchQueue(
-                label: "loom.native-quic.datagram.send.\(profile.rawValue)",
+                label: "loom.quic.datagram.send.\(profile.rawValue)",
                 qos: .userInteractive
             ),
             maxOutstandingPackets: limits.maxOutstandingPackets,
             maxOutstandingBytes: limits.maxOutstandingBytes,
             maxQueuedPackets: limits.maxQueuedPackets,
             replacesQueuedSends: limits.replacesQueuedSends,
-            diagnosticsLabel: "native-quic.\(profile.rawValue)"
+            diagnosticsLabel: "quic.\(profile.rawValue)"
         ) { data, onComplete in
             guard let datagrams else {
                 onComplete(.posix(.ENOTCONN))
@@ -273,7 +306,7 @@ package actor LoomNativeQUICSessionTransport: LoomSessionTransport {
 
     private func sendFrame(_ data: Data) async throws {
         guard let controlStream else {
-            throw LoomError.protocolError("Native QUIC control stream is not ready.")
+            throw LoomError.protocolError("QUIC control stream is not ready.")
         }
         var frame = Data(capacity: 4 + data.count)
         let length = UInt32(data.count).bigEndian
@@ -293,7 +326,7 @@ package actor LoomNativeQUICSessionTransport: LoomSessionTransport {
             (UInt32(receiveBuffer[2]) << 8) |
             UInt32(receiveBuffer[3])
         guard length <= UInt32(maxBytes) else {
-            throw LoomError.protocolError("Received native QUIC frame larger than \(maxBytes) bytes.")
+            throw LoomError.protocolError("Received QUIC frame larger than \(maxBytes) bytes.")
         }
 
         let requiredBytes = 4 + Int(length)
@@ -308,20 +341,19 @@ package actor LoomNativeQUICSessionTransport: LoomSessionTransport {
 
     private func appendControlChunk() async throws {
         guard let controlStream else {
-            throw LoomError.protocolError("Native QUIC control stream is not ready.")
+            throw LoomError.protocolError("QUIC control stream is not ready.")
         }
         let message = try await controlStream.receive(atLeast: 1, atMost: 65_536)
         if message.content.isEmpty, message.metadata.endOfStream {
             throw LoomError.connectionFailed(
-                LoomConnectionFailure(reason: .closed, detail: "Native QUIC control stream closed by peer.")
+                LoomConnectionFailure(reason: .closed, detail: "QUIC control stream closed by peer.")
             )
         }
         receiveBuffer.append(message.content)
     }
 }
 
-@available(macOS 26.0, iOS 26.0, visionOS 26.0, tvOS 26.0, watchOS 26.0, *)
-private final class LoomNativeQUICReadyContinuationBox: @unchecked Sendable {
+private final class LoomQUICReadyContinuationBox: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Void, Error>?
 

@@ -18,7 +18,7 @@
             }
 
             @Step {
-                Keep the service boundary explicit by letting it own the stable device ID, display name, service type, trust provider, and the code that maps accepted `LoomSession` values into your protocol.
+                Keep the service boundary explicit by letting it own the stable device ID, display name, service type, trust provider, and the code that maps accepted `LoomAuthenticatedSession` values into your protocol.
                 @Code(name: "MyHostService.swift", file: BuildAHostServiceOnLoom-MyHostService.swift)
             }
 
@@ -56,7 +56,7 @@
 
     @Section(title: "Advertise and accept sessions") {
         @ContentAndMedia {
-            Advertising is where the transport boundary becomes real. Loom accepts the network connection and hands you a `LoomSession`; your host service decides what happens next.
+            Advertising is where the transport boundary becomes real. Loom accepts TCP, UDP, and QUIC connections and hands you a `LoomAuthenticatedSession`; your host service decides what happens next.
         }
 
         @Steps {
@@ -67,7 +67,7 @@
             }
 
             @Step {
-                Start the `LoomSession` and immediately hand it to an app-owned handshake or framing layer rather than teaching Loom about your message protocol.
+                Observe the `LoomAuthenticatedSession` and immediately hand it to an app-owned protocol layer rather than teaching Loom about your product messages.
                 @Code(name: "MyHostService.swift", file: BuildAHostServiceOnLoom-AcceptSession.swift)
                 This is the same boundary MirageKit uses: Loom gets the connection open, then the product runtime takes over.
             }
@@ -75,7 +75,7 @@
             @Step {
                 Add an explicit stop path so the host can tear down cleanly and predictably.
                 @Code(name: "MyHostService.swift", file: BuildAHostServiceOnLoom-StopHost.swift)
-                Once this flow exists, the next problem is turning raw sessions into authenticated peers with a signed handshake.
+                Once this flow exists, the next problem is applying product trust and protocol policy to authenticated peers.
             }
         }
     }

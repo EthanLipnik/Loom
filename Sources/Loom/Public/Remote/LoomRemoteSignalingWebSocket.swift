@@ -162,7 +162,7 @@ public actor LoomRemoteSignalingWebSocket {
     private static func parseCandidates(_ raw: [[String: Any]]) -> [LoomRemoteCandidate] {
         raw.compactMap { dict in
             guard let transportStr = dict["transport"] as? String,
-                  let transport = LoomRemoteCandidateTransport(rawValue: transportStr),
+                  let transport = LoomTransportKind(rawValue: transportStr),
                   let address = dict["address"] as? String,
                   let port = dict["port"] as? Int else { return nil }
             return LoomRemoteCandidate(transport: transport, address: address, port: UInt16(port))

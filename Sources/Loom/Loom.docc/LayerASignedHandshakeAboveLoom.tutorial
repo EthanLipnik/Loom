@@ -1,6 +1,6 @@
 @Tutorial(time: 35) {
     @Intro(title: "Layer a Signed Handshake Above Loom") {
-        In this tutorial, you will define a small signed hello exchange on top of a `LoomSession`, verify the connecting peer's identity with `LoomIdentityManager`, protect the receiver against replay with `LoomReplayProtector`, and turn the result into a `LoomPeerIdentity` for trust evaluation.
+        In this tutorial, you will define the signed hello payload used by `LoomAuthenticatedSession`, verify the connecting peer's identity with `LoomIdentityManager`, protect the receiver against replay with `LoomReplayProtector`, and turn the result into a `LoomPeerIdentity` for trust evaluation.
 
         This is the seam where Loom's identity primitives become a real product protocol.
     }

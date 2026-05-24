@@ -28,6 +28,9 @@ public final class LoomDiscovery {
     /// Whether Bonjour discovery is enabled.
     public var enableBonjour: Bool = true
 
+    /// Policy used to rank discovered direct transports for the same device.
+    public var directConnectionPolicy: LoomDirectConnectionPolicy
+
     /// Optional local device identifier used to filter self from discovery results.
     public var localDeviceID: UUID?
 
@@ -61,11 +64,13 @@ public final class LoomDiscovery {
         serviceType: String = Loom.serviceType,
         enableBonjour: Bool = true,
         enablePeerToPeer: Bool = true,
+        directConnectionPolicy: LoomDirectConnectionPolicy = .default,
         localDeviceID: UUID? = nil
     ) {
         self.serviceType = serviceType
         self.enableBonjour = enableBonjour
         self.enablePeerToPeer = enablePeerToPeer
+        self.directConnectionPolicy = directConnectionPolicy
         self.localDeviceID = localDeviceID
     }
 
@@ -592,19 +597,24 @@ public final class LoomDiscovery {
     }
 
     private func isPreferredPeer(_ lhs: LoomHostDiscoveryCandidate, _ rhs: LoomHostDiscoveryCandidate) -> Bool {
-        let leftRank = rank(for: lhs)
-        let rightRank = rank(for: rhs)
-        if leftRank != rightRank {
-            return leftRank < rightRank
+        let leftTransport = lhs.advertisement.directTransports.min(by: transportIsPreferred(_:_:))
+        let rightTransport = rhs.advertisement.directTransports.min(by: transportIsPreferred(_:_:))
+        switch (leftTransport, rightTransport) {
+        case let (left?, right?):
+            if transportIsPreferred(left, right) {
+                return true
+            }
+            if transportIsPreferred(right, left) {
+                return false
+            }
+        case (.some, nil):
+            return true
+        case (nil, .some):
+            return false
+        case (nil, nil):
+            break
         }
         return lhs.endpoint.debugDescription < rhs.endpoint.debugDescription
-    }
-
-    private func rank(for peer: LoomHostDiscoveryCandidate) -> Int {
-        guard let preferredTransport = peer.advertisement.directTransports.min(by: transportIsPreferred(_:_:)) else {
-            return Int.max
-        }
-        return pathRank(preferredTransport.pathKind) * 10 + transportRank(preferredTransport.transportKind)
     }
 
     private func removeProjectedPeers(forDeviceID peerID: UUID) {
@@ -615,36 +625,25 @@ public final class LoomDiscovery {
         _ lhs: LoomDirectTransportAdvertisement,
         _ rhs: LoomDirectTransportAdvertisement
     ) -> Bool {
-        let leftRank = pathRank(lhs.pathKind) * 10 + transportRank(lhs.transportKind)
-        let rightRank = pathRank(rhs.pathKind) * 10 + transportRank(rhs.transportKind)
-        if leftRank != rightRank {
-            return leftRank < rightRank
+        let leftPathRank = pathRank(lhs.pathKind)
+        let rightPathRank = pathRank(rhs.pathKind)
+        if leftPathRank != rightPathRank {
+            return leftPathRank < rightPathRank
+        }
+        let leftTransportRank = transportRank(lhs.transportKind)
+        let rightTransportRank = transportRank(rhs.transportKind)
+        if leftTransportRank != rightTransportRank {
+            return leftTransportRank < rightTransportRank
         }
         return lhs.port < rhs.port
     }
 
     private func pathRank(_ pathKind: LoomDirectPathKind?) -> Int {
-        switch pathKind ?? .other {
-        case .wired:
-            return 0
-        case .wifi:
-            return 1
-        case .awdl:
-            return 2
-        case .other:
-            return 3
-        }
+        directConnectionPolicy.preferredLocalPathOrder.firstIndex(of: pathKind ?? .other) ?? Int.max
     }
 
     private func transportRank(_ transportKind: LoomTransportKind) -> Int {
-        switch transportKind {
-        case .udp:
-            return 0
-        case .quic:
-            return 1
-        case .tcp:
-            return 2
-        }
+        directConnectionPolicy.preferredTransportOrder.firstIndex(of: transportKind) ?? Int.max
     }
 
     /// Registers an observer that is invoked whenever discovered peers change.

@@ -13,9 +13,15 @@ package enum LoomSessionReceiveSemantics: Sendable {
     case independentReliableAndUnreliable
 }
 
+package enum LoomSessionTransportObservation: Sendable {
+    case path(LoomSessionNetworkPathSnapshot)
+    case failed(String)
+    case cancelled
+}
+
 /// Abstraction over the framing/delivery layer beneath an authenticated Loom session.
 ///
-/// `LoomFramedConnection` (TCP), `LoomReliableChannel` (UDP), and native QUIC transports conform,
+/// `LoomFramedConnection` (TCP), `LoomReliableChannel` (UDP), and QUIC transports conform,
 /// allowing `LoomAuthenticatedSession` to be transport-agnostic.
 package protocol LoomSessionTransport: Sendable {
     /// Describes whether the transport exposes one shared inbound message lane
@@ -70,60 +76,22 @@ package protocol LoomSessionTransport: Sendable {
     /// Cancel any pending queued unreliable sends that have not yet been
     /// submitted to the underlying connection.
     func cancelPendingUnreliableSends() async
+
+    /// Close transport-owned tasks and queues during authenticated-session teardown.
+    func closeTransport() async
+
+    /// Installs a transport-owned observation hook for path and lifecycle updates.
+    func setObservationHandler(
+        _ handler: (@Sendable (LoomSessionTransportObservation) -> Void)?
+    ) async
 }
 
-package actor LoomUnavailableSessionTransport: LoomSessionTransport {
-    package let receiveSemantics: LoomSessionReceiveSemantics = .singleLane
-
-    private let message: String
-
-    package init(message: String) {
-        self.message = message
+extension LoomSessionTransport {
+    package func closeTransport() async {
+        await cancelPendingUnreliableSends()
     }
 
-    package func startAndAwaitReady(queue: DispatchQueue) async throws {
-        throw LoomError.protocolError(message)
-    }
-
-    package func sendMessage(_ data: Data) async throws {
-        throw LoomError.protocolError(message)
-    }
-
-    package func receiveMessage(maxBytes: Int) async throws -> Data {
-        throw LoomError.protocolError(message)
-    }
-
-    package func sendHandshakeMessage(_ data: Data) async throws {
-        throw LoomError.protocolError(message)
-    }
-
-    package func receiveHandshakeMessage(maxBytes: Int) async throws -> Data {
-        throw LoomError.protocolError(message)
-    }
-
-    package func sendUnreliable(_ data: Data) async throws {
-        throw LoomError.protocolError(message)
-    }
-
-    package func sendUnreliableQueued(
-        _ data: Data,
-        profile: LoomQueuedUnreliableSendProfile,
-        onComplete: @escaping @Sendable (Error?) -> Void
-    ) async {
-        onComplete(LoomError.protocolError(message))
-    }
-
-    package func resetQueuedUnreliableSends(
-        profile: LoomQueuedUnreliableSendProfile
+    package func setObservationHandler(
+        _ handler: (@Sendable (LoomSessionTransportObservation) -> Void)?
     ) async {}
-
-    package func receiveUnreliable(maxBytes: Int) async throws -> Data {
-        throw LoomError.protocolError(message)
-    }
-
-    package func receivePriorityUnreliable(maxBytes: Int) async throws -> Data {
-        throw LoomError.protocolError(message)
-    }
-
-    package func cancelPendingUnreliableSends() async {}
 }

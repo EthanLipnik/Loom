@@ -1,7 +1,6 @@
 import Dispatch
 import Foundation
 import Loom
-import Network
 
 @MainActor
 final class MyClientService {
@@ -15,11 +14,12 @@ final class MyClientService {
 
     private let node: LoomNode
     private let discovery: LoomDiscovery
+    private let coordinator: LoomConnectionCoordinator
 
     private(set) var peers: [LoomPeer] = []
     private(set) var selectedPeerID: UUID?
     private(set) var connectionState: ConnectionState = .disconnected
-    private(set) var session: LoomSession?
+    private(set) var session: LoomAuthenticatedSession?
     private let reconnectDelay: Duration = .seconds(1)
 
     init() {
@@ -32,6 +32,7 @@ final class MyClientService {
             identityManager: LoomIdentityManager.shared
         )
         discovery = node.makeDiscovery()
+        coordinator = LoomConnectionCoordinator(node: node)
     }
 
     func startBrowsing() {
@@ -52,22 +53,15 @@ final class MyClientService {
         selectedPeerID = peer.id
         connectionState = .connecting(peerID: peer.id)
 
-        let connection = NWConnection(to: peer.endpoint, using: .tcp)
-        let session = node.makeSession(connection: connection)
-
-        session.setStateUpdateHandler { [weak self] state in
-            guard let self else { return }
-            if case .failed(let error) = state {
-                self.connectionState = .failed(error.localizedDescription)
-            }
-        }
-
-        session.start(queue: .main)
-        self.session = session
-        connectionState = .connected(peerID: peer.id)
-
-        Task {
-            await performClientHandshake(over: session, expectedPeer: peer)
+        do {
+            let session = try await coordinator.connect(
+                hello: try await makeHelloRequest(),
+                localPeer: peer
+            )
+            self.session = session
+            connectionState = .connected(peerID: peer.id)
+        } catch {
+            connectionState = .failed(error.localizedDescription)
         }
     }
 

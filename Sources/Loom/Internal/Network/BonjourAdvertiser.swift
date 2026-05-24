@@ -10,18 +10,15 @@ import Network
 
 /// Advertises a Loom peer service via Bonjour.
 ///
-/// This listener uses TCP parameters solely for Bonjour service registration
-/// and macOS local network permission grants. No TCP connections are ever
-/// accepted or established through it. Actual sessions are handled by a
-/// separate ``LoomDirectListener`` configured for UDP.
+/// The service type uses a `_tcp` suffix so Network.framework can resolve the
+/// Bonjour endpoint reliably. Authenticated sessions publish their direct
+/// TCP, UDP, and QUIC listener ports through TXT metadata so clients can
+/// connect to the selected transport directly.
 ///
-/// The reason TCP is used here: `NWConnection` cannot resolve Bonjour service
-/// endpoints whose type ends in `_udp` — the connection times out without
-/// completing DNS-SD resolution. Until Apple's Network framework supports
-/// `_udp` service endpoint resolution, the Bonjour advertisement must use a
-/// `_tcp` service type so that clients can discover the host. Clients read
-/// the UDP port from the TXT record and connect directly via
-/// `NWEndpoint.hostPort`.
+/// `NWConnection` cannot resolve Bonjour service endpoints whose type ends in
+/// `_udp` because resolution times out before completing DNS-SD. The `_tcp`
+/// service type keeps discovery reliable while TXT metadata carries the actual
+/// direct transport ports.
 actor BonjourAdvertiser {
     private var listener: NWListener?
     private let serviceType: String
@@ -44,13 +41,14 @@ actor BonjourAdvertiser {
     }
 
     /// Start advertising the service
-    func start(port: UInt16 = 0, onConnection: @escaping @Sendable (NWConnection) -> Void) async throws -> UInt16 {
+    func start(port: UInt16 = 0, onConnection: @escaping LoomDirectConnectionHandler) async throws -> UInt16 {
         guard !isAdvertising else { throw LoomError.alreadyAdvertising }
 
         validateBonjourInfoPlistKeys(serviceType: serviceType)
 
-        // TCP listener for Bonjour service registration only — enables discovery
-        // and local network permissions. Actual sessions use the separate UDP listener.
+        // TCP listener for Bonjour service registration, discovery, local
+        // network permissions, and authenticated TCP fallback. Datagram-capable
+        // sessions publish their direct listener ports through TXT metadata.
         // TODO: Investigate using a UDP Bonjour listener once NWConnection supports
         // resolving _udp service endpoints (rdar://FB...).
         let parameters = Self.makeAdvertiserParameters(enablePeerToPeer: enablePeerToPeer)
@@ -69,7 +67,9 @@ actor BonjourAdvertiser {
         )
 
         // Set connection handler BEFORE starting the listener
-        listener?.newConnectionHandler = onConnection
+        listener?.newConnectionHandler = { connection in
+            onConnection(.tcp(connection))
+        }
 
         // Capture listener reference for the closure
         guard let listener else { throw LoomError.protocolError("Failed to create listener") }

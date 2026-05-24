@@ -147,25 +147,15 @@ let advertisement = LoomPeerAdvertisement(
 ## Advertise and accept sessions
 
 ```swift
-let port = try await node.startAdvertising(
-    serviceName: "My Mac",
-    advertisement: advertisement
-) { session in
-    session.start(queue: .main)
-}
-
-print("Advertising on port \\(port)")
-```
-
-`LoomSession` is a thin wrapper around the accepted `NWConnection`. Start it on the queue you use for your networking runtime, then hand control to your own handshake or message layer.
-
-If you want Loom to own the signed hello and encrypted post-handshake session, prefer authenticated advertising instead:
-
-```swift
 let ports = try await node.startAuthenticatedAdvertising(
     serviceName: "My Mac",
     helloProvider: {
-        try await makeHelloRequest()
+        LoomSessionHelloRequest(
+            deviceID: deviceID,
+            deviceName: "My Mac",
+            deviceType: .mac,
+            advertisement: advertisement
+        )
     }
 ) { session in
     print("Authenticated session ready over \\(session.transportKind)")
@@ -174,7 +164,7 @@ let ports = try await node.startAuthenticatedAdvertising(
 print("Direct transports:", ports)
 ```
 
-`LoomAuthenticatedSession` requires the `loom.session-encryption.v1` feature and encrypts post-handshake control and data frames automatically. `startAuthenticatedAdvertising` also republishes Loom-owned direct transport hints so nearby peers do not need to carry direct listener ports in app metadata.
+`LoomAuthenticatedSession` is the public session boundary for TCP, UDP, and QUIC. It requires the `loom.session-encryption.v1` feature and encrypts post-handshake control and data frames automatically. `startAuthenticatedAdvertising` republishes Loom-owned direct transport hints so nearby peers do not need to carry direct listener ports in app metadata.
 
 ## Discover peers
 
@@ -195,10 +185,10 @@ Discovery only tells you that another peer exists and provides its `NWEndpoint` 
 ## Connect with an authenticated session
 
 ```swift
-let session = try await node.connect(
-    to: peer.endpoint,
-    using: .tcp,
-    hello: try await makeHelloRequest()
+let coordinator = LoomConnectionCoordinator(node: node)
+let session = try await coordinator.connect(
+    hello: try await makeHelloRequest(),
+    localPeer: peer
 )
 ```
 

@@ -122,7 +122,7 @@ struct LoomMediaSecurityFastPathTests {
     private func makeSecurityContext() -> LoomMediaSecurityContext {
         LoomMediaSecurityContext(
             sessionKey: Data((0 ..< LoomMediaSecurity.sessionKeyLength).map { UInt8(truncatingIfNeeded: $0) }),
-            udpRegistrationToken: Data(repeating: 0x5C, count: LoomMediaSecurity.registrationTokenLength)
+            datagramRegistrationToken: Data(repeating: 0x5C, count: LoomMediaSecurity.registrationTokenLength)
         )
     }
 }

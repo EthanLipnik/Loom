@@ -8,39 +8,48 @@
 import Foundation
 import Network
 
-package actor LoomDirectListener {
+package typealias LoomDirectConnectionHandler = @Sendable (LoomConnection) -> Void
+
+package protocol LoomDirectTransportListener: Sendable {
+    func start(
+        port: UInt16,
+        onConnection: @escaping LoomDirectConnectionHandler
+    ) async throws -> UInt16
+
+    func stop() async
+}
+
+package actor LoomDirectListener: LoomDirectTransportListener {
     private var listener: NWListener?
-    private let transportKind: LoomTransportKind
+    private let transportKind: LoomNWConnectionTransportKind
     private let enablePeerToPeer: Bool
-    private let quicALPN: [String]
     private let udpServiceClass: NWParameters.ServiceClass
 
     package init(
-        transportKind: LoomTransportKind,
+        transportKind: LoomNWConnectionTransportKind,
         enablePeerToPeer: Bool,
-        quicALPN: [String] = [],
         udpServiceClass: NWParameters.ServiceClass = .interactiveVideo
     ) {
         self.transportKind = transportKind
         self.enablePeerToPeer = enablePeerToPeer
-        self.quicALPN = quicALPN
         self.udpServiceClass = udpServiceClass
     }
 
     package func start(
         port: UInt16 = 0,
-        onConnection: @escaping @Sendable (NWConnection) -> Void
+        onConnection: @escaping LoomDirectConnectionHandler
     ) async throws -> UInt16 {
         let parameters = try LoomTransportParametersFactory.makeParameters(
             for: transportKind,
             enablePeerToPeer: enablePeerToPeer,
-            quicALPN: quicALPN,
             udpServiceClass: udpServiceClass
         )
         let actualPort: NWEndpoint.Port = port == 0 ? .any : NWEndpoint.Port(rawValue: port) ?? .any
         parameters.allowLocalEndpointReuse = true
         listener = try NWListener(using: parameters, on: actualPort)
-        listener?.newConnectionHandler = onConnection
+        listener?.newConnectionHandler = { [transportKind] connection in
+            onConnection(LoomConnection(connection: connection, transportKind: transportKind))
+        }
         guard let listener else {
             throw LoomError.protocolError("Failed to create Loom direct listener.")
         }
@@ -65,7 +74,7 @@ package actor LoomDirectListener {
         }
     }
 
-    package func stop() {
+    package func stop() async {
         listener?.cancel()
         listener = nil
     }
@@ -73,11 +82,10 @@ package actor LoomDirectListener {
 
 package enum LoomTransportParametersFactory {
     package static func makeParameters(
-        for transportKind: LoomTransportKind,
+        for transportKind: LoomNWConnectionTransportKind,
         enablePeerToPeer: Bool,
         requiredInterface: NWInterface? = nil,
         requiredInterfaceType: NWInterface.InterfaceType? = nil,
-        quicALPN: [String] = [],
         udpServiceClass: NWParameters.ServiceClass = .interactiveVideo
     ) throws -> NWParameters {
         let parameters: NWParameters
@@ -90,22 +98,6 @@ package enum LoomTransportParametersFactory {
                 tcpOptions.enableKeepalive = true
                 tcpOptions.keepaliveInterval = 5
             }
-        case .quic:
-            let options = quicALPN.isEmpty
-                ? NWProtocolQUIC.Options()
-                : NWProtocolQUIC.Options(alpn: quicALPN)
-            options.idleTimeout = 30
-            options.initialMaxData = 8 * 1024 * 1024
-            options.initialMaxStreamDataBidirectionalLocal = 2 * 1024 * 1024
-            options.initialMaxStreamDataBidirectionalRemote = 2 * 1024 * 1024
-            options.initialMaxStreamsBidirectional = 4
-            LoomQUICTLSConfiguration.configure(
-                options.securityProtocolOptions,
-                identity: LoomQUICTLSConfiguration.makeIdentity(commonName: "Loom QUIC"),
-                logPrefix: "QUIC"
-            )
-            parameters = NWParameters(quic: options)
-            parameters.includePeerToPeer = enablePeerToPeer
         case .udp:
             parameters = NWParameters.udp
             parameters.includePeerToPeer = enablePeerToPeer

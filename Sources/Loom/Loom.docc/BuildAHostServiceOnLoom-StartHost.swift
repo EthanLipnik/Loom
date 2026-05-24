@@ -1,13 +1,11 @@
-import Dispatch
 import Foundation
 import Loom
-import Network
 
 @MainActor
 final class MyHostService {
     enum State: Equatable {
         case idle
-        case advertising(controlPort: UInt16)
+        case advertising(ports: [LoomTransportKind: UInt16])
         case failed(String)
     }
 
@@ -57,21 +55,35 @@ final class MyHostService {
 
     func start() async {
         do {
-            let advertisement = try makeAdvertisement()
-            let port = try await node.startAdvertising(
+            let ports = try await node.startAuthenticatedAdvertising(
                 serviceName: serviceName,
-                advertisement: advertisement
+                helloProvider: { [weak self] in
+                    guard let self else {
+                        throw LoomError.protocolError("Host service stopped.")
+                    }
+                    return try await self.makeHelloRequest()
+                }
             ) { [weak self] session in
                 guard let self else { return }
                 self.acceptIncomingSession(session)
             }
-            state = .advertising(controlPort: port)
+            state = .advertising(ports: ports)
         } catch {
             state = .failed(error.localizedDescription)
         }
     }
 
-    private func acceptIncomingSession(_ session: LoomSession) {
-        session.start(queue: .main)
+    private func makeHelloRequest() async throws -> LoomSessionHelloRequest {
+        let advertisement = try makeAdvertisement()
+        return LoomSessionHelloRequest(
+            deviceID: deviceID,
+            deviceName: serviceName,
+            deviceType: .mac,
+            advertisement: advertisement
+        )
+    }
+
+    private func acceptIncomingSession(_ session: LoomAuthenticatedSession) {
+        print("Authenticated host session over", session.transportKind)
     }
 }
