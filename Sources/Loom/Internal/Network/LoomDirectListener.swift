@@ -8,7 +8,7 @@
 import Foundation
 import Network
 
-package typealias LoomDirectConnectionHandler = @Sendable (LoomConnection) -> Void
+package typealias LoomDirectConnectionHandler = @Sendable (LoomConnection) async -> Void
 
 package protocol LoomDirectTransportListener: Sendable {
     func start(
@@ -48,7 +48,9 @@ package actor LoomDirectListener: LoomDirectTransportListener {
         parameters.allowLocalEndpointReuse = true
         listener = try NWListener(using: parameters, on: actualPort)
         listener?.newConnectionHandler = { [transportKind] connection in
-            onConnection(LoomConnection(connection: connection, transportKind: transportKind))
+            Task {
+                await onConnection(LoomConnection(connection: connection, transportKind: transportKind))
+            }
         }
         guard let listener else {
             throw LoomError.protocolError("Failed to create Loom direct listener.")

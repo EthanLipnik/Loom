@@ -69,6 +69,11 @@ package protocol LoomSessionTransport: Sendable {
     /// Receive the next unreliable message.
     func receiveUnreliable(maxBytes: Int) async throws -> Data
 
+    /// Prepare the unreliable receive lane before the authenticated session is
+    /// advertised as ready. Transports with lazily-created datagram flows use
+    /// this to avoid dropping the first media packet after bootstrap.
+    func prepareUnreliableReceive(maxBytes: Int) async throws
+
     /// Receive the next priority unreliable message, when the transport exposes
     /// an independent lane.
     func receivePriorityUnreliable(maxBytes: Int) async throws -> Data
@@ -90,6 +95,8 @@ extension LoomSessionTransport {
     package func closeTransport() async {
         await cancelPendingUnreliableSends()
     }
+
+    package func prepareUnreliableReceive(maxBytes: Int) async throws {}
 
     package func setObservationHandler(
         _ handler: (@Sendable (LoomSessionTransportObservation) -> Void)?

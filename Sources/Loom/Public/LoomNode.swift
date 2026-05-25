@@ -372,22 +372,21 @@ public final class LoomNode {
                     remoteEndpoint: connection.endpoint,
                     serviceClass: connection.transportKind == .tcp ? nil : directDatagramServiceClass
                 )
-                Task {
-                    do {
-                        let hello = try await helloProvider()
-                        _ = try await session.start(
-                            localHello: hello,
-                            identityManager: identityManager,
-                            trustProvider: self.trustProvider,
-                            encryptionPolicy: encryptionPolicy
-                        )
-                        onSession(session)
-                    } catch {
-                        LoomLogger.session(
-                            "Authenticated tcp listener session failed for \(serviceName): \(error)"
-                        )
-                        await session.cancel()
-                    }
+                do {
+                    let hello = try await helloProvider()
+                    _ = try await session.start(
+                        localHello: hello,
+                        identityManager: identityManager,
+                        trustProvider: self.trustProvider,
+                        encryptionPolicy: encryptionPolicy
+                    )
+                    onSession(session)
+                    await Self.keepAcceptedSessionAlive(session)
+                } catch {
+                    LoomLogger.session(
+                        "Authenticated tcp listener session failed for \(serviceName): \(error)"
+                    )
+                    await session.cancel()
                 }
             }
 
@@ -418,27 +417,38 @@ public final class LoomNode {
                 remoteEndpoint: connection.endpoint,
                 serviceClass: connection.transportKind == .tcp ? nil : directDatagramServiceClass
             )
-            Task {
-                do {
-                    let hello = try await helloProvider()
-                    _ = try await session.start(
-                        localHello: hello,
-                        identityManager: identityManager,
-                        trustProvider: self.trustProvider,
-                        encryptionPolicy: encryptionPolicy
-                    )
-                    onSession(session)
-                } catch {
-                    LoomLogger.session(
-                        "Authenticated \(connection.transportKind.rawValue) listener session failed: \(error)"
-                    )
-                    await session.cancel()
-                }
+            do {
+                let hello = try await helloProvider()
+                _ = try await session.start(
+                    localHello: hello,
+                    identityManager: identityManager,
+                    trustProvider: self.trustProvider,
+                    encryptionPolicy: encryptionPolicy
+                )
+                onSession(session)
+                await Self.keepAcceptedSessionAlive(session)
+            } catch {
+                LoomLogger.session(
+                    "Authenticated \(connection.transportKind.rawValue) listener session failed: \(error)"
+                )
+                await session.cancel()
             }
         }
         directListeners[transportKind] = listener
         directListenerPorts[transportKind] = port
         return port
+    }
+
+    private static func keepAcceptedSessionAlive(_ session: LoomAuthenticatedSession) async {
+        let states = await session.makeStateObserver()
+        for await state in states {
+            switch state {
+            case .cancelled, .failed:
+                return
+            case .idle, .handshaking, .ready:
+                break
+            }
+        }
     }
 
     private func makeDirectTransportListener(

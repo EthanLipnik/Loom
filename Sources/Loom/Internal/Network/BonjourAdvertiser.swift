@@ -68,7 +68,9 @@ actor BonjourAdvertiser {
 
         // Set connection handler BEFORE starting the listener
         listener?.newConnectionHandler = { connection in
-            onConnection(.tcp(connection))
+            Task {
+                await onConnection(.tcp(connection))
+            }
         }
 
         // Capture listener reference for the closure

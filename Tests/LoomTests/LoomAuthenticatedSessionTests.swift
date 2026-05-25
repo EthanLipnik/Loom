@@ -790,6 +790,57 @@ struct LoomAuthenticatedSessionTests {
     }
 
     @MainActor
+    @Test("QUIC authenticated sessions complete handshake and carry multiplexed streams")
+    func quicAuthenticatedSessionCompletesHandshakeAndCarriesStreams() async throws {
+        let pair = try await makeStartedQUICLoopbackPair()
+        defer {
+            Task {
+                await pair.stop()
+            }
+        }
+
+        #expect(await pair.client.state == .ready)
+        #expect(await pair.server.state == .ready)
+
+        let incomingStreamTask = Task<LoomMultiplexedStream?, Never> {
+            for await stream in pair.server.incomingStreams {
+                return stream
+            }
+            return nil
+        }
+
+        let payload = Data("hello quic loom".utf8)
+        let unreliablePayload = Data("hello quic datagram".utf8)
+        let queuedPayload = Data("hello queued quic datagram".utf8)
+        let outgoingStream = try await pair.client.openStream(label: "quic-roundtrip")
+        let incomingStream = try #require(await incomingStreamTask.value)
+        let receivedPayloadsTask = Task {
+            await collectPayloads(
+                from: incomingStream,
+                count: 3,
+                timeoutSeconds: 2.0
+            )
+        }
+        let completionCount = AsyncBox<Int>()
+        try await outgoingStream.send(payload)
+        try await outgoingStream.sendUnreliable(unreliablePayload)
+        outgoingStream.sendUnreliableQueued(queuedPayload) { error in
+            #expect(error == nil)
+            Task {
+                await completionCount.increment()
+            }
+        }
+
+        let receivedPayloads = try #require(await receivedPayloadsTask.value)
+        #expect(receivedPayloads.contains(payload))
+        #expect(receivedPayloads.contains(unreliablePayload))
+        #expect(receivedPayloads.contains(queuedPayload))
+        let completed = try #require(await completionCount.takeCount(target: 1, timeoutSeconds: 2.0))
+        #expect(completed == 1)
+        try await outgoingStream.close()
+    }
+
+    @MainActor
     @Test("UDP authenticated session blackhole surfaces a timeout failure")
     func udpBlackholeSurfacesTimeoutFailure() async throws {
         let listener = try NWListener(using: .udp, on: .any)
@@ -1199,6 +1250,28 @@ private struct LoopbackSessionPair {
     }
 }
 
+private struct QUICLoopbackSessionPair {
+    let listener: LoomQUICDirectListener
+    let clientIdentityManager: LoomIdentityManager
+    let serverIdentityManager: LoomIdentityManager
+    let serverTrustProvider: AlwaysTrustProvider
+    let clientHello: LoomSessionHelloRequest
+    let serverHello: LoomSessionHelloRequest
+    let client: LoomAuthenticatedSession
+    let server: LoomAuthenticatedSession
+
+    func stop() async {
+        await listener.stop()
+        await client.cancel()
+        await server.cancel()
+    }
+}
+
+private enum SessionStartResult: Sendable {
+    case success(LoomAuthenticatedSessionContext)
+    case failure(String)
+}
+
 @MainActor
 private func makeLoopbackPair(
     clientFeatures: [String] = LoomSessionHelloRequest.defaultFeatures,
@@ -1269,6 +1342,142 @@ private func makeLoopbackPair(
     let serverTrustProvider = AlwaysTrustProvider()
 
     return LoopbackSessionPair(
+        listener: listener,
+        clientIdentityManager: clientIdentityManager,
+        serverIdentityManager: serverIdentityManager,
+        serverTrustProvider: serverTrustProvider,
+        clientHello: clientHello,
+        serverHello: serverHello,
+        client: client,
+        server: server
+    )
+}
+
+@MainActor
+private func makeStartedQUICLoopbackPair(
+    clientFeatures: [String] = LoomSessionHelloRequest.defaultFeatures,
+    serverFeatures: [String] = LoomSessionHelloRequest.defaultFeatures
+) async throws -> QUICLoopbackSessionPair {
+    let clientIdentityManager = LoomIdentityManager(
+        service: "com.ethanlipnik.loom.tests.auth-client-quic.\(UUID().uuidString)",
+        account: "p256-signing",
+        synchronizable: false
+    )
+    let serverIdentityManager = LoomIdentityManager(
+        service: "com.ethanlipnik.loom.tests.auth-server-quic.\(UUID().uuidString)",
+        account: "p256-signing",
+        synchronizable: false
+    )
+    let listener = LoomQUICDirectListener(
+        enablePeerToPeer: false,
+        quicALPN: ["loom"],
+        serviceClass: .interactiveVideo
+    )
+    let clientHello = LoomSessionHelloRequest(
+        deviceID: UUID(),
+        deviceName: "QUIC Client",
+        deviceType: .mac,
+        advertisement: LoomPeerAdvertisement(deviceType: .mac),
+        supportedFeatures: clientFeatures
+    )
+    let serverHello = LoomSessionHelloRequest(
+        deviceID: UUID(),
+        deviceName: "QUIC Server",
+        deviceType: .mac,
+        advertisement: LoomPeerAdvertisement(deviceType: .mac),
+        supportedFeatures: serverFeatures
+    )
+    let serverTrustProvider = AlwaysTrustProvider()
+    let serverSession = AsyncBox<LoomAuthenticatedSession>()
+    let serverStartResult = AsyncBox<SessionStartResult>()
+    let clientStartResult = AsyncBox<SessionStartResult>()
+    let port = try await listener.start(port: 0) { connection in
+        let server = LoomAuthenticatedSession(
+            connection: connection,
+            role: .receiver,
+            remoteEndpoint: connection.endpoint,
+            serviceClass: .interactiveVideo
+        )
+        await serverSession.set(server)
+        do {
+            let context = try await server.start(
+                localHello: serverHello,
+                identityManager: serverIdentityManager,
+                trustProvider: serverTrustProvider
+            )
+            await serverStartResult.set(.success(context))
+            await waitUntilSessionFinished(server)
+        } catch {
+            await serverStartResult.set(.failure(error.localizedDescription))
+            await server.cancel()
+        }
+    }
+
+    let endpoint = NWEndpoint.hostPort(
+        host: "127.0.0.1",
+        port: try #require(NWEndpoint.Port(rawValue: port))
+    )
+    let clientConnection = try LoomQUICTransportFactory.makeConnection(
+        to: endpoint,
+        enablePeerToPeer: false,
+        requiredInterface: nil,
+        requiredInterfaceType: nil,
+        requiredLocalPort: nil,
+        quicALPN: ["loom"],
+        serviceClass: .interactiveVideo
+    )
+    let client = LoomAuthenticatedSession(
+        connection: .quic(clientConnection),
+        role: .initiator,
+        remoteEndpoint: endpoint,
+        serviceClass: .interactiveVideo
+    )
+
+    Task {
+        do {
+            let context = try await client.start(
+                localHello: clientHello,
+                identityManager: clientIdentityManager
+            )
+            await clientStartResult.set(.success(context))
+        } catch {
+            await clientStartResult.set(.failure(error.localizedDescription))
+            await client.cancel()
+        }
+    }
+
+    let server = try #require(
+        await serverSession.take(timeoutSeconds: 2),
+        "QUIC listener did not deliver an accepted server session."
+    )
+    let serverResult = await serverStartResult.take(timeoutSeconds: 3)
+    if serverResult == nil {
+        let serverProgress = await server.bootstrapProgress
+        let clientProgress = await client.bootstrapProgress
+        throw LoomError.protocolError(
+            "QUIC server session start timed out at server=\(serverProgress) client=\(clientProgress)."
+        )
+    }
+    switch try #require(serverResult) {
+    case .success:
+        break
+    case let .failure(message):
+        throw LoomError.protocolError("QUIC server session failed to start: \(message)")
+    }
+
+    let clientResult = await clientStartResult.take(timeoutSeconds: 3)
+    if clientResult == nil {
+        let progress = await client.bootstrapProgress
+        throw LoomError.protocolError("QUIC client session start timed out at \(progress).")
+    }
+    switch try #require(clientResult) {
+    case .success:
+        break
+    case let .failure(message):
+        throw LoomError.protocolError("QUIC client session failed to start: \(message)")
+    }
+
+    return QUICLoopbackSessionPair(
         listener: listener,
         clientIdentityManager: clientIdentityManager,
         serverIdentityManager: serverIdentityManager,
@@ -1455,6 +1664,38 @@ private func collectPayloads(
     return payloads
 }
 
+private func collectPayloads(
+    from stream: LoomMultiplexedStream,
+    count: Int,
+    timeoutSeconds: TimeInterval
+) async -> [Data]? {
+    await withTaskGroup(of: [Data]?.self) { group in
+        group.addTask {
+            await collectPayloads(from: stream, count: count)
+        }
+        group.addTask {
+            try? await Task.sleep(for: .milliseconds(Int(timeoutSeconds * 1000)))
+            return nil
+        }
+
+        let result = await group.next() ?? nil
+        group.cancelAll()
+        return result
+    }
+}
+
+private func waitUntilSessionFinished(_ session: LoomAuthenticatedSession) async {
+    let states = await session.makeStateObserver()
+    for await state in states {
+        switch state {
+        case .cancelled, .failed:
+            return
+        case .idle, .handshaking, .ready:
+            break
+        }
+    }
+}
+
 private func firstPathSnapshot(
     from stream: AsyncStream<LoomSessionNetworkPathSnapshot>
 ) async -> LoomSessionNetworkPathSnapshot? {
@@ -1506,6 +1747,18 @@ private actor AsyncBox<Value: Sendable> {
         return await withCheckedContinuation { continuation in
             continuations.append(continuation)
         }
+    }
+
+    func take(timeoutSeconds: TimeInterval) async -> Value? {
+        let deadline = CFAbsoluteTimeGetCurrent() + timeoutSeconds
+        while CFAbsoluteTimeGetCurrent() < deadline {
+            if let value {
+                self.value = nil
+                return value
+            }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return nil
     }
 
     func increment() where Value == Int {

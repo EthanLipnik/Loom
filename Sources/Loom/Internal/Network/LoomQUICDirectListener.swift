@@ -65,7 +65,13 @@ package actor LoomQUICDirectListener: LoomDirectTransportListener {
             runTask = Task { [listener] in
                 do {
                     try await listener.run { connection in
-                        onConnection(.quic(connection))
+                        LoomLogger.transport(
+                            "QUIC listener accepted connection endpoint=\(connection.remoteEndpoint?.debugDescription ?? "unknown")"
+                        )
+                        await onConnection(.quic(connection))
+                        LoomLogger.transport(
+                            "QUIC listener handler completed endpoint=\(connection.remoteEndpoint?.debugDescription ?? "unknown")"
+                        )
                     }
                 } catch {
                     box.complete(.failure(LoomError.connectionFailed(LoomConnectionFailure.classify(error))))

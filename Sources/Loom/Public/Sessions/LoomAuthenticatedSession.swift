@@ -582,9 +582,6 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         do {
             updateState(.handshaking)
             updateBootstrapProgress(phase: .transportStarting)
-            try await transport.startAndAwaitReady(queue: queue)
-            updateBootstrapProgress(phase: .transportReady)
-
             let preparedHello = try await MainActor.run {
                 try LoomSessionHelloValidator.makePreparedSignedHello(
                     from: localHello,
@@ -592,6 +589,8 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                 )
             }
             let helloData = try JSONEncoder().encode(preparedHello.hello)
+            try await transport.startAndAwaitReady(queue: queue)
+            updateBootstrapProgress(phase: .transportReady)
             try await transport.sendHandshakeMessage(helloData)
             updateBootstrapProgress(phase: .localHelloSent)
 
@@ -657,6 +656,9 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             )
             self.context = context
             configureTransportObserversIfNeeded()
+            if transport.receiveSemantics == .independentReliableAndUnreliable {
+                try await transport.prepareUnreliableReceive(maxBytes: LoomMessageLimits.maxFrameBytes)
+            }
             updateBootstrapProgress(phase: .ready)
             updateState(.ready)
             readTask = Task { [weak self] in

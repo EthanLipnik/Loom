@@ -14,9 +14,8 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
 
     private let connection: NetworkConnection<QUIC>
     private let role: LoomSessionRole
-    private var controlStream: QUIC.Stream<QUICStream>?
+    private var controlStream: QUIC.Stream<TLV>?
     private var datagrams: QUIC.Datagrams<QUICDatagram>?
-    private var receiveBuffer = Data()
     private var queuedUnreliableSenders: [LoomQueuedUnreliableSendProfile: LoomOrderedUnreliableSendQueue] = [:]
     private var inboundStreamTask: Task<Void, Never>?
     private var datagramReceiveTask: Task<Void, Never>?
@@ -53,15 +52,26 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
     }
 
     package func startAndAwaitReady(queue: DispatchQueue) async throws {
-        try await awaitConnectionReady()
+        LoomLogger.transport(
+            "QUIC session transport starting role=\(role.rawValue) endpoint=\(connection.remoteEndpoint?.debugDescription ?? "unknown") state=\(connection.state)"
+        )
         switch role {
         case .initiator:
-            controlStream = try await connection.openStream(directionality: .bidirectional)
+            try await awaitConnectionReady()
+            LoomLogger.transport("QUIC initiator connection ready; control stream will open on first send")
         case .receiver:
+            _ = connection.start()
+            LoomLogger.transport("QUIC receiver connection started; waiting for initial control stream")
             controlStream = try await receiveInitialInboundStream()
+            LoomLogger.transport("QUIC receiver accepted initial control stream")
         }
-        datagrams = try await connection.datagrams
-        startDatagramReceiveLoop()
+        if let controlStream {
+            try await awaitControlStreamReady(controlStream)
+            LoomLogger.transport("QUIC control stream ready role=\(role.rawValue)")
+        }
+        LoomLogger.transport(
+            "QUIC session transport ready role=\(role.rawValue) endpoint=\(connection.remoteEndpoint?.debugDescription ?? "unknown") connection=\(connection.state) datagramSize=\(connection.usableDatagramFrameSize)"
+        )
     }
 
     package func sendMessage(_ data: Data) async throws {
@@ -81,9 +91,7 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
     }
 
     package func sendUnreliable(_ data: Data) async throws {
-        guard let datagrams else {
-            throw LoomError.protocolError("QUIC datagram channel is not ready.")
-        }
+        let datagrams = try await ensureDatagramsReady()
         try await datagrams.send(data)
     }
 
@@ -92,12 +100,15 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
         profile: LoomQueuedUnreliableSendProfile,
         onComplete: @escaping @Sendable (Error?) -> Void
     ) async {
-        guard datagrams != nil else {
-            onComplete(LoomError.protocolError("QUIC datagram channel is not ready."))
+        let datagrams: QUIC.Datagrams<QUICDatagram>
+        do {
+            datagrams = try await ensureDatagramsReady()
+        } catch {
+            onComplete(error)
             return
         }
 
-        queuedUnreliableSender(for: profile).enqueue(data) { error in
+        queuedUnreliableSender(for: profile, datagrams: datagrams).enqueue(data) { error in
             if let error {
                 onComplete(LoomError.connectionFailed(LoomConnectionFailure.classify(error)))
             } else {
@@ -113,6 +124,8 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
     }
 
     package func receiveUnreliable(maxBytes: Int) async throws -> Data {
+        _ = try await ensureDatagramsReady()
+        startDatagramReceiveLoop()
         for await message in unreliableDeliveryStream {
             if message.count > maxBytes {
                 throw LoomError.protocolError("Received QUIC datagram exceeds limit: \(message.count) > \(maxBytes)")
@@ -124,7 +137,14 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
         )
     }
 
+    package func prepareUnreliableReceive(maxBytes: Int) async throws {
+        _ = try await ensureDatagramsReady()
+        startDatagramReceiveLoop()
+    }
+
     package func receivePriorityUnreliable(maxBytes: Int) async throws -> Data {
+        _ = try await ensureDatagramsReady()
+        startDatagramReceiveLoop()
         for await message in priorityUnreliableDeliveryStream {
             if message.count > maxBytes {
                 throw LoomError.protocolError("Received QUIC priority datagram exceeds limit: \(message.count) > \(maxBytes)")
@@ -163,7 +183,7 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
     private func awaitConnectionReady() async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let box = LoomQUICReadyContinuationBox(continuation: continuation)
-            connection.onStateUpdate { [weak self] _, state in
+            let handleState: @Sendable (NetworkChannel<QUIC>.State) -> Void = { [weak self] state in
                 if let self {
                     Task {
                         await self.handleConnectionStateUpdate(state)
@@ -195,6 +215,10 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
                     break
                 }
             }
+            connection.onStateUpdate { _, state in
+                handleState(state)
+            }
+            handleState(connection.state)
             _ = connection.start()
         }
     }
@@ -214,11 +238,17 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
         }
     }
 
-    private func receiveInitialInboundStream() async throws -> QUIC.Stream<QUICStream> {
-        let (stream, continuation) = AsyncThrowingStream.makeStream(of: QUIC.Stream<QUICStream>.self)
+    private func receiveInitialInboundStream() async throws -> QUIC.Stream<TLV> {
+        let (stream, continuation) = AsyncThrowingStream.makeStream(of: QUIC.Stream<TLV>.self)
         inboundStreamTask = Task { [connection] in
             do {
-                try await connection.inboundStreams { inboundStream in
+                try await connection.inboundStreams(prepending: { quicStream in
+                    TLV { quicStream }
+                }) { inboundStream in
+                    LoomLogger.debug(
+                        .transport,
+                        "QUIC inbound stream yielded state=\(inboundStream.state)"
+                    )
                     continuation.yield(inboundStream)
                 }
                 continuation.finish()
@@ -234,6 +264,40 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
             )
         }
         return inboundStream
+    }
+
+    private func awaitControlStreamReady(_ stream: QUIC.Stream<TLV>) async throws {
+        let deadline = CFAbsoluteTimeGetCurrent() + 2.0
+        while true {
+            switch stream.state {
+            case .ready:
+                return
+            case let .failed(error):
+                throw LoomError.connectionFailed(LoomConnectionFailure.classify(error))
+            case .cancelled:
+                throw LoomError.connectionFailed(
+                    LoomConnectionFailure(reason: .cancelled, detail: "QUIC control stream cancelled.")
+                )
+            case let .waiting(error):
+                LoomLogger.transport("QUIC control stream waiting: \(error)")
+                if LoomFramedConnection.shouldFailAfterWaiting(error),
+                   CFAbsoluteTimeGetCurrent() >= deadline {
+                    throw LoomError.connectionFailed(LoomConnectionFailure.classify(error))
+                }
+            case .setup, .preparing:
+                if CFAbsoluteTimeGetCurrent() >= deadline {
+                    throw LoomError.connectionFailed(
+                        LoomConnectionFailure(
+                            reason: .timedOut,
+                            detail: "QUIC control stream did not become ready."
+                        )
+                    )
+                }
+            @unknown default:
+                break
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
     }
 
     private func startDatagramReceiveLoop() {
@@ -267,15 +331,27 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
         priorityUnreliableDeliveryContinuation?.finish()
     }
 
+    private func ensureDatagramsReady() async throws -> QUIC.Datagrams<QUICDatagram> {
+        if let datagrams {
+            return datagrams
+        }
+        let datagrams = try await connection.datagrams
+        self.datagrams = datagrams
+        LoomLogger.transport(
+            "QUIC datagram flow ready role=\(role.rawValue) state=\(datagrams.state) usableSize=\(connection.usableDatagramFrameSize)"
+        )
+        return datagrams
+    }
+
     private func queuedUnreliableSender(
-        for profile: LoomQueuedUnreliableSendProfile
+        for profile: LoomQueuedUnreliableSendProfile,
+        datagrams: QUIC.Datagrams<QUICDatagram>
     ) -> LoomOrderedUnreliableSendQueue {
         if let existing = queuedUnreliableSenders[profile] {
             return existing
         }
 
         let limits = LoomOrderedUnreliableSendQueue.limits(for: profile)
-        let datagrams = datagrams
         let sender = LoomOrderedUnreliableSendQueue(
             queue: DispatchQueue(
                 label: "loom.quic.datagram.send.\(profile.rawValue)",
@@ -287,10 +363,6 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
             replacesQueuedSends: limits.replacesQueuedSends,
             diagnosticsLabel: "quic.\(profile.rawValue)"
         ) { data, onComplete in
-            guard let datagrams else {
-                onComplete(.posix(.ENOTCONN))
-                return
-            }
             Task {
                 do {
                     try await datagrams.send(data)
@@ -305,51 +377,67 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
     }
 
     private func sendFrame(_ data: Data) async throws {
-        guard let controlStream else {
+        let controlStream = try await writableControlStream()
+        LoomLogger.debug(
+            .transport,
+            "QUIC control stream send begin bytes=\(data.count) connection=\(connection.state) stream=\(controlStream.state)"
+        )
+        for attempt in 0 ..< 5 {
+            do {
+                try await controlStream.send(data, type: 0)
+                LoomLogger.debug(.transport, "QUIC control stream send completed bytes=\(data.count)")
+                return
+            } catch where Self.isTransientNotConnected(error) && attempt < 4 {
+                try await Task.sleep(for: .milliseconds(25 * (attempt + 1)))
+            } catch {
+                throw LoomError.connectionFailed(
+                    LoomConnectionFailure(
+                        reason: .transportLoss,
+                        detail: "QUIC control stream send failed with connection=\(connection.state) stream=\(controlStream.state): \(error.localizedDescription)"
+                    )
+                )
+            }
+        }
+        do {
+            try await controlStream.send(data, type: 0)
+        } catch {
+            throw LoomError.connectionFailed(
+                LoomConnectionFailure(
+                    reason: .transportLoss,
+                    detail: "QUIC control stream send failed after retry with connection=\(connection.state) stream=\(controlStream.state): \(error.localizedDescription)"
+                )
+            )
+        }
+    }
+
+    private func writableControlStream() async throws -> QUIC.Stream<TLV> {
+        if let controlStream {
+            return controlStream
+        }
+        guard role == .initiator else {
             throw LoomError.protocolError("QUIC control stream is not ready.")
         }
-        var frame = Data(capacity: 4 + data.count)
-        let length = UInt32(data.count).bigEndian
-        withUnsafeBytes(of: length) { frame.append(contentsOf: $0) }
-        frame.append(data)
-        try await controlStream.send(frame)
+        LoomLogger.transport("QUIC initiator opening control stream for first send")
+        let stream = try await connection.openStream(directionality: .bidirectional) { quicStream in
+            TLV { quicStream }
+        }
+        controlStream = stream
+        return stream
     }
 
     private func readFrame(maxBytes: Int) async throws -> Data {
-        while receiveBuffer.count < 4 {
-            try await appendControlChunk()
-        }
-
-        let length =
-            (UInt32(receiveBuffer[0]) << 24) |
-            (UInt32(receiveBuffer[1]) << 16) |
-            (UInt32(receiveBuffer[2]) << 8) |
-            UInt32(receiveBuffer[3])
-        guard length <= UInt32(maxBytes) else {
-            throw LoomError.protocolError("Received QUIC frame larger than \(maxBytes) bytes.")
-        }
-
-        let requiredBytes = 4 + Int(length)
-        while receiveBuffer.count < requiredBytes {
-            try await appendControlChunk()
-        }
-
-        let payload = Data(receiveBuffer[4..<requiredBytes])
-        receiveBuffer.removeSubrange(0..<requiredBytes)
-        return payload
-    }
-
-    private func appendControlChunk() async throws {
         guard let controlStream else {
             throw LoomError.protocolError("QUIC control stream is not ready.")
         }
-        let message = try await controlStream.receive(atLeast: 1, atMost: 65_536)
-        if message.content.isEmpty, message.metadata.endOfStream {
-            throw LoomError.connectionFailed(
-                LoomConnectionFailure(reason: .closed, detail: "QUIC control stream closed by peer.")
-            )
+        let message = try await controlStream.receive()
+        guard message.content.count <= maxBytes else {
+            throw LoomError.protocolError("Received QUIC frame larger than \(maxBytes) bytes.")
         }
-        receiveBuffer.append(message.content)
+        return message.content
+    }
+
+    private static func isTransientNotConnected(_ error: Error) -> Bool {
+        LoomConnectionFailure.classify(error).posixCode == .ENOTCONN
     }
 }
 
