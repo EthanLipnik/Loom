@@ -72,6 +72,7 @@ Authenticated Loom sessions also expose transport-facing metadata that higher-le
 
 - ``LoomBootstrapEndpointResolver``
 - ``LoomBootstrapControlClient``
+- ``LoomBootstrapControlCommandPayload``
 - ``LoomWakeOnLANClient``
 - ``LoomSSHBootstrapClient``
 

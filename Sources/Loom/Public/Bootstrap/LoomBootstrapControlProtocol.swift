@@ -14,6 +14,7 @@ import Foundation
 public enum LoomBootstrapControlOperation: String, Codable, Sendable {
     case status
     case submitCredentials
+    case performCommand
 }
 
 /// Signed bootstrap control request envelope.
@@ -54,6 +55,29 @@ public struct LoomBootstrapEncryptedCredentialsPayload: Codable, Sendable, Equat
     }
 }
 
+/// Opaque command payload for bootstrap control extensions.
+public struct LoomBootstrapControlCommandPayload: Codable, Sendable, Equatable {
+    /// Product-defined command identifier.
+    public let identifier: String
+    /// Product-defined command body.
+    public let body: Data?
+
+    public init(identifier: String, body: Data? = nil) {
+        self.identifier = identifier
+        self.body = body
+    }
+}
+
+/// Encrypted command payload for bootstrap control command operations.
+public struct LoomBootstrapEncryptedCommandPayload: Codable, Sendable, Equatable {
+    /// AES-256-GCM combined payload (`nonce + ciphertext + auth tag`).
+    public let combined: Data
+
+    public init(combined: Data) {
+        self.combined = combined
+    }
+}
+
 /// Bootstrap control request payload sent to a peer bootstrap daemon.
 public struct LoomBootstrapControlRequest: Codable, Sendable {
     /// Correlation identifier for request/response matching.
@@ -64,18 +88,22 @@ public struct LoomBootstrapControlRequest: Codable, Sendable {
     public let auth: LoomBootstrapControlAuthEnvelope
     /// Encrypted credentials payload for credential-submission operations.
     public let credentialsPayload: LoomBootstrapEncryptedCredentialsPayload?
+    /// Encrypted command payload for command operations.
+    public let commandPayload: LoomBootstrapEncryptedCommandPayload?
 
     /// Creates a bootstrap daemon control request payload.
     public init(
         requestID: UUID = UUID(),
         operation: LoomBootstrapControlOperation,
         auth: LoomBootstrapControlAuthEnvelope,
-        credentialsPayload: LoomBootstrapEncryptedCredentialsPayload? = nil
+        credentialsPayload: LoomBootstrapEncryptedCredentialsPayload? = nil,
+        commandPayload: LoomBootstrapEncryptedCommandPayload? = nil
     ) {
         self.requestID = requestID
         self.operation = operation
         self.auth = auth
         self.credentialsPayload = credentialsPayload
+        self.commandPayload = commandPayload
     }
 }
 
@@ -194,6 +222,45 @@ public enum LoomBootstrapControlSecurity {
         let sealed = try AES.GCM.SealedBox(combined: payload.combined)
         let plaintext = try AES.GCM.open(sealed, using: key)
         return try JSONDecoder().decode(LoomBootstrapCredentials.self, from: plaintext)
+    }
+
+    public static func encryptCommand(
+        _ command: LoomBootstrapControlCommandPayload,
+        sharedSecret: String,
+        requestID: UUID,
+        timestampMs: Int64,
+        nonce: String
+    ) throws -> LoomBootstrapEncryptedCommandPayload {
+        let plaintext = try JSONEncoder().encode(command)
+        let key = try deriveEncryptionKey(
+            sharedSecret: sharedSecret,
+            requestID: requestID,
+            timestampMs: timestampMs,
+            nonce: nonce
+        )
+        let sealed = try AES.GCM.seal(plaintext, using: key)
+        guard let combined = sealed.combined else {
+            throw LoomError.protocolError("Failed to create bootstrap command payload.")
+        }
+        return LoomBootstrapEncryptedCommandPayload(combined: combined)
+    }
+
+    public static func decryptCommand(
+        _ payload: LoomBootstrapEncryptedCommandPayload,
+        sharedSecret: String,
+        requestID: UUID,
+        timestampMs: Int64,
+        nonce: String
+    ) throws -> LoomBootstrapControlCommandPayload {
+        let key = try deriveEncryptionKey(
+            sharedSecret: sharedSecret,
+            requestID: requestID,
+            timestampMs: timestampMs,
+            nonce: nonce
+        )
+        let sealed = try AES.GCM.SealedBox(combined: payload.combined)
+        let plaintext = try AES.GCM.open(sealed, using: key)
+        return try JSONDecoder().decode(LoomBootstrapControlCommandPayload.self, from: plaintext)
     }
 
     private static func deriveEncryptionKey(

@@ -37,4 +37,34 @@ struct LoomBootstrapControlSecurityTests {
         let plaintext = try JSONEncoder().encode(credentials)
         #expect(encrypted.combined.count == plaintext.count + 12 + 16)
     }
+
+    @Test("Command encryption uses AES-GCM combined payloads")
+    func commandEncryptionUsesCombinedPayload() throws {
+        let command = LoomBootstrapControlCommandPayload(
+            identifier: "com.example.command",
+            body: Data("{}".utf8)
+        )
+        let requestID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
+        let timestampMs: Int64 = 1_234_567_890
+        let nonce = "bootstrap-nonce"
+
+        let encrypted = try LoomBootstrapControlSecurity.encryptCommand(
+            command,
+            sharedSecret: "shared-secret",
+            requestID: requestID,
+            timestampMs: timestampMs,
+            nonce: nonce
+        )
+        let decrypted = try LoomBootstrapControlSecurity.decryptCommand(
+            encrypted,
+            sharedSecret: "shared-secret",
+            requestID: requestID,
+            timestampMs: timestampMs,
+            nonce: nonce
+        )
+
+        #expect(decrypted == command)
+        let plaintext = try JSONEncoder().encode(command)
+        #expect(encrypted.combined.count == plaintext.count + 12 + 16)
+    }
 }

@@ -26,21 +26,26 @@ public actor LoomBootstrapControlServer {
     public typealias StatusHandler = @Sendable (LoomBootstrapControlPeer) async throws -> LoomBootstrapControlResult
     public typealias UnlockHandler =
         @Sendable (LoomBootstrapControlPeer, LoomBootstrapCredentials) async throws -> LoomBootstrapControlResult
+    public typealias CommandHandler =
+        @Sendable (LoomBootstrapControlPeer, LoomBootstrapControlCommandPayload) async throws -> LoomBootstrapControlResult
 
     private let controlAuthSecret: String
     private let statusHandler: StatusHandler
     private let unlockHandler: UnlockHandler
+    private let commandHandler: CommandHandler?
     private let replayProtector = LoomReplayProtector()
     private var listener: NWListener?
 
     public init(
         controlAuthSecret: String,
         onStatus: @escaping StatusHandler,
-        onUnlock: @escaping UnlockHandler
+        onUnlock: @escaping UnlockHandler,
+        onCommand: CommandHandler? = nil
     ) {
         self.controlAuthSecret = controlAuthSecret
         statusHandler = onStatus
         unlockHandler = onUnlock
+        commandHandler = onCommand
     }
 
     public func start(port: UInt16 = Loom.defaultControlPort) async throws -> UInt16 {
@@ -132,6 +137,21 @@ public actor LoomBootstrapControlServer {
                 nonce: request.auth.nonce
             )
             return try await unlockHandler(peer, credentials)
+        case .performCommand:
+            guard let commandHandler else {
+                throw LoomBootstrapControlError.protocolViolation("Bootstrap control commands are not supported.")
+            }
+            guard let commandPayload = request.commandPayload else {
+                throw LoomBootstrapControlError.protocolViolation("Missing encrypted command payload.")
+            }
+            let command = try LoomBootstrapControlSecurity.decryptCommand(
+                commandPayload,
+                sharedSecret: controlAuthSecret,
+                requestID: request.requestID,
+                timestampMs: request.auth.timestampMs,
+                nonce: request.auth.nonce
+            )
+            return try await commandHandler(peer, command)
         }
     }
 
@@ -151,7 +171,8 @@ public actor LoomBootstrapControlServer {
             throw LoomBootstrapControlError.protocolViolation("Bootstrap control replay rejected.")
         }
 
-        let encryptedSHA256 = LoomBootstrapControlSecurity.payloadSHA256Hex(request.credentialsPayload?.combined)
+        let signedPayload = request.credentialsPayload?.combined ?? request.commandPayload?.combined
+        let encryptedSHA256 = LoomBootstrapControlSecurity.payloadSHA256Hex(signedPayload)
         let payload = try LoomBootstrapControlSecurity.canonicalPayload(
             requestID: request.requestID,
             operation: request.operation,

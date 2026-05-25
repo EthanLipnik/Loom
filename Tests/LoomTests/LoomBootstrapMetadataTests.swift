@@ -27,6 +27,7 @@ struct LoomBootstrapMetadataTests {
             sshPort: 22,
             controlPort: 9851,
             controlAuthSecret: "daemon-secret",
+            controlCapabilities: [.commands],
             sshHostKeyFingerprints: ["SHA256:test-fingerprint"],
             wakeOnLAN: LoomWakeOnLANInfo(
                 macAddress: "AA:BB:CC:DD:EE:FF",
@@ -41,6 +42,7 @@ struct LoomBootstrapMetadataTests {
         #expect(decoded.version == LoomBootstrapMetadata.currentVersion)
         #expect(decoded.endpoints.count == 2)
         #expect(decoded.controlAuthSecret == "daemon-secret")
+        #expect(decoded.controlCapabilities == [.commands])
         #expect(decoded.sshHostKeyFingerprints == ["SHA256:test-fingerprint"])
         #expect(decoded.wakeOnLAN?.broadcastAddresses.count == 2)
     }
@@ -62,6 +64,7 @@ struct LoomBootstrapMetadataTests {
         let metadata = try JSONDecoder().decode(LoomBootstrapMetadata.self, from: json)
 
         #expect(metadata.sshHostKeyFingerprints.isEmpty)
+        #expect(metadata.controlCapabilities.isEmpty)
     }
 
     @Test("Wake-on-LAN magic packet format")

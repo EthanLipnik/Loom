@@ -65,6 +65,98 @@ struct LoomBootstrapControlServerTests {
     }
 
     @MainActor
+    @Test("Command handler round-trips encrypted commands through the client")
+    func commandRoundTrip() async throws {
+        let identityManager = LoomIdentityManager(
+            service: "com.ethanlipnik.loom.tests.bootstrap-control.\(UUID().uuidString)",
+            account: "p256-signing",
+            synchronizable: false
+        )
+        let expectedBody = Data(#"{"install":true}"#.utf8)
+        let server = LoomBootstrapControlServer(
+            controlAuthSecret: "server-secret",
+            onStatus: { _ in LoomBootstrapControlResult(state: .ready, message: "ready") },
+            onUnlock: { _, _ in LoomBootstrapControlResult(state: .ready, message: "ready") },
+            onCommand: { peer, command in
+                #expect(!peer.keyID.isEmpty)
+                #expect(command.identifier == "com.example.command")
+                #expect(command.body == expectedBody)
+                return LoomBootstrapControlResult(state: .ready, message: "command accepted")
+            }
+        )
+        let port = try await server.start(port: 0)
+        defer {
+            Task {
+                await server.stop()
+            }
+        }
+
+        let endpoint = LoomBootstrapEndpoint(host: "127.0.0.1", port: 22, source: .user)
+        let client = LoomDefaultBootstrapControlClient(identityManager: identityManager)
+        let result = try await client.requestCommand(
+            endpoint: endpoint,
+            controlPort: port,
+            controlAuthSecret: "server-secret",
+            command: LoomBootstrapControlCommandPayload(
+                identifier: "com.example.command",
+                body: expectedBody
+            ),
+            timeout: .seconds(5)
+        )
+
+        #expect(result.state == .ready)
+        #expect(result.message == "command accepted")
+    }
+
+    @MainActor
+    @Test("Command decryption failures preserve the request ID and surface as request rejection")
+    func commandFailurePreservesRequestID() async throws {
+        let identityManager = LoomIdentityManager(
+            service: "com.ethanlipnik.loom.tests.bootstrap-control.\(UUID().uuidString)",
+            account: "p256-signing",
+            synchronizable: false
+        )
+        let server = LoomBootstrapControlServer(
+            controlAuthSecret: "server-secret",
+            onStatus: { _ in LoomBootstrapControlResult(state: .ready, message: "ready") },
+            onUnlock: { _, _ in LoomBootstrapControlResult(state: .ready, message: "ready") },
+            onCommand: { _, _ in
+                Issue.record("Command handler should not run when decryption fails.")
+                return LoomBootstrapControlResult(state: .ready, message: "unexpected")
+            }
+        )
+        let port = try await server.start(port: 0)
+        defer {
+            Task {
+                await server.stop()
+            }
+        }
+
+        let endpoint = LoomBootstrapEndpoint(host: "127.0.0.1", port: 22, source: .user)
+        let client = LoomDefaultBootstrapControlClient(identityManager: identityManager)
+
+        do {
+            _ = try await client.requestCommand(
+                endpoint: endpoint,
+                controlPort: port,
+                controlAuthSecret: "wrong-secret",
+                command: LoomBootstrapControlCommandPayload(identifier: "com.example.command"),
+                timeout: .seconds(5)
+            )
+            Issue.record("Expected requestCommand to reject a decrypt failure.")
+        } catch let error as LoomBootstrapControlError {
+            switch error {
+            case let .requestRejected(message):
+                #expect(!message.isEmpty)
+            default:
+                Issue.record("Expected requestRejected, got \(error.localizedDescription).")
+            }
+        } catch {
+            Issue.record("Expected LoomBootstrapControlError, got \(error.localizedDescription).")
+        }
+    }
+
+    @MainActor
     @Test("Unlock failures preserve the request ID and surface as request rejection")
     func unlockFailurePreservesRequestID() async throws {
         let identityManager = LoomIdentityManager(

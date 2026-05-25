@@ -33,7 +33,7 @@ public enum LoomBootstrapControlError: LocalizedError, Sendable, Equatable {
         case let .protocolViolation(detail):
             "Bootstrap control protocol error: \(detail)"
         case let .requestRejected(detail):
-            "Bootstrap daemon rejected credential submission: \(detail)"
+            "Bootstrap control request was rejected: \(detail)"
         }
     }
 }
@@ -87,6 +87,14 @@ public protocol LoomBootstrapControlClient: Sendable {
         controlAuthSecret: String,
         username: String,
         password: String,
+        timeout: Duration
+    ) async throws -> LoomBootstrapControlResult
+
+    func requestCommand(
+        endpoint: LoomBootstrapEndpoint,
+        controlPort: UInt16,
+        controlAuthSecret: String,
+        command: LoomBootstrapControlCommandPayload,
         timeout: Duration
     ) async throws -> LoomBootstrapControlResult
 }
@@ -207,6 +215,60 @@ public struct LoomDefaultBootstrapControlClient: LoomBootstrapControlClient {
             retryAfterSeconds: response.retryAfterSeconds
         )
     }
+
+    public func requestCommand(
+        endpoint: LoomBootstrapEndpoint,
+        controlPort: UInt16,
+        controlAuthSecret: String,
+        command: LoomBootstrapControlCommandPayload,
+        timeout: Duration
+    )
+    async throws -> LoomBootstrapControlResult {
+        let trimmedIdentifier = command.identifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedIdentifier.isEmpty else {
+            throw LoomBootstrapControlError.protocolViolation("Command identifier is empty.")
+        }
+
+        let requestID = UUID()
+        let timestampMs = LoomIdentitySigning.currentTimestampMs()
+        let nonce = UUID().uuidString.lowercased()
+        let encryptedPayload = try LoomBootstrapControlSecurity.encryptCommand(
+            command,
+            sharedSecret: controlAuthSecret,
+            requestID: requestID,
+            timestampMs: timestampMs,
+            nonce: nonce
+        )
+        let request = try await makeAuthenticatedRequest(
+            operation: .performCommand,
+            controlAuthSecret: controlAuthSecret,
+            credentialsPayload: nil,
+            commandPayload: encryptedPayload,
+            requestID: requestID,
+            timestampMs: timestampMs,
+            nonce: nonce
+        )
+
+        let response = try await sendRequest(
+            request,
+            endpoint: endpoint,
+            controlPort: controlPort,
+            timeout: timeout
+        )
+
+        guard response.success else {
+            throw LoomBootstrapControlError.requestRejected(response.message ?? "Command rejected.")
+        }
+
+        return LoomBootstrapControlResult(
+            state: response.availability,
+            message: response.message,
+            success: response.success,
+            canRetry: response.canRetry,
+            retriesRemaining: response.retriesRemaining,
+            retryAfterSeconds: response.retryAfterSeconds
+        )
+    }
 }
 
 private extension LoomDefaultBootstrapControlClient {
@@ -214,6 +276,7 @@ private extension LoomDefaultBootstrapControlClient {
         operation: LoomBootstrapControlOperation,
         controlAuthSecret: String,
         credentialsPayload: LoomBootstrapEncryptedCredentialsPayload?,
+        commandPayload: LoomBootstrapEncryptedCommandPayload? = nil,
         requestID: UUID = UUID(),
         timestampMs: Int64 = LoomIdentitySigning.currentTimestampMs(),
         nonce: String = UUID().uuidString.lowercased()
@@ -227,7 +290,8 @@ private extension LoomDefaultBootstrapControlClient {
         }
 
         let identity = try await fetchIdentity()
-        let encryptedSHA256 = LoomBootstrapControlSecurity.payloadSHA256Hex(credentialsPayload?.combined)
+        let signedPayload = credentialsPayload?.combined ?? commandPayload?.combined
+        let encryptedSHA256 = LoomBootstrapControlSecurity.payloadSHA256Hex(signedPayload)
         let payload = try LoomBootstrapControlSecurity.canonicalPayload(
             requestID: requestID,
             operation: operation,
@@ -249,7 +313,8 @@ private extension LoomDefaultBootstrapControlClient {
             requestID: requestID,
             operation: operation,
             auth: auth,
-            credentialsPayload: credentialsPayload
+            credentialsPayload: credentialsPayload,
+            commandPayload: commandPayload
         )
     }
 
