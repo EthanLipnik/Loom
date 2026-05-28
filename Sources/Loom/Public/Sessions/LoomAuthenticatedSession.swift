@@ -73,8 +73,9 @@ public struct LoomTransportDiagnostics: Sendable, Codable, Equatable {
 
 /// Queue profile for ordered unreliable sends on a multiplexed Loom stream.
 ///
-/// Use ``interactiveMedia`` for latency-sensitive media where small transport
-/// buffers help prevent stale packets from accumulating. Use
+/// Use ``interactiveMedia`` for latency-sensitive video where small transport
+/// buffers help prevent stale packets from accumulating. Use ``interactiveAudio``
+/// for steady low-bitrate media that should not queue behind video bursts. Use
 /// ``priorityInputRealtime``, ``priorityInputRealtimeSequenced``,
 /// ``priorityInputContinuous``, and ``priorityInputProtected`` for first-class
 /// input lanes that must not sit behind media stream traffic. Use
@@ -85,6 +86,10 @@ public enum LoomQueuedUnreliableSendProfile: String, Sendable, Codable, CaseIter
     case interactiveMedia
     /// Bounds media backlog more aggressively for bursty proximity links such as AWDL.
     case proximityInteractiveMedia
+    /// Keeps latency-sensitive audio independent from high-volume media streams.
+    case interactiveAudio
+    /// Bounds audio backlog more aggressively for bursty proximity links such as AWDL.
+    case proximityInteractiveAudio
     /// Keeps only the newest pending input payload when the transport is busy.
     case priorityInputRealtime
     /// Preserves a short FIFO window of realtime input while bounding stale backlog.
@@ -113,6 +118,18 @@ public enum LoomQueuedUnreliableSendProfile: String, Sendable, Codable, CaseIter
                 maxOutstandingPackets: 384,
                 maxOutstandingBytes: 768 * 1024,
                 maxQueuedPackets: 128
+            )
+        case .interactiveAudio:
+            LoomQueuedUnreliableSendLimits(
+                maxOutstandingPackets: 128,
+                maxOutstandingBytes: 256 * 1024,
+                maxQueuedPackets: 64
+            )
+        case .proximityInteractiveAudio:
+            LoomQueuedUnreliableSendLimits(
+                maxOutstandingPackets: 64,
+                maxOutstandingBytes: 128 * 1024,
+                maxQueuedPackets: 32
             )
         case .priorityInputRealtime:
             LoomQueuedUnreliableSendLimits(

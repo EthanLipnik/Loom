@@ -87,6 +87,19 @@ struct LoomOrderedUnreliableSendQueueTests {
         #expect(recorder.recordedProfiles == [.throughputProbe])
     }
 
+    @Test("Interactive audio profile keeps a shallow independent media queue")
+    func interactiveAudioProfileUsesShallowIndependentQueue() {
+        let videoLimits = LoomQueuedUnreliableSendProfile.interactiveMedia.recommendedLimits
+        let audioLimits = LoomQueuedUnreliableSendProfile.interactiveAudio.recommendedLimits
+        let proximityAudioLimits = LoomQueuedUnreliableSendProfile.proximityInteractiveAudio.recommendedLimits
+
+        #expect(audioLimits.maxOutstandingPackets < videoLimits.maxOutstandingPackets)
+        #expect(audioLimits.maxOutstandingBytes < videoLimits.maxOutstandingBytes)
+        #expect(audioLimits.maxQueuedPackets == 64)
+        #expect(proximityAudioLimits.maxOutstandingPackets < audioLimits.maxOutstandingPackets)
+        #expect(proximityAudioLimits.maxQueuedPackets == 32)
+    }
+
     @Test("Priority realtime queue keeps newest pending input")
     func priorityRealtimeQueueKeepsNewestPendingInput() async throws {
         let limits = LoomOrderedUnreliableSendQueue.limits(for: .priorityInputRealtime)

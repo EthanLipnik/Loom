@@ -12,7 +12,7 @@ package typealias StreamID = UInt16
 package typealias StreamSessionID = UUID
 
 public enum Loom {
-    public static let version = "2.0.0"
+    public static let version = "2.0.3"
     public static let protocolVersion: UInt8 = 3
     /// Default Bonjour service type for peer discovery.
     ///
