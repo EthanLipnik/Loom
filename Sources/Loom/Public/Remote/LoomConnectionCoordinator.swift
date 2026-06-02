@@ -547,19 +547,7 @@ public final class LoomConnectionCoordinator {
             )
             return
         }
-        let classifiedPath = LoomNetworkPathClassifier.classify(
-            interfaceNames: snapshot.interfaceNames,
-            usesWiFi: snapshot.usesWiFi,
-            usesWired: snapshot.usesWiredEthernet,
-            usesCellular: snapshot.usesCellular,
-            usesLoopback: snapshot.usesLoopback,
-            usesOther: snapshot.usesOther,
-            status: snapshot.status.rawValue,
-            isExpensive: snapshot.isExpensive,
-            isConstrained: snapshot.isConstrained,
-            supportsIPv4: snapshot.supportsIPv4,
-            supportsIPv6: snapshot.supportsIPv6
-        )
+        let classifiedPath = LoomNetworkPathClassifier.classify(snapshot)
         LoomInstrumentation.record(
             LoomStepEvent(
                 rawValue: "loom.connection.connected.\(target.source.rawValue).\(target.transportKind.rawValue).\(classifiedPath.kind.rawValue)"

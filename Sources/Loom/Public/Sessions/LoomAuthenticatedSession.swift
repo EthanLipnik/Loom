@@ -73,9 +73,13 @@ public struct LoomTransportDiagnostics: Sendable, Codable, Equatable {
 
 /// Queue profile for ordered unreliable sends on a multiplexed Loom stream.
 ///
-/// Use ``interactiveMedia`` for latency-sensitive video where small transport
-/// buffers help prevent stale packets from accumulating. Use ``interactiveAudio``
-/// for steady low-bitrate media that should not queue behind video bursts. Use
+/// Use ``interactiveMedia`` for latency-sensitive media where small transport
+/// buffers help prevent stale packets from accumulating. Use
+/// ``proximityRealtimeDisplay`` for deadline-paced display/video traffic on
+/// bursty peer-to-peer proximity links with independent media receive lanes,
+/// and ``proximityRealtimeDisplaySingleLane`` when the transport shares one
+/// receive lane but still needs realtime display send-side pacing. Use
+/// ``interactiveAudio`` and ``proximityInteractiveAudio`` for low-latency audio lanes. Use
 /// ``priorityInputRealtime``, ``priorityInputRealtimeSequenced``,
 /// ``priorityInputContinuous``, and ``priorityInputProtected`` for first-class
 /// input lanes that must not sit behind media stream traffic. Use
@@ -86,9 +90,13 @@ public enum LoomQueuedUnreliableSendProfile: String, Sendable, Codable, CaseIter
     case interactiveMedia
     /// Bounds media backlog more aggressively for bursty proximity links such as AWDL.
     case proximityInteractiveMedia
-    /// Keeps latency-sensitive audio independent from high-volume media streams.
+    /// Keeps realtime display/video backlog below a short playout window on bursty proximity links.
+    case proximityRealtimeDisplay
+    /// Keeps realtime display/video pacing on single-lane proximity transports.
+    case proximityRealtimeDisplaySingleLane
+    /// Keeps the audio lane shallow without using the display/video queue.
     case interactiveAudio
-    /// Bounds audio backlog more aggressively for bursty proximity links such as AWDL.
+    /// Keeps proximity audio backlog tighter than generic media on bursty proximity links.
     case proximityInteractiveAudio
     /// Keeps only the newest pending input payload when the transport is busy.
     case priorityInputRealtime
@@ -119,17 +127,24 @@ public enum LoomQueuedUnreliableSendProfile: String, Sendable, Codable, CaseIter
                 maxOutstandingBytes: 768 * 1024,
                 maxQueuedPackets: 128
             )
+        case .proximityRealtimeDisplay,
+             .proximityRealtimeDisplaySingleLane:
+            LoomQueuedUnreliableSendLimits(
+                maxOutstandingPackets: 96,
+                maxOutstandingBytes: 192 * 1024,
+                maxQueuedPackets: 32
+            )
         case .interactiveAudio:
             LoomQueuedUnreliableSendLimits(
-                maxOutstandingPackets: 128,
+                maxOutstandingPackets: 256,
                 maxOutstandingBytes: 256 * 1024,
-                maxQueuedPackets: 64
+                maxQueuedPackets: 96
             )
         case .proximityInteractiveAudio:
             LoomQueuedUnreliableSendLimits(
-                maxOutstandingPackets: 64,
+                maxOutstandingPackets: 128,
                 maxOutstandingBytes: 128 * 1024,
-                maxQueuedPackets: 32
+                maxQueuedPackets: 48
             )
         case .priorityInputRealtime:
             LoomQueuedUnreliableSendLimits(
@@ -157,6 +172,36 @@ public enum LoomQueuedUnreliableSendProfile: String, Sendable, Codable, CaseIter
                 maxOutstandingPackets: 262_144,
                 maxOutstandingBytes: 512 * 1024 * 1024
             )
+        }
+    }
+
+    package var requiresIndependentUnreliableLane: Bool {
+        switch self {
+        case .proximityRealtimeDisplay:
+            true
+        case .proximityRealtimeDisplaySingleLane,
+             .interactiveMedia, .proximityInteractiveMedia, .interactiveAudio, .proximityInteractiveAudio,
+             .priorityInputRealtime, .priorityInputRealtimeSequenced, .priorityInputContinuous,
+             .priorityInputProtected, .throughputProbe:
+            false
+        }
+    }
+
+    package var usesRealtimeDisplaySendPolicy: Bool {
+        switch self {
+        case .proximityRealtimeDisplay,
+             .proximityRealtimeDisplaySingleLane:
+            true
+        case .interactiveMedia,
+             .proximityInteractiveMedia,
+             .interactiveAudio,
+             .proximityInteractiveAudio,
+             .priorityInputRealtime,
+             .priorityInputRealtimeSequenced,
+             .priorityInputContinuous,
+             .priorityInputProtected,
+             .throughputProbe:
+            false
         }
     }
 }
@@ -190,11 +235,19 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
     private let sendHandler: @Sendable (Data) async throws -> Void
     private let unreliableSendHandler: @Sendable (Data) async throws -> Void
     private let queuedUnreliableSendHandler:
-        @Sendable (Data, LoomQueuedUnreliableSendProfile, @escaping @Sendable (Error?) -> Void) async -> Void
+        @Sendable (
+            Data,
+            LoomQueuedUnreliableSendProfile,
+            LoomQueuedUnreliableSendOptions,
+            @escaping @Sendable (Error?) -> Void
+        ) async -> Void
     private let queuedUnreliableResetHandler:
         @Sendable (LoomQueuedUnreliableSendProfile) async -> Void
+    private let queuedUnreliableDiagnosticsHandler:
+        @Sendable (LoomQueuedUnreliableSendProfile) async -> LoomQueuedUnreliableSendDiagnostics?
     private let closeHandler: @Sendable () async throws -> Void
     private let queuedUnreliableSubmitter = LoomOrderedAsyncSubmitter()
+    private let realtimeDisplayQueuedUnreliableSubmitter = LoomOrderedAsyncSubmitter()
 
     package init(
         id: UInt16,
@@ -202,9 +255,16 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
         sendHandler: @escaping @Sendable (Data) async throws -> Void,
         unreliableSendHandler: @escaping @Sendable (Data) async throws -> Void,
         queuedUnreliableSendHandler:
-            @escaping @Sendable (Data, LoomQueuedUnreliableSendProfile, @escaping @Sendable (Error?) -> Void) async -> Void,
+            @escaping @Sendable (
+                Data,
+                LoomQueuedUnreliableSendProfile,
+                LoomQueuedUnreliableSendOptions,
+                @escaping @Sendable (Error?) -> Void
+            ) async -> Void,
         queuedUnreliableResetHandler:
             @escaping @Sendable (LoomQueuedUnreliableSendProfile) async -> Void,
+        queuedUnreliableDiagnosticsHandler:
+            @escaping @Sendable (LoomQueuedUnreliableSendProfile) async -> LoomQueuedUnreliableSendDiagnostics? = { _ in nil },
         closeHandler: @escaping @Sendable () async throws -> Void
     ) {
         self.id = id
@@ -213,10 +273,39 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
         self.unreliableSendHandler = unreliableSendHandler
         self.queuedUnreliableSendHandler = queuedUnreliableSendHandler
         self.queuedUnreliableResetHandler = queuedUnreliableResetHandler
+        self.queuedUnreliableDiagnosticsHandler = queuedUnreliableDiagnosticsHandler
         self.closeHandler = closeHandler
         let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
         incomingBytes = stream
         self.continuation = continuation
+    }
+
+    package convenience init(
+        id: UInt16,
+        label: String?,
+        sendHandler: @escaping @Sendable (Data) async throws -> Void,
+        unreliableSendHandler: @escaping @Sendable (Data) async throws -> Void,
+        queuedUnreliableSendHandler:
+            @escaping @Sendable (
+                Data,
+                LoomQueuedUnreliableSendProfile,
+                LoomQueuedUnreliableSendOptions,
+                @escaping @Sendable (Error?) -> Void
+            ) async -> Void,
+        queuedUnreliableResetHandler:
+            @escaping @Sendable (LoomQueuedUnreliableSendProfile) async -> Void,
+        closeHandler: @escaping @Sendable () async throws -> Void
+    ) {
+        self.init(
+            id: id,
+            label: label,
+            sendHandler: sendHandler,
+            unreliableSendHandler: unreliableSendHandler,
+            queuedUnreliableSendHandler: queuedUnreliableSendHandler,
+            queuedUnreliableResetHandler: queuedUnreliableResetHandler,
+            queuedUnreliableDiagnosticsHandler: { _ in nil },
+            closeHandler: closeHandler
+        )
     }
 
     public func send(_ data: Data) async throws {
@@ -236,12 +325,60 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
         profile: LoomQueuedUnreliableSendProfile = .interactiveMedia,
         onComplete: @escaping @Sendable (Error?) -> Void = { _ in }
     ) {
-        queuedUnreliableSubmitter.enqueue(
-            operation: { [queuedUnreliableSendHandler, profile] markQueued in
+        sendUnreliableQueued(
+            data,
+            profile: profile,
+            options: .none,
+            onComplete: onComplete
+        )
+    }
+
+    /// Queues an unreliable payload with caller-provided realtime scheduling metadata.
+    ///
+    /// Completion runs later on transport acceptance, transport failure, or an
+    /// intentional nonfatal ``LoomQueuedUnreliableSendDrop``.
+    public func sendUnreliableQueued(
+        _ data: Data,
+        profile: LoomQueuedUnreliableSendProfile = .interactiveMedia,
+        options: LoomQueuedUnreliableSendOptions,
+        onComplete: @escaping @Sendable (Error?) -> Void = { _ in }
+    ) {
+        let submitter = profile.usesRealtimeDisplaySendPolicy
+            ? realtimeDisplayQueuedUnreliableSubmitter
+            : queuedUnreliableSubmitter
+        submitter.enqueue(
+            operation: { [queuedUnreliableSendHandler, profile, options] markQueued in
                 Task {
-                    await queuedUnreliableSendHandler(data, profile, onComplete)
+                    await queuedUnreliableSendHandler(data, profile, options, onComplete)
                     markQueued()
                 }
+            },
+            deadlineUptime: options.deadlineUptime,
+            dropsWhenExpired: options.dropsWhenExpired,
+            maxPendingOperations: profile.recommendedLimits.maxQueuedPackets,
+            dropsWhenQueueFull: options.dropsWhenQueueFull,
+            queueFullDropPriority: options.importance.queueFullDropPriority,
+            onExpired: {
+                onComplete(
+                    LoomQueuedUnreliableSendDrop(
+                        reason: .deadlineExpired,
+                        profile: profile,
+                        frameID: options.frameID,
+                        fragmentIndex: options.fragmentIndex,
+                        fragmentCount: options.fragmentCount
+                    )
+                )
+            },
+            onQueueLimit: {
+                onComplete(
+                    LoomQueuedUnreliableSendDrop(
+                        reason: .queueLimit,
+                        profile: profile,
+                        frameID: options.frameID,
+                        fragmentIndex: options.fragmentIndex,
+                        fragmentCount: options.fragmentCount
+                    )
+                )
             },
             onDropped: {
                 onComplete(
@@ -261,6 +398,13 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
         profile: LoomQueuedUnreliableSendProfile
     ) async {
         await queuedUnreliableResetHandler(profile)
+    }
+
+    /// Consumes structured diagnostics for one queued-unreliable send profile.
+    public func consumeQueuedUnreliableSendDiagnostics(
+        profile: LoomQueuedUnreliableSendProfile
+    ) async -> LoomQueuedUnreliableSendDiagnostics? {
+        await queuedUnreliableDiagnosticsHandler(profile)
     }
 
     /// Installs an exclusive batched inbound payload handler for high-rate streams.
@@ -361,6 +505,7 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
 
     package func finishQueuedOutbound() {
         queuedUnreliableSubmitter.close()
+        realtimeDisplayQueuedUnreliableSubmitter.close()
     }
 }
 
@@ -1081,7 +1226,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                 }
                 try await self.sendEnvelope(envelopeForData(data), reliable: false)
             },
-            queuedUnreliableSendHandler: { [weak self] data, profile, onComplete in
+            queuedUnreliableSendHandler: { [weak self] data, profile, options, onComplete in
                 guard let self else {
                     onComplete(
                         LoomError.protocolError("Authenticated Loom session no longer exists.")
@@ -1091,12 +1236,17 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                 await self.sendEnvelopeQueued(
                     envelopeForData(data),
                     profile: profile,
+                    options: options,
                     onComplete: onComplete
                 )
             },
             queuedUnreliableResetHandler: { [weak self] profile in
                 guard let self else { return }
                 await self.transport.resetQueuedUnreliableSends(profile: profile)
+            },
+            queuedUnreliableDiagnosticsHandler: { [weak self] profile in
+                guard let self else { return nil }
+                return await self.transport.consumeQueuedUnreliableSendDiagnostics(profile: profile)
             },
             closeHandler: { [weak self] in
                 guard let self else {
@@ -1138,13 +1288,29 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
     private func sendEnvelopeQueued(
         _ envelope: LoomSessionStreamEnvelope,
         profile: LoomQueuedUnreliableSendProfile,
+        options: LoomQueuedUnreliableSendOptions,
         onComplete: @escaping @Sendable (Error?) -> Void
     ) async {
+        if profile.requiresIndependentUnreliableLane,
+           transport.receiveSemantics != .independentReliableAndUnreliable {
+            onComplete(
+                LoomQueuedUnreliableSendDrop(
+                    reason: .unsupportedTransport,
+                    profile: profile,
+                    frameID: options.frameID,
+                    fragmentIndex: options.fragmentIndex,
+                    fragmentCount: options.fragmentCount
+                )
+            )
+            return
+        }
+
         do {
             let wireFrame = try encodeWireFrame(for: envelope)
             await transport.sendUnreliableQueued(
                 wireFrame,
                 profile: profile,
+                options: options,
                 onComplete: onComplete
             )
         } catch {

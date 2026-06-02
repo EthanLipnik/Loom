@@ -312,6 +312,64 @@ struct LoomAuthenticatedSessionTests {
     }
 
     @MainActor
+    @Test("TCP authenticated sessions reject proximity realtime display queued unreliable sends")
+    func tcpSessionRejectsProximityRealtimeDisplayQueuedUnreliableSends() async throws {
+        let pair = try await makeLoopbackPair()
+        defer {
+            Task {
+                await pair.stop()
+            }
+        }
+
+        async let clientContext = pair.client.start(
+            localHello: pair.clientHello,
+            identityManager: pair.clientIdentityManager
+        )
+        async let serverContext = pair.server.start(
+            localHello: pair.serverHello,
+            identityManager: pair.serverIdentityManager,
+            trustProvider: pair.serverTrustProvider
+        )
+        _ = try await (clientContext, serverContext)
+
+        let incomingStreamTask = Task<LoomMultiplexedStream?, Never> {
+            for await stream in pair.server.incomingStreams {
+                return stream
+            }
+            return nil
+        }
+
+        let mediaStream = try await pair.client.openStream(label: "video/awdl-realtime")
+        let serverMediaStream = try #require(await incomingStreamTask.value)
+        let completionError = AsyncBox<LoomQueuedUnreliableSendDrop>()
+        mediaStream.sendUnreliableQueued(
+            Data("must-not-use-tcp".utf8),
+            profile: .proximityRealtimeDisplay,
+            options: LoomQueuedUnreliableSendOptions(
+                importance: .realtimeInterFrame,
+                frameID: 42,
+                fragmentIndex: 1,
+                fragmentCount: 3
+            )
+        ) { error in
+            if let drop = error as? LoomQueuedUnreliableSendDrop {
+                Task {
+                    await completionError.set(drop)
+                }
+            }
+        }
+
+        let drop = try #require(await completionError.take(timeoutSeconds: 2.0))
+        #expect(drop.reason == .unsupportedTransport)
+        #expect(drop.profile == .proximityRealtimeDisplay)
+        #expect(drop.frameID == 42)
+        #expect(drop.fragmentIndex == 1)
+        #expect(drop.fragmentCount == 3)
+        #expect(await collectPayloads(from: serverMediaStream, count: 1, timeoutSeconds: 0.1) == nil)
+        try await mediaStream.close()
+    }
+
+    @MainActor
     @Test("Batched stream handler preserves queued unreliable payload order")
     func batchedStreamHandlerPreservesQueuedUnreliablePayloadOrder() async throws {
         let pair = try await makeLoopbackPair()

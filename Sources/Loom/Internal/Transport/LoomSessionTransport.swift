@@ -57,6 +57,7 @@ package protocol LoomSessionTransport: Sendable {
     func sendUnreliableQueued(
         _ data: Data,
         profile: LoomQueuedUnreliableSendProfile,
+        options: LoomQueuedUnreliableSendOptions,
         onComplete: @escaping @Sendable (Error?) -> Void
     ) async
 
@@ -65,6 +66,11 @@ package protocol LoomSessionTransport: Sendable {
     func resetQueuedUnreliableSends(
         profile: LoomQueuedUnreliableSendProfile
     ) async
+
+    /// Consume diagnostics for one queued-unreliable send profile.
+    func consumeQueuedUnreliableSendDiagnostics(
+        profile: LoomQueuedUnreliableSendProfile
+    ) async -> LoomQueuedUnreliableSendDiagnostics?
 
     /// Receive the next unreliable message.
     func receiveUnreliable(maxBytes: Int) async throws -> Data
@@ -92,8 +98,27 @@ package protocol LoomSessionTransport: Sendable {
 }
 
 extension LoomSessionTransport {
+    package func sendUnreliableQueued(
+        _ data: Data,
+        profile: LoomQueuedUnreliableSendProfile,
+        onComplete: @escaping @Sendable (Error?) -> Void
+    ) async {
+        await sendUnreliableQueued(
+            data,
+            profile: profile,
+            options: .none,
+            onComplete: onComplete
+        )
+    }
+
     package func closeTransport() async {
         await cancelPendingUnreliableSends()
+    }
+
+    package func consumeQueuedUnreliableSendDiagnostics(
+        profile: LoomQueuedUnreliableSendProfile
+    ) async -> LoomQueuedUnreliableSendDiagnostics? {
+        nil
     }
 
     package func prepareUnreliableReceive(maxBytes: Int) async throws {}

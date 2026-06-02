@@ -185,6 +185,12 @@ public enum LoomBootstrapControlSecurity {
         .joined()
     }
 
+    public static func commandPayloadSHA256Hex(_ command: LoomBootstrapControlCommandPayload?) -> String {
+        guard let command else { return payloadSHA256Hex(nil) }
+        let body = command.body?.base64EncodedString() ?? "-"
+        return payloadSHA256Hex(Data("command|\(command.identifier)|\(body)".utf8))
+    }
+
     public static func encryptCredentials(
         _ credentials: LoomBootstrapCredentials,
         sharedSecret: String,

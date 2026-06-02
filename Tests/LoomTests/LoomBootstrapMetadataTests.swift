@@ -47,8 +47,8 @@ struct LoomBootstrapMetadataTests {
         #expect(decoded.wakeOnLAN?.broadcastAddresses.count == 2)
     }
 
-    @Test("Bootstrap metadata decodes missing SSH host-key fingerprints as empty")
-    func bootstrapMetadataDecodesMissingSSHHostKeyFingerprintsAsEmpty() throws {
+    @Test("Bootstrap metadata decodes missing optional capability lists as empty")
+    func bootstrapMetadataDecodesMissingOptionalCapabilityListsAsEmpty() throws {
         let json = """
         {
           "version": 4,
@@ -63,6 +63,7 @@ struct LoomBootstrapMetadataTests {
 
         let metadata = try JSONDecoder().decode(LoomBootstrapMetadata.self, from: json)
 
+        #expect(metadata.controlCapabilities.isEmpty)
         #expect(metadata.sshHostKeyFingerprints.isEmpty)
         #expect(metadata.controlCapabilities.isEmpty)
     }
@@ -349,5 +350,19 @@ struct LoomBootstrapMetadataTests {
         #expect(decodedResponse.requestID == request.requestID)
         #expect(decodedResponse.success)
         #expect(decodedResponse.availability == .ready)
+
+        let command = LoomBootstrapEncryptedCommandPayload(combined: Data([0x42, 0x43]))
+        let commandRequest = LoomBootstrapControlRequest(
+            operation: .performCommand,
+            auth: auth,
+            commandPayload: command
+        )
+        let commandRequestData = try JSONEncoder().encode(commandRequest)
+        let decodedCommandRequest = try JSONDecoder().decode(
+            LoomBootstrapControlRequest.self,
+            from: commandRequestData
+        )
+        #expect(decodedCommandRequest.operation == .performCommand)
+        #expect(decodedCommandRequest.commandPayload == command)
     }
 }

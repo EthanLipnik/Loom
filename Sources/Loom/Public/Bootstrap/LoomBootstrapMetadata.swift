@@ -147,6 +147,31 @@ public struct LoomBootstrapMetadata: Codable, Hashable, Sendable {
         self.wakeOnLAN = wakeOnLAN
     }
 
+    public init(
+        version: Int = LoomBootstrapMetadata.currentVersion,
+        enabled: Bool,
+        supportsPreloginDaemon: Bool,
+        endpoints: [LoomBootstrapEndpoint],
+        sshPort: UInt16?,
+        controlPort: UInt16?,
+        controlAuthSecret: String? = nil,
+        sshHostKeyFingerprints: [String] = [],
+        wakeOnLAN: LoomWakeOnLANInfo?
+    ) {
+        self.init(
+            version: version,
+            enabled: enabled,
+            supportsPreloginDaemon: supportsPreloginDaemon,
+            endpoints: endpoints,
+            sshPort: sshPort,
+            controlPort: controlPort,
+            controlAuthSecret: controlAuthSecret,
+            controlCapabilities: [],
+            sshHostKeyFingerprints: sshHostKeyFingerprints,
+            wakeOnLAN: wakeOnLAN
+        )
+    }
+
     private enum CodingKeys: String, CodingKey {
         case version
         case enabled
@@ -178,5 +203,31 @@ public struct LoomBootstrapMetadata: Codable, Hashable, Sendable {
             forKey: .sshHostKeyFingerprints
         ) ?? []
         wakeOnLAN = try container.decodeIfPresent(LoomWakeOnLANInfo.self, forKey: .wakeOnLAN)
+    }
+
+    public static func == (lhs: LoomBootstrapMetadata, rhs: LoomBootstrapMetadata) -> Bool {
+        lhs.version == rhs.version &&
+            lhs.enabled == rhs.enabled &&
+            lhs.supportsPreloginDaemon == rhs.supportsPreloginDaemon &&
+            lhs.endpoints == rhs.endpoints &&
+            lhs.sshPort == rhs.sshPort &&
+            lhs.controlPort == rhs.controlPort &&
+            lhs.controlAuthSecret == rhs.controlAuthSecret &&
+            lhs.controlCapabilities == rhs.controlCapabilities &&
+            lhs.sshHostKeyFingerprints == rhs.sshHostKeyFingerprints &&
+            lhs.wakeOnLAN == rhs.wakeOnLAN
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(version)
+        hasher.combine(enabled)
+        hasher.combine(supportsPreloginDaemon)
+        hasher.combine(endpoints)
+        hasher.combine(sshPort)
+        hasher.combine(controlPort)
+        hasher.combine(controlAuthSecret)
+        hasher.combine(controlCapabilities)
+        hasher.combine(sshHostKeyFingerprints)
+        hasher.combine(wakeOnLAN)
     }
 }

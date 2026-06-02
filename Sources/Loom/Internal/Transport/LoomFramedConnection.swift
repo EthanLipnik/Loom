@@ -42,11 +42,14 @@ package actor LoomFramedConnection: LoomSessionTransport {
     package func sendUnreliableQueued(
         _ data: Data,
         profile: LoomQueuedUnreliableSendProfile,
+        options: LoomQueuedUnreliableSendOptions,
         onComplete: @escaping @Sendable (Error?) -> Void
     ) async {
         let frame = framedData(for: data)
-        queuedUnreliableSender(for: profile).enqueue(frame) { error in
-            if let error {
+        queuedUnreliableSender(for: profile).enqueue(frame, options: options) { error in
+            if let drop = error as? LoomQueuedUnreliableSendDrop {
+                onComplete(drop)
+            } else if let error {
                 onComplete(LoomError.connectionFailed(LoomConnectionFailure.classify(error)))
             } else {
                 onComplete(nil)
@@ -58,6 +61,12 @@ package actor LoomFramedConnection: LoomSessionTransport {
         profile: LoomQueuedUnreliableSendProfile
     ) async {
         queuedUnreliableSenders.removeValue(forKey: profile)?.close()
+    }
+
+    package func consumeQueuedUnreliableSendDiagnostics(
+        profile: LoomQueuedUnreliableSendProfile
+    ) async -> LoomQueuedUnreliableSendDiagnostics? {
+        queuedUnreliableSenders[profile]?.consumeDiagnosticsSnapshot()
     }
 
     package func receiveUnreliable(maxBytes: Int) async throws -> Data {
@@ -92,6 +101,7 @@ package actor LoomFramedConnection: LoomSessionTransport {
             maxOutstandingBytes: limits.maxOutstandingBytes,
             maxQueuedPackets: limits.maxQueuedPackets,
             replacesQueuedSends: limits.replacesQueuedSends,
+            profile: profile,
             diagnosticsLabel: profile.rawValue
         )
         queuedUnreliableSenders[profile] = sender

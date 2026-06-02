@@ -98,6 +98,7 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
     package func sendUnreliableQueued(
         _ data: Data,
         profile: LoomQueuedUnreliableSendProfile,
+        options: LoomQueuedUnreliableSendOptions,
         onComplete: @escaping @Sendable (Error?) -> Void
     ) async {
         let datagrams: QUIC.Datagrams<QUICDatagram>
@@ -108,8 +109,10 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
             return
         }
 
-        queuedUnreliableSender(for: profile, datagrams: datagrams).enqueue(data) { error in
-            if let error {
+        queuedUnreliableSender(for: profile, datagrams: datagrams).enqueue(data, options: options) { error in
+            if let drop = error as? LoomQueuedUnreliableSendDrop {
+                onComplete(drop)
+            } else if let error {
                 onComplete(LoomError.connectionFailed(LoomConnectionFailure.classify(error)))
             } else {
                 onComplete(nil)
@@ -121,6 +124,12 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
         profile: LoomQueuedUnreliableSendProfile
     ) async {
         queuedUnreliableSenders.removeValue(forKey: profile)?.close()
+    }
+
+    package func consumeQueuedUnreliableSendDiagnostics(
+        profile: LoomQueuedUnreliableSendProfile
+    ) async -> LoomQueuedUnreliableSendDiagnostics? {
+        queuedUnreliableSenders[profile]?.consumeDiagnosticsSnapshot()
     }
 
     package func receiveUnreliable(maxBytes: Int) async throws -> Data {
@@ -361,6 +370,7 @@ package actor LoomQUICSessionTransport: LoomSessionTransport {
             maxOutstandingBytes: limits.maxOutstandingBytes,
             maxQueuedPackets: limits.maxQueuedPackets,
             replacesQueuedSends: limits.replacesQueuedSends,
+            profile: profile,
             diagnosticsLabel: "quic.\(profile.rawValue)"
         ) { data, onComplete in
             Task {
