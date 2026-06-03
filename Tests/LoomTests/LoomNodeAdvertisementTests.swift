@@ -33,6 +33,56 @@ struct LoomNodeAdvertisementTests {
         }
     }
 
+    @MainActor
+    @Test("TCP-only advertising publishes diagnostics")
+    func tcpOnlyAdvertisingPublishesDiagnostics() async throws {
+        let node = LoomNode(
+            configuration: LoomNetworkConfiguration(
+                enableBonjour: false,
+                enablePeerToPeer: false,
+                enabledDirectTransports: []
+            ),
+            identityManager: LoomIdentityManager(
+                service: "loom.tests.advertising.\(UUID().uuidString)",
+                synchronizable: false
+            )
+        )
+
+        let deviceID = UUID()
+        let ports = try await node.startAuthenticatedAdvertising(
+            serviceName: "Test Host",
+            helloProvider: {
+                LoomSessionHelloRequest(
+                    deviceID: deviceID,
+                    deviceName: "Test Host",
+                    deviceType: .mac,
+                    advertisement: LoomPeerAdvertisement(
+                        deviceID: deviceID,
+                        deviceType: .mac
+                    )
+                )
+            },
+            onSession: { _ in }
+        )
+
+        #expect(node.advertisingDiagnostics.state == .advertising)
+        #expect(node.advertisingDiagnostics.serviceName == "Test Host")
+        #expect(node.advertisingDiagnostics.bonjourPort == nil)
+        #expect(node.advertisingDiagnostics.directListenerPorts[.tcp] == ports[.tcp])
+        #expect(node.advertisingDiagnostics.lastBonjourFailureDescription == nil)
+
+        await node.stopAdvertising()
+        #expect(node.advertisingDiagnostics.state == .idle)
+    }
+
+    @Test("Bonjour advertiser recovery delay backs off and caps")
+    func bonjourAdvertiserRecoveryDelayBacksOffAndCaps() {
+        #expect(LoomNode.bonjourAdvertisingRecoveryDelay(attempt: 1) == .seconds(1))
+        #expect(LoomNode.bonjourAdvertisingRecoveryDelay(attempt: 2) == .seconds(2))
+        #expect(LoomNode.bonjourAdvertisingRecoveryDelay(attempt: 5) == .seconds(16))
+        #expect(LoomNode.bonjourAdvertisingRecoveryDelay(attempt: 10) == .seconds(30))
+    }
+
     @Test("Advertisement leaves hostName unset when no explicit host name is provided")
     func advertisementLeavesHostNameUnsetWithoutExplicitValue() {
         let advertisement = LoomPeerAdvertisement(

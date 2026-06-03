@@ -25,6 +25,7 @@ actor BonjourAdvertiser {
     private let serviceName: String
     private var advertisement: LoomPeerAdvertisement
     private let enablePeerToPeer: Bool
+    private let onFailureAfterReady: (@Sendable (String) -> Void)?
 
     private var isAdvertising = false
 
@@ -32,12 +33,14 @@ actor BonjourAdvertiser {
         serviceName: String,
         advertisement: LoomPeerAdvertisement = LoomPeerAdvertisement(),
         serviceType: String = Loom.serviceType,
-        enablePeerToPeer: Bool = true
+        enablePeerToPeer: Bool = true,
+        onFailureAfterReady: (@Sendable (String) -> Void)? = nil
     ) {
         self.serviceName = serviceName
         self.advertisement = advertisement
         self.serviceType = serviceType
         self.enablePeerToPeer = enablePeerToPeer
+        self.onFailureAfterReady = onFailureAfterReady
     }
 
     /// Start advertising the service
@@ -78,23 +81,31 @@ actor BonjourAdvertiser {
 
         return try await withCheckedThrowingContinuation { continuation in
             let continuationBox = ContinuationBox<UInt16>(continuation)
+            let startState = BonjourAdvertiserStartState()
 
             listener.stateUpdateHandler = { [weak self, continuationBox] state in
                 LoomLogger.discovery("Advertiser state: \(state)")
                 switch state {
                 case .ready:
                     if let port = listener.port?.rawValue {
+                        startState.markReady()
                         Task { await self?.setAdvertising(true) }
                         continuationBox.resume(returning: port)
                     }
                 case let .failed(error):
                     Task { await self?.setAdvertising(false) }
-                    continuationBox.resume(throwing: error)
+                    if startState.hasReportedReady {
+                        self?.onFailureAfterReady?(String(describing: error))
+                    } else {
+                        continuationBox.resume(throwing: error)
+                    }
                 case let .waiting(error):
                     LoomLogger.discovery("Advertiser waiting: \(error)")
                 case .cancelled:
                     Task { await self?.setAdvertising(false) }
-                    continuationBox.resume(throwing: LoomError.protocolError("Listener cancelled"))
+                    if !startState.hasReportedReady {
+                        continuationBox.resume(throwing: LoomError.protocolError("Listener cancelled"))
+                    }
                 default:
                     break
                 }
@@ -144,5 +155,22 @@ actor BonjourAdvertiser {
 
     func currentAdvertisement() -> LoomPeerAdvertisement {
         advertisement
+    }
+}
+
+private final class BonjourAdvertiserStartState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var reportedReady = false
+
+    var hasReportedReady: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return reportedReady
+    }
+
+    func markReady() {
+        lock.lock()
+        reportedReady = true
+        lock.unlock()
     }
 }

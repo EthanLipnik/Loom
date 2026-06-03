@@ -83,11 +83,18 @@ public enum LoomConnection: Sendable {
 @Observable
 @MainActor
 public final class LoomNode {
+    private struct BonjourAdvertisingContext {
+        let serviceName: String
+        let advertisement: LoomPeerAdvertisement
+        let onConnection: LoomDirectConnectionHandler
+    }
+
     public var configuration: LoomNetworkConfiguration
     public var identityManager: LoomIdentityManager?
     public weak var trustProvider: (any LoomTrustProvider)?
 
     public private(set) var discovery: LoomDiscovery?
+    public private(set) var advertisingDiagnostics = LoomAdvertisingDiagnostics()
 
     private var advertiser: BonjourAdvertiser?
     private var advertisingServiceName: String?
@@ -95,6 +102,12 @@ public final class LoomNode {
     private var directListeners: [LoomTransportKind: any LoomDirectTransportListener] = [:]
     private var directListenerPorts: [LoomTransportKind: UInt16] = [:]
     private var overlayProbeServer: LoomOverlayProbeServer?
+    private var bonjourAdvertisingContext: BonjourAdvertisingContext?
+    private var bonjourAdvertisingGeneration = UUID()
+    private var bonjourAdvertisingRecoveryTask: Task<Void, Never>?
+    private var bonjourAdvertisingRecoveryAttempt = 0
+
+    nonisolated private static let minimumBonjourAdvertisingRecoveryDelay: Duration = .seconds(1)
 
     public init(
         configuration: LoomNetworkConfiguration = .default,
@@ -134,9 +147,16 @@ public final class LoomNode {
         onConnection: @escaping LoomDirectConnectionHandler
     ) async throws -> UInt16 {
         advertisingServiceName = serviceName
+        bonjourAdvertisingRecoveryTask?.cancel()
 
         guard configuration.enableBonjour else {
             let directListener = try makeDirectTransportListener(for: .tcp)
+            advertisingDiagnostics = advertisingDiagnostics.updating(
+                state: .starting,
+                serviceName: serviceName,
+                directListenerPorts: directListenerPorts,
+                bonjourRecoveryAttempt: 0
+            )
             let port = try await directListener.start(
                 port: configuration.controlPort,
                 onConnection: onConnection
@@ -148,31 +168,30 @@ public final class LoomNode {
                 withDirectTransportPorts: directTransportPorts(advertiserTCPPort: nil),
                 serviceName: serviceName
             )
+            advertisingDiagnostics = advertisingDiagnostics.updating(
+                state: .advertising,
+                serviceName: serviceName,
+                directListenerPorts: directListenerPorts,
+                bonjourRecoveryAttempt: 0
+            )
             return port
         }
 
-        let advertiser = BonjourAdvertiser(
+        bonjourAdvertisingContext = BonjourAdvertisingContext(
             serviceName: serviceName,
             advertisement: advertisement,
-            serviceType: configuration.serviceType,
-            enablePeerToPeer: configuration.enablePeerToPeer
-        )
-        self.advertiser = advertiser
-        let port = try await advertiser.start(
-            port: configuration.controlPort,
             onConnection: onConnection
         )
-        let publishedAdvertisement = Self.advertisement(
-            advertisement,
-            withDirectTransportPorts: directTransportPorts(advertiserTCPPort: port),
-            serviceName: serviceName
-        )
-        self.publishedAdvertisement = publishedAdvertisement
-        await advertiser.updateAdvertisement(publishedAdvertisement)
-        return port
+        bonjourAdvertisingRecoveryAttempt = 0
+        return try await startBonjourAdvertising(context: bonjourAdvertisingContext)
     }
 
     public func stopAdvertising() async {
+        bonjourAdvertisingRecoveryTask?.cancel()
+        bonjourAdvertisingRecoveryTask = nil
+        bonjourAdvertisingGeneration = UUID()
+        bonjourAdvertisingContext = nil
+        bonjourAdvertisingRecoveryAttempt = 0
         let overlayProbeServer = self.overlayProbeServer
         self.overlayProbeServer = nil
         let advertiser = self.advertiser
@@ -188,6 +207,7 @@ public final class LoomNode {
         for listener in directListeners {
             await listener.stop()
         }
+        advertisingDiagnostics = LoomAdvertisingDiagnostics()
     }
 
     public func updateAdvertisement(_ advertisement: LoomPeerAdvertisement) async {
@@ -201,6 +221,13 @@ public final class LoomNode {
             serviceName: advertisingServiceName
         )
         publishedAdvertisement = merged
+        if let context = bonjourAdvertisingContext {
+            bonjourAdvertisingContext = BonjourAdvertisingContext(
+                serviceName: context.serviceName,
+                advertisement: advertisement,
+                onConnection: context.onConnection
+            )
+        }
         await advertiser?.updateAdvertisement(merged)
     }
 
@@ -471,6 +498,138 @@ public final class LoomNode {
                 serviceClass: configuration.directDatagramServiceClass
             )
         }
+    }
+
+    private func startBonjourAdvertising(context: BonjourAdvertisingContext?) async throws -> UInt16 {
+        guard let context else {
+            throw LoomError.protocolError("Bonjour advertising context is unavailable.")
+        }
+
+        let generation = UUID()
+        bonjourAdvertisingGeneration = generation
+        advertisingDiagnostics = advertisingDiagnostics.updating(
+            state: bonjourAdvertisingRecoveryAttempt == 0 ? .starting : .recovering,
+            serviceName: context.serviceName,
+            directListenerPorts: directListenerPorts,
+            bonjourRecoveryAttempt: bonjourAdvertisingRecoveryAttempt
+        )
+
+        let advertiser = BonjourAdvertiser(
+            serviceName: context.serviceName,
+            advertisement: context.advertisement,
+            serviceType: configuration.serviceType,
+            enablePeerToPeer: configuration.enablePeerToPeer,
+            onFailureAfterReady: { [weak self] failureDescription in
+                Task { @MainActor [weak self] in
+                    self?.handleBonjourAdvertisingFailure(
+                        failureDescription,
+                        generation: generation
+                    )
+                }
+            }
+        )
+        self.advertiser = advertiser
+        let port: UInt16
+        do {
+            port = try await advertiser.start(
+                port: configuration.controlPort,
+                onConnection: context.onConnection
+            )
+        } catch {
+            if generation == bonjourAdvertisingGeneration {
+                self.advertiser = nil
+            }
+            await advertiser.stop()
+            throw error
+        }
+        let publishedAdvertisement = Self.advertisement(
+            context.advertisement,
+            withDirectTransportPorts: directTransportPorts(advertiserTCPPort: port),
+            serviceName: context.serviceName
+        )
+        self.publishedAdvertisement = publishedAdvertisement
+        await advertiser.updateAdvertisement(publishedAdvertisement)
+        bonjourAdvertisingRecoveryAttempt = 0
+        advertisingDiagnostics = advertisingDiagnostics.updating(
+            state: .advertising,
+            serviceName: context.serviceName,
+            bonjourPort: port,
+            directListenerPorts: directListenerPorts,
+            bonjourRecoveryAttempt: 0
+        )
+        return port
+    }
+
+    private func handleBonjourAdvertisingFailure(
+        _ failureDescription: String,
+        generation: UUID
+    ) {
+        guard generation == bonjourAdvertisingGeneration else { return }
+
+        LoomLogger.discovery("Bonjour advertiser failed after publishing: \(failureDescription)")
+        bonjourAdvertisingGeneration = UUID()
+        bonjourAdvertisingRecoveryAttempt += 1
+        let recoveryAttempt = bonjourAdvertisingRecoveryAttempt
+        advertisingDiagnostics = advertisingDiagnostics.recordingBonjourFailure(
+            failureDescription,
+            at: Date(),
+            recoveryAttempt: recoveryAttempt
+        )
+
+        let failedAdvertiser = advertiser
+        advertiser = nil
+        Task {
+            await failedAdvertiser?.stop()
+        }
+        scheduleBonjourAdvertisingRecovery(attempt: recoveryAttempt)
+    }
+
+    private func scheduleBonjourAdvertisingRecovery(attempt: Int) {
+        bonjourAdvertisingRecoveryTask?.cancel()
+        let delay = Self.bonjourAdvertisingRecoveryDelay(attempt: attempt)
+        bonjourAdvertisingRecoveryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+
+            await self?.recoverBonjourAdvertising()
+        }
+    }
+
+    private func recoverBonjourAdvertising() async {
+        bonjourAdvertisingRecoveryTask = nil
+        guard configuration.enableBonjour,
+              bonjourAdvertisingContext != nil,
+              advertisingServiceName != nil else {
+            return
+        }
+
+        do {
+            _ = try await startBonjourAdvertising(context: bonjourAdvertisingContext)
+            LoomLogger.discovery("Bonjour advertiser recovered")
+        } catch {
+            LoomLogger.discovery("Bonjour advertiser recovery failed: \(error)")
+            bonjourAdvertisingRecoveryAttempt += 1
+            let recoveryAttempt = bonjourAdvertisingRecoveryAttempt
+            advertisingDiagnostics = advertisingDiagnostics.recordingBonjourFailure(
+                String(describing: error),
+                at: Date(),
+                recoveryAttempt: recoveryAttempt
+            )
+            scheduleBonjourAdvertisingRecovery(attempt: recoveryAttempt)
+        }
+    }
+
+    nonisolated package static func bonjourAdvertisingRecoveryDelay(attempt: Int) -> Duration {
+        guard attempt > 1 else { return minimumBonjourAdvertisingRecoveryDelay }
+
+        var seconds = 1
+        for _ in 1..<attempt {
+            seconds = min(seconds * 2, 30)
+        }
+        return .seconds(seconds)
     }
 
     private func directTransportPorts(advertiserTCPPort: UInt16?) -> [LoomTransportKind: UInt16] {
