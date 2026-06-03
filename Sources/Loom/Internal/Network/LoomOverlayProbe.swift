@@ -159,7 +159,7 @@ private func withThrowingTimeout<T: Sendable>(
         group.addTask {
             try await Task.sleep(for: timeout)
             onTimeout()
-            throw LoomError.connectionFailed(CancellationError())
+            throw LoomError.timeout
         }
 
         let value = try await group.next()!

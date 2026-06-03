@@ -394,8 +394,8 @@ struct LoomOverlayDirectoryTests {
     }
 
     @MainActor
-    @Test("Overlay directory clears published peers after a throwing refresh")
-    func directoryClearsPeersWhenSeedRefreshThrows() async throws {
+    @Test("Overlay directory retains published peers after a throwing refresh")
+    func directoryRetainsPeersWhenSeedRefreshThrows() async throws {
         let response = LoomOverlayProbeResponse(
             name: "Gamma",
             deviceType: .mac,
@@ -415,6 +415,7 @@ struct LoomOverlayDirectoryTests {
             configuration: LoomOverlayDirectoryConfiguration(
                 refreshInterval: .seconds(3600),
                 probeTimeout: .seconds(2),
+                retainedPeerExpiration: .seconds(60),
                 seedProvider: {
                     try await seedState.currentSeeds()
                 }
@@ -428,8 +429,54 @@ struct LoomOverlayDirectoryTests {
             await seedState.setShouldFail(true)
             await directory.refresh()
 
-            #expect(directory.discoveredPeers.isEmpty)
+            #expect(directory.discoveredPeers.map(\.name) == ["Gamma"])
             #expect(directory.isSearching == false)
+        } catch {
+            await server.stop()
+            throw error
+        }
+
+        await server.stop()
+    }
+
+    @MainActor
+    @Test("Overlay directory expires retained peers after the retention window")
+    func directoryExpiresRetainedPeersAfterRetentionWindow() async throws {
+        let response = LoomOverlayProbeResponse(
+            name: "Delta",
+            deviceType: .mac,
+            advertisement: LoomPeerAdvertisement(
+                deviceID: UUID(uuidString: "00000000-0000-0000-0000-000000000018"),
+                deviceType: .mac,
+                directTransports: [
+                    LoomDirectTransportAdvertisement(transportKind: .tcp, port: 41018),
+                ]
+            )
+        )
+        let (server, port) = try await startOverlayProbeServer(response: response)
+        let seedState = ThrowingLoomOverlaySeedState(
+            seeds: [LoomOverlaySeed(host: "127.0.0.1", probePort: port)]
+        )
+        let directory = LoomOverlayDirectory(
+            configuration: LoomOverlayDirectoryConfiguration(
+                refreshInterval: .seconds(3600),
+                probeTimeout: .seconds(2),
+                retainedPeerExpiration: .milliseconds(50),
+                seedProvider: {
+                    try await seedState.currentSeeds()
+                }
+            )
+        )
+
+        do {
+            await directory.refresh()
+            #expect(directory.discoveredPeers.map(\.name) == ["Delta"])
+
+            await seedState.setShouldFail(true)
+            try await Task.sleep(for: .milliseconds(80))
+            await directory.refresh()
+
+            #expect(directory.discoveredPeers.isEmpty)
         } catch {
             await server.stop()
             throw error

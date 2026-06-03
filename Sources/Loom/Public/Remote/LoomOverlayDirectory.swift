@@ -35,6 +35,8 @@ public final class LoomOverlayDirectory {
     private var requestedRefreshGeneration = 0
     private var completedRefreshGeneration = 0
     private var lastPublishedPeerSnapshots: [PublishedPeerSnapshot] = []
+    private let clock = ContinuousClock()
+    private var retainedPeersByID: [LoomPeerID: RetainedOverlayPeer] = [:]
 
     public init(
         configuration: LoomOverlayDirectoryConfiguration,
@@ -159,25 +161,125 @@ public final class LoomOverlayDirectory {
                 .transport,
                 "Overlay directory refresh \(generation) started: seeds=\(seeds.count) attempts=\(configuration.probeAttempts)"
             )
+            guard !seeds.isEmpty else {
+                retainedPeersByID.removeAll()
+                publishDiscoveredPeers([])
+                isSearching = refreshTask != nil && !isRefreshPaused
+                LoomLogger.debug(
+                    .transport,
+                    "Overlay directory refresh \(generation) completed: seeds=0 peers=0"
+                )
+                return
+            }
             let candidates = await Self.probeCandidates(
                 for: seeds,
                 configuration: configuration
             )
             guard !Task.isCancelled, !isRefreshPaused else { return }
-            publishDiscoveredPeers(resolvePeers(from: candidates))
+            let resolvedPeers = resolvePeers(from: candidates)
+            let publishedPeers = peersByRetainingRecentResolvedPeers(
+                resolvedPeers,
+                matching: seeds,
+                now: clock.now
+            )
+            publishDiscoveredPeers(publishedPeers)
             isSearching = refreshTask != nil && !isRefreshPaused
             LoomLogger.debug(
                 .transport,
-                "Overlay directory refresh \(generation) completed: candidates=\(candidates.count) peers=\(discoveredPeers.count)"
+                "Overlay directory refresh \(generation) completed: candidates=\(candidates.count) " +
+                    "resolvedPeers=\(resolvedPeers.count) peers=\(discoveredPeers.count)"
             )
         } catch {
             guard !Task.isCancelled, !isRefreshPaused else { return }
-            publishDiscoveredPeers([])
+            let retainedPeers = retainedPeersAfterSeedRefreshFailure(now: clock.now)
+            publishDiscoveredPeers(retainedPeers)
             isSearching = refreshTask != nil && !isRefreshPaused
             LoomLogger.debug(
                 .transport,
-                "Overlay directory refresh \(generation) failed: \(error.localizedDescription)"
+                "Overlay directory refresh \(generation) failed: \(Self.probeFailureSummary(error)); " +
+                    "retainedPeers=\(retainedPeers.count)"
             )
+        }
+    }
+
+    private func peersByRetainingRecentResolvedPeers(
+        _ resolvedPeers: [LoomPeer],
+        matching seeds: [LoomOverlaySeed],
+        now: ContinuousClock.Instant
+    ) -> [LoomPeer] {
+        if !resolvedPeers.isEmpty {
+            for peer in resolvedPeers {
+                retainedPeersByID[peer.id] = RetainedOverlayPeer(peer: peer, observedAt: now)
+            }
+            pruneRetainedPeers(matching: seeds, now: now)
+            return resolvedPeers
+        }
+
+        let retainedPeers = retainedPeersMatchingCurrentSeeds(seeds, now: now)
+        if !retainedPeers.isEmpty {
+            LoomLogger.debug(
+                .transport,
+                "Overlay directory retained \(retainedPeers.count) peer(s) after empty probe result"
+            )
+        }
+        return retainedPeers
+    }
+
+    private func retainedPeersMatchingCurrentSeeds(
+        _ seeds: [LoomOverlaySeed],
+        now: ContinuousClock.Instant
+    ) -> [LoomPeer] {
+        pruneRetainedPeers(matching: seeds, now: now)
+        return sortedRetainedPeers()
+    }
+
+    private func retainedPeersAfterSeedRefreshFailure(now: ContinuousClock.Instant) -> [LoomPeer] {
+        pruneRetainedPeers(matchingSeedHosts: nil, now: now)
+        if !retainedPeersByID.isEmpty {
+            LoomLogger.debug(
+                .transport,
+                "Overlay directory retained \(retainedPeersByID.count) peer(s) after seed refresh failure"
+            )
+        }
+        return sortedRetainedPeers()
+    }
+
+    private func sortedRetainedPeers() -> [LoomPeer] {
+        return retainedPeersByID.values
+            .map(\.peer)
+            .sorted { lhs, rhs in
+                if lhs.name != rhs.name {
+                    return lhs.name < rhs.name
+                }
+                return lhs.id.rawValue < rhs.id.rawValue
+            }
+    }
+
+    private func pruneRetainedPeers(
+        matching seeds: [LoomOverlaySeed],
+        now: ContinuousClock.Instant
+    ) {
+        let seedHosts = Set(
+            seeds.map { $0.host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { !$0.isEmpty }
+        )
+        pruneRetainedPeers(matchingSeedHosts: seedHosts, now: now)
+    }
+
+    private func pruneRetainedPeers(
+        matchingSeedHosts seedHosts: Set<String>?,
+        now: ContinuousClock.Instant
+    ) {
+        for (peerID, retainedPeer) in retainedPeersByID {
+            let age = retainedPeer.observedAt.duration(to: now)
+            guard age <= configuration.retainedPeerExpiration else {
+                retainedPeersByID.removeValue(forKey: peerID)
+                continue
+            }
+            if let seedHosts,
+               !seedHosts.contains(Self.endpointHostKey(for: retainedPeer.peer)) {
+                retainedPeersByID.removeValue(forKey: peerID)
+            }
         }
     }
 
@@ -258,12 +360,20 @@ public final class LoomOverlayDirectory {
                       !response.advertisement.directTransports.isEmpty else {
                     LoomLogger.debug(
                         .transport,
-                        "Overlay seed \(seed.host) ignored on attempt \(attempt): incomplete advertisement"
+                        "Overlay seed \(seed.host):\(Self.probePort(for: seed, configuration: configuration)) " +
+                            "ignored on attempt \(attempt): " +
+                            "missingDeviceID=\(response.advertisement.deviceID == nil) " +
+                            "directTransports=\(response.advertisement.directTransports.count)"
                     )
                     return nil
                 }
                 if attempt > 1 {
-                    LoomLogger.debug(.transport, "Overlay seed \(seed.host) succeeded on attempt \(attempt)")
+                    LoomLogger.debug(
+                        .transport,
+                        "Overlay seed \(seed.host):\(Self.probePort(for: seed, configuration: configuration)) " +
+                            "succeeded on attempt \(attempt) " +
+                            "directTransports=\(directTransportSummary(for: response.advertisement))"
+                    )
                 }
                 return LoomOverlayDirectoryCandidate(
                     deviceID: deviceID,
@@ -276,14 +386,19 @@ public final class LoomOverlayDirectory {
                 if attempt >= configuration.probeAttempts {
                     LoomLogger.debug(
                         .transport,
-                        "Overlay seed \(seed.host) failed after \(attempt) attempt(s): \(error.localizedDescription)"
+                        "Overlay seed \(seed.host):\(Self.probePort(for: seed, configuration: configuration)) " +
+                            "failed after \(attempt) attempt(s) " +
+                            "timeout=\(configuration.probeTimeout) " +
+                            "reason=\(probeFailureSummary(error))"
                     )
                     return nil
                 }
 
                 LoomLogger.debug(
                     .transport,
-                    "Overlay seed \(seed.host) failed attempt \(attempt); retrying: \(error.localizedDescription)"
+                    "Overlay seed \(seed.host):\(Self.probePort(for: seed, configuration: configuration)) " +
+                        "failed attempt \(attempt); retrying after \(configuration.probeRetryDelay) " +
+                        "reason=\(probeFailureSummary(error))"
                 )
                 do {
                     try await Task.sleep(for: configuration.probeRetryDelay)
@@ -294,6 +409,34 @@ public final class LoomOverlayDirectory {
         }
 
         return nil
+    }
+
+    private static func probePort(
+        for seed: LoomOverlaySeed,
+        configuration: LoomOverlayDirectoryConfiguration
+    ) -> UInt16 {
+        seed.probePort ?? configuration.probePort
+    }
+
+    private static func probeFailureSummary(_ error: Error) -> String {
+        let failure = LoomConnectionFailure.classify(error)
+        let code = failure.posixCode.map { " posix=\($0.rawValue)" } ?? ""
+        let detail = failure.detail.map { " detail=\($0)" } ?? ""
+        return "\(failure.reason.rawValue)\(code)\(detail)"
+    }
+
+    private static func directTransportSummary(for advertisement: LoomPeerAdvertisement) -> String {
+        let summary = advertisement.directTransports
+            .map { "\($0.transportKind.rawValue):\($0.port)" }
+            .joined(separator: ",")
+        return summary.isEmpty ? "none" : summary
+    }
+
+    private static func endpointHostKey(for peer: LoomPeer) -> String {
+        guard case let .hostPort(host, _) = peer.endpoint else {
+            return ""
+        }
+        return String(describing: host).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
     private func endpoint(
@@ -386,6 +529,11 @@ private struct PublishedPeerSnapshot: Equatable {
         advertisement = peer.advertisement
         resolvedAddresses = peer.resolvedAddresses
     }
+}
+
+private struct RetainedOverlayPeer {
+    let peer: LoomPeer
+    let observedAt: ContinuousClock.Instant
 }
 
 private struct LoomOverlayDirectoryCandidate: Sendable {

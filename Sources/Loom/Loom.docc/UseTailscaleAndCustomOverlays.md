@@ -42,6 +42,8 @@ let container = try LoomContainer(
 
 Use multiple probe attempts when the overlay interface may still be warming up after app launch or foregrounding. A single refresh still publishes one coherent peer set; retry attempts only make transient seed misses less visible to the caller.
 
+`LoomOverlayDirectory` also keeps the last successfully resolved peers for a short grace window after transient probe failures. Set `retainedPeerExpiration` when your app needs a shorter or longer stale-peer window.
+
 Use `LoomKitPortConfiguration` when a LoomKit app needs a different listener port:
 
 ```swift
@@ -107,4 +109,4 @@ Each ``LoomOverlaySeed`` contains only a host and an optional probe-port overrid
 - Use the default probe port unless you have a concrete collision. A fixed shared port keeps deployment and firewall policy simpler.
 - Keep the seed list small and intentional. The directory probes every seed on each refresh interval.
 - Do not overload overlay seeds with app-specific metadata. Publish only reachability hints here and keep product schema above Loom.
-- If a refresh fails, the directory clears the previous overlay view and republishes when the next refresh succeeds. That behavior is safer than continuing to surface stale hosts.
+- If a refresh fails briefly, the directory keeps recently resolved peers until `retainedPeerExpiration` elapses or the matching seed is removed.

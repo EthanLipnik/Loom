@@ -65,6 +65,10 @@ public struct LoomConnectionFailure: Error, LocalizedError, Sendable {
            case let .connectionFailed(underlying) = loomError {
             return classify(underlying)
         }
+        if let loomError = error as? LoomError,
+           case .timeout = loomError {
+            return LoomConnectionFailure(reason: .timedOut, detail: loomError.localizedDescription)
+        }
 
         if error is CancellationError {
             return LoomConnectionFailure(reason: .cancelled, detail: error.localizedDescription)

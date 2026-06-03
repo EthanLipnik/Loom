@@ -24,6 +24,8 @@ public struct LoomOverlayDirectoryConfiguration: Sendable {
     public let probeAttempts: Int
     /// Delay between retry attempts for a seed that did not respond.
     public let probeRetryDelay: Duration
+    /// Duration that the directory keeps the last resolved peers after transient probe failures.
+    public let retainedPeerExpiration: Duration
     /// Policy used to rank direct transports when several seeds describe the same peer.
     public let directConnectionPolicy: LoomDirectConnectionPolicy
     package let usesDefaultProbePort: Bool
@@ -39,8 +41,27 @@ public struct LoomOverlayDirectoryConfiguration: Sendable {
             probePort: probePort,
             refreshInterval: refreshInterval,
             probeTimeout: probeTimeout,
+            retainedPeerExpiration: .seconds(120),
+            directConnectionPolicy: directConnectionPolicy,
+            seedProvider: seedProvider
+        )
+    }
+
+    public init(
+        probePort: UInt16? = nil,
+        refreshInterval: Duration = .seconds(30),
+        probeTimeout: Duration = .seconds(2),
+        retainedPeerExpiration: Duration = .seconds(120),
+        directConnectionPolicy: LoomDirectConnectionPolicy = .default,
+        seedProvider: @escaping SeedProvider
+    ) {
+        self.init(
+            probePort: probePort,
+            refreshInterval: refreshInterval,
+            probeTimeout: probeTimeout,
             probeAttempts: 1,
             probeRetryDelay: .zero,
+            retainedPeerExpiration: retainedPeerExpiration,
             directConnectionPolicy: directConnectionPolicy,
             seedProvider: seedProvider
         )
@@ -55,6 +76,28 @@ public struct LoomOverlayDirectoryConfiguration: Sendable {
         directConnectionPolicy: LoomDirectConnectionPolicy = .default,
         seedProvider: @escaping SeedProvider
     ) {
+        self.init(
+            probePort: probePort,
+            refreshInterval: refreshInterval,
+            probeTimeout: probeTimeout,
+            probeAttempts: probeAttempts,
+            probeRetryDelay: probeRetryDelay,
+            retainedPeerExpiration: .seconds(120),
+            directConnectionPolicy: directConnectionPolicy,
+            seedProvider: seedProvider
+        )
+    }
+
+    public init(
+        probePort: UInt16? = nil,
+        refreshInterval: Duration = .seconds(30),
+        probeTimeout: Duration = .seconds(2),
+        probeAttempts: Int,
+        probeRetryDelay: Duration = .zero,
+        retainedPeerExpiration: Duration = .seconds(120),
+        directConnectionPolicy: LoomDirectConnectionPolicy = .default,
+        seedProvider: @escaping SeedProvider
+    ) {
         let usesDefaultProbePort = probePort == nil
         self.seedProvider = seedProvider
         self.probePort = probePort ?? Loom.defaultOverlayProbePort
@@ -62,6 +105,7 @@ public struct LoomOverlayDirectoryConfiguration: Sendable {
         self.probeTimeout = probeTimeout
         self.probeAttempts = max(1, probeAttempts)
         self.probeRetryDelay = probeRetryDelay
+        self.retainedPeerExpiration = retainedPeerExpiration
         self.directConnectionPolicy = directConnectionPolicy
         self.usesDefaultProbePort = usesDefaultProbePort
     }
