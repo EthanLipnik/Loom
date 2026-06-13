@@ -26,6 +26,36 @@ struct LoomAuthenticatedSessionTests {
         #expect(!LoomFramedConnection.shouldFailAfterWaiting(.tls(-9807)))
     }
 
+    @Test("Closing stream finalizes local state when remote close throws")
+    func streamCloseFinalizesLocalStateWhenRemoteCloseThrows() async {
+        let recorder = ThrowingStreamCloseRecorder()
+        let stream = LoomMultiplexedStream(
+            id: 1,
+            label: "throwing-close",
+            sendHandler: { _ in },
+            unreliableSendHandler: { _ in },
+            queuedUnreliableSendHandler: { _, _, _, onComplete in
+                onComplete(nil)
+            },
+            queuedUnreliableResetHandler: { _ in },
+            closeHandler: {
+                try await recorder.close()
+            }
+        )
+        let inboundFinished = Task<Bool, Never> {
+            var iterator = stream.incomingBytes.makeAsyncIterator()
+            return await iterator.next() == nil
+        }
+
+        await #expect(throws: ThrowingStreamCloseError.self) {
+            try await stream.close()
+        }
+        #expect(await inboundFinished.value)
+
+        try? await stream.close()
+        #expect(await recorder.attemptCount == 1)
+    }
+
     @MainActor
     @Test("Hello validation rejects tampered ephemeral key shares")
     func tamperedEphemeralKeyShareRejected() async throws {
@@ -1288,6 +1318,19 @@ struct LoomAuthenticatedSessionTests {
         let observer = await pair.client.makePathObserver()
         let observedSnapshot = try #require(await firstPathSnapshot(from: observer))
         #expect(observedSnapshot == expectedSnapshot)
+    }
+}
+
+private enum ThrowingStreamCloseError: Error {
+    case closeFailed
+}
+
+private actor ThrowingStreamCloseRecorder {
+    private(set) var attemptCount = 0
+
+    func close() throws {
+        attemptCount += 1
+        throw ThrowingStreamCloseError.closeFailed
     }
 }
 

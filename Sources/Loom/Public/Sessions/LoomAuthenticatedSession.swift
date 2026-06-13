@@ -248,6 +248,7 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
     private let closeHandler: @Sendable () async throws -> Void
     private let queuedUnreliableSubmitter = LoomOrderedAsyncSubmitter()
     private let realtimeDisplayQueuedUnreliableSubmitter = LoomOrderedAsyncSubmitter()
+    private var didClose = false
 
     package init(
         id: UInt16,
@@ -466,9 +467,27 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
     }
 
     public func close() async throws {
+        guard markClosed() else {
+            return
+        }
+
+        defer {
+            finishQueuedOutbound()
+            finishInbound()
+        }
         try await closeHandler()
-        finishQueuedOutbound()
-        finishInbound()
+    }
+
+    private func markClosed() -> Bool {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+        guard !didClose else {
+            return false
+        }
+        didClose = true
+        return true
     }
 
     public static func == (lhs: LoomMultiplexedStream, rhs: LoomMultiplexedStream) -> Bool {
