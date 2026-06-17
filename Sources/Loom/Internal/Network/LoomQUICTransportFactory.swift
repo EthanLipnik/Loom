@@ -80,6 +80,7 @@ package enum LoomQUICTransportFactory {
         }
         builder = builder
             .peerToPeerIncluded(enablePeerToPeer)
+            .ultraConstrainedPathsAllowed(enablePeerToPeer)
             .serviceClass(serviceClass)
             .localEndpointReuseAllowed(true)
         if let requiredInterface {

@@ -22,7 +22,7 @@ Add both of these keys to your app target's `Info.plist`:
 <string>This app uses the local network to discover and connect to nearby devices.</string>
 ```
 
-Replace `_yourapp._tcp` with the Bonjour service type you pass to ``LoomNetworkConfiguration`` or ``LoomDiscovery``. If you use the Loom default, that is `_loom._tcp`.
+Replace `_yourapp._tcp` with the Bonjour service type you pass to ``LoomNetworkConfiguration`` or ``LoomDiscovery``. If you use the Loom default, that is `_loom-default._tcp`.
 
 `NSBonjourServices` tells the system which service types the app is allowed to browse and advertise. `NSLocalNetworkUsageDescription` provides the user-facing explanation shown in the local network permission prompt.
 

@@ -135,6 +135,7 @@ public final class LoomDiscovery {
     nonisolated package static func makeBrowserParameters(enablePeerToPeer: Bool) -> NWParameters {
         let parameters = NWParameters()
         parameters.includePeerToPeer = enablePeerToPeer
+        parameters.allowUltraConstrainedPaths = enablePeerToPeer
         return parameters
     }
 
