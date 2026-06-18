@@ -176,10 +176,12 @@ package final class LoomOrderedUnreliableSendQueue: @unchecked Sendable {
              .proximityRealtimeDisplaySingleLane:
             return (maxPackets: 4, intervalSeconds: 0.001)
         case .interactiveMedia,
-             .proximityInteractiveMedia,
-             .interactiveAudio,
-             .proximityInteractiveAudio,
-             .priorityInputRealtime,
+             .proximityInteractiveMedia:
+            return (maxPackets: 32, intervalSeconds: 0.001)
+        case .interactiveAudio,
+             .proximityInteractiveAudio:
+            return (maxPackets: 8, intervalSeconds: 0.001)
+        case .priorityInputRealtime,
              .priorityInputRealtimeSequenced,
              .priorityInputContinuous,
              .priorityInputProtected,

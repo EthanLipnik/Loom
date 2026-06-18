@@ -179,7 +179,6 @@ package actor LoomReliableChannel: LoomSessionTransport {
             )
             let packet = header.serialize() + data
             trackPending(seq: seq, packet: packet)
-            clearNeedsAck()
             try await sendRaw(packet)
         } else {
             let totalFragments = (data.count + fragmentPayload - 1) / fragmentPayload
@@ -211,7 +210,6 @@ package actor LoomReliableChannel: LoomSessionTransport {
                 )
                 let packet = header.serialize() + chunk
                 trackPending(seq: seq, packet: packet)
-                clearNeedsAck()
                 try await sendRaw(packet)
 
                 // Yield after each batch to let the kernel drain its send buffer.
@@ -273,7 +271,6 @@ package actor LoomReliableChannel: LoomSessionTransport {
             fragmentCount: 1,
             payloadLength: UInt16(data.count)
         )
-        clearNeedsAck()
         try await sendRaw(header.serialize() + data)
     }
 
@@ -297,7 +294,6 @@ package actor LoomReliableChannel: LoomSessionTransport {
             fragmentCount: 1,
             payloadLength: UInt16(data.count)
         )
-        clearNeedsAck()
         let packet = header.serialize() + data
         queuedUnreliableSender(for: profile).enqueue(packet, options: options) { error in
             if let drop = error as? LoomQueuedUnreliableSendDrop {
@@ -496,10 +492,6 @@ package actor LoomReliableChannel: LoomSessionTransport {
         }
     }
 
-    private func clearNeedsAck() {
-        needsAck = false
-    }
-
     // MARK: - RTT Estimation
 
     private func updateRTT(sample: Double) {
@@ -604,13 +596,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
 
         // Send dedicated ack if peer is waiting
         if needsAck {
-            needsAck = false
-            let header = LoomReliablePacketHeader(
-                flags: .ackOnly,
-                ackSequence: currentAckSequence(),
-                ackBitmap: currentAckBitmap()
-            )
-            connection.send(content: header.serialize(), completion: .idempotent)
+            sendDedicatedAckIfNeeded(now: now)
         }
 
         // Prune stale fragment assemblies
@@ -745,11 +731,18 @@ package actor LoomReliableChannel: LoomSessionTransport {
         ackTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(20))
             guard let self, !Task.isCancelled else { return }
-            await self.sendDedicatedAckIfNeeded()
+            await self.sendScheduledAckIfNeeded()
         }
     }
 
+    private func sendScheduledAckIfNeeded() {
+        ackTask = nil
+        sendDedicatedAckIfNeeded()
+    }
+
     private func sendDedicatedAckIfNeeded(now: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()) {
+        ackTask?.cancel()
+        ackTask = nil
         guard needsAck else { return }
         needsAck = false
         lastDedicatedAckSentAt = now

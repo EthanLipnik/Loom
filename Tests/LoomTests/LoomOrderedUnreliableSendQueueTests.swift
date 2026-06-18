@@ -338,6 +338,20 @@ struct LoomOrderedUnreliableSendQueueTests {
         #expect(LoomOrderedUnreliableSendQueue.limits(for: .proximityInteractiveAudio).replacesQueuedSends == false)
     }
 
+    @Test("Interactive media profiles reserve send gaps for control traffic")
+    func interactiveMediaProfilesReserveSendGapsForControlTraffic() {
+        let mediaQueueLimits = LoomOrderedUnreliableSendQueue.limits(for: .interactiveMedia)
+        let proximityMediaQueueLimits = LoomOrderedUnreliableSendQueue.limits(for: .proximityInteractiveMedia)
+        let audioQueueLimits = LoomOrderedUnreliableSendQueue.limits(for: .interactiveAudio)
+        let probeQueueLimits = LoomOrderedUnreliableSendQueue.limits(for: .throughputProbe)
+
+        #expect(mediaQueueLimits.maxDrainBurstPackets == 32)
+        #expect(mediaQueueLimits.drainBurstIntervalSeconds > 0)
+        #expect(proximityMediaQueueLimits.maxDrainBurstPackets == mediaQueueLimits.maxDrainBurstPackets)
+        #expect(audioQueueLimits.maxDrainBurstPackets == 8)
+        #expect(probeQueueLimits.maxDrainBurstPackets == nil)
+    }
+
     @Test("Priority realtime queue keeps newest pending input")
     func priorityRealtimeQueueKeepsNewestPendingInput() async throws {
         let limits = LoomOrderedUnreliableSendQueue.limits(for: .priorityInputRealtime)
