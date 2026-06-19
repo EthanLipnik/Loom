@@ -69,8 +69,8 @@ package actor LoomReliableChannel: LoomSessionTransport {
     private let ackCoalesceInterval: Double = 0.02
     private let fragmentPruneInterval: Double = 5.0
     private let immediateAckIdleThreshold: Double = 0.05
-    private let recentInboundTimeoutGrace: Double = 5.0
-    private let absolutePendingAckTimeout: Double = 15.0
+    private let recentInboundTimeoutGrace: Double = 20.0
+    private let absolutePendingAckTimeout: Double = 30.0
 
     // MARK: - Lifecycle
 
@@ -542,6 +542,10 @@ package actor LoomReliableChannel: LoomSessionTransport {
         let now = CFAbsoluteTimeGetCurrent()
         var failed = false
 
+        if needsAck {
+            sendDedicatedAckIfNeeded(now: now)
+        }
+
         for (seq, var pending) in pendingAcks {
             if now - pending.sentAt >= rto {
                 let packetAge = now - pending.firstSentAt
@@ -592,11 +596,6 @@ package actor LoomReliableChannel: LoomSessionTransport {
 
         if failed {
             close(with: terminalFailure)
-        }
-
-        // Send dedicated ack if peer is waiting
-        if needsAck {
-            sendDedicatedAckIfNeeded(now: now)
         }
 
         // Prune stale fragment assemblies

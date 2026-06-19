@@ -41,15 +41,29 @@ struct LoomReliableChannelTests {
         #expect(!shouldFail)
     }
 
+    @Test("Reliable packets stay alive across short idle gaps after recent peer traffic")
+    func defersTimeoutDuringShortIdleGapAfterRecentInboundTraffic() {
+        let shouldFail = LoomReliableChannel.shouldFailPendingReliablePacket(
+            retryCount: 5,
+            maxRetries: 5,
+            packetAge: 12.0,
+            lastInboundPacketAge: 11.0,
+            recentInboundGrace: 20.0,
+            maximumPacketLifetime: 30.0
+        )
+
+        #expect(!shouldFail)
+    }
+
     @Test("Reliable packets still fail after an absolute packet lifetime even with recent inbound traffic")
     func respectsAbsolutePacketLifetime() {
         let shouldFail = LoomReliableChannel.shouldFailPendingReliablePacket(
             retryCount: 5,
             maxRetries: 5,
-            packetAge: 15.1,
+            packetAge: 30.1,
             lastInboundPacketAge: 0.1,
-            recentInboundGrace: 5.0,
-            maximumPacketLifetime: 15.0
+            recentInboundGrace: 20.0,
+            maximumPacketLifetime: 30.0
         )
 
         #expect(shouldFail)
