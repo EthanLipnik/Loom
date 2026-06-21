@@ -46,10 +46,23 @@ package actor LoomDirectListener: LoomDirectTransportListener {
         )
         let actualPort: NWEndpoint.Port = port == 0 ? .any : NWEndpoint.Port(rawValue: port) ?? .any
         parameters.allowLocalEndpointReuse = true
+        let listenerTransportKind = transportKind
+        let listenerPeerToPeerEnabled = enablePeerToPeer
+        let listenerServiceClass = udpServiceClass
+        let requestedPortDescription = port == 0 ? "any" : String(port)
+        LoomLogger.transport(
+            "Starting direct \(listenerTransportKind.rawValue) listener " +
+                "requestedPort=\(requestedPortDescription) peerToPeer=\(listenerPeerToPeerEnabled) " +
+                "serviceClass=\(listenerServiceClass)"
+        )
         listener = try NWListener(using: parameters, on: actualPort)
-        listener?.newConnectionHandler = { [transportKind] connection in
+        listener?.newConnectionHandler = { connection in
+            LoomLogger.transport(
+                "Direct \(listenerTransportKind.rawValue) listener accepted connection " +
+                    "endpoint=\(connection.endpoint.debugDescription)"
+            )
             Task {
-                await onConnection(LoomConnection(connection: connection, transportKind: transportKind))
+                await onConnection(LoomConnection(connection: connection, transportKind: listenerTransportKind))
             }
         }
         guard let listener else {
@@ -62,11 +75,25 @@ package actor LoomDirectListener: LoomDirectTransportListener {
                 switch state {
                 case .ready:
                     if let port = listener.port?.rawValue {
+                        LoomLogger.transport(
+                            "Direct \(listenerTransportKind.rawValue) listener ready " +
+                                "port=\(port) peerToPeer=\(listenerPeerToPeerEnabled)"
+                        )
                         continuationBox.resume(returning: port)
                     }
+                case let .waiting(error):
+                    LoomLogger.transport(
+                        "Direct \(listenerTransportKind.rawValue) listener waiting: \(error)"
+                    )
                 case let .failed(error):
+                    LoomLogger.transport(
+                        "Direct \(listenerTransportKind.rawValue) listener failed: \(error)"
+                    )
                     continuationBox.resume(throwing: error)
                 case .cancelled:
+                    LoomLogger.transport(
+                        "Direct \(listenerTransportKind.rawValue) listener cancelled"
+                    )
                     continuationBox.resume(throwing: LoomError.protocolError("Direct listener cancelled."))
                 default:
                     break

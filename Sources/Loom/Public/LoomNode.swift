@@ -399,6 +399,18 @@ public final class LoomNode {
                     remoteEndpoint: connection.endpoint,
                     serviceClass: connection.transportKind == .tcp ? nil : directDatagramServiceClass
                 )
+                let sessionID = session.id.uuidString.lowercased()
+                let endpointDescription = connection.endpoint.debugDescription
+                LoomLogger.transport(
+                    "Accepted authenticated tcp listener session sessionID=\(sessionID) " +
+                        "endpoint=\(endpointDescription) service=\(serviceName)"
+                )
+                await Self.installAuthenticatedListenerBootstrapProgressLogger(
+                    on: session,
+                    transportKind: connection.transportKind,
+                    endpointDescription: endpointDescription,
+                    serviceName: serviceName
+                )
                 do {
                     let hello = try await helloProvider()
                     _ = try await session.start(
@@ -410,8 +422,10 @@ public final class LoomNode {
                     onSession(session)
                     await Self.keepAcceptedSessionAlive(session)
                 } catch {
-                    LoomLogger.session(
-                        "Authenticated tcp listener session failed for \(serviceName): \(error)"
+                    LoomLogger.error(
+                        .transport,
+                        error: error,
+                        message: "Authenticated tcp listener session failed sessionID=\(sessionID) service=\(serviceName)"
                     )
                     await session.cancel()
                 }
@@ -444,6 +458,18 @@ public final class LoomNode {
                 remoteEndpoint: connection.endpoint,
                 serviceClass: connection.transportKind == .tcp ? nil : directDatagramServiceClass
             )
+            let sessionID = session.id.uuidString.lowercased()
+            let endpointDescription = connection.endpoint.debugDescription
+            LoomLogger.transport(
+                "Accepted authenticated \(connection.transportKind.rawValue) direct listener session " +
+                    "sessionID=\(sessionID) endpoint=\(endpointDescription)"
+            )
+            await Self.installAuthenticatedListenerBootstrapProgressLogger(
+                on: session,
+                transportKind: connection.transportKind,
+                endpointDescription: endpointDescription,
+                serviceName: nil
+            )
             do {
                 let hello = try await helloProvider()
                 _ = try await session.start(
@@ -455,8 +481,10 @@ public final class LoomNode {
                 onSession(session)
                 await Self.keepAcceptedSessionAlive(session)
             } catch {
-                LoomLogger.session(
-                    "Authenticated \(connection.transportKind.rawValue) listener session failed: \(error)"
+                LoomLogger.error(
+                    .transport,
+                    error: error,
+                    message: "Authenticated \(connection.transportKind.rawValue) direct listener session failed sessionID=\(sessionID)"
                 )
                 await session.cancel()
             }
@@ -464,6 +492,24 @@ public final class LoomNode {
         directListeners[transportKind] = listener
         directListenerPorts[transportKind] = port
         return port
+    }
+
+    private static func installAuthenticatedListenerBootstrapProgressLogger(
+        on session: LoomAuthenticatedSession,
+        transportKind: LoomTransportKind,
+        endpointDescription: String,
+        serviceName: String?
+    ) async {
+        let sessionID = session.id.uuidString.lowercased()
+        let serviceText = serviceName.map { " service=\($0)" } ?? ""
+        await session.setOnBootstrapProgress { progress in
+            let failureText = progress.failureReason.map { " failure=\($0)" } ?? ""
+            LoomLogger.transport(
+                "Authenticated \(transportKind.rawValue) listener session bootstrap " +
+                    "sessionID=\(sessionID) endpoint=\(endpointDescription)\(serviceText) " +
+                    "phase=\(progress.phase.rawValue)\(failureText)"
+            )
+        }
     }
 
     private static func keepAcceptedSessionAlive(_ session: LoomAuthenticatedSession) async {
