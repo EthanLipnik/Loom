@@ -30,6 +30,15 @@ public struct LoomAccountIdentity: Sendable, Equatable {
     }
 }
 
+/// Storage backing for a Loom account identity key.
+public enum LoomIdentityStorage: Sendable, Equatable {
+    /// Persist the identity key in Keychain.
+    case keychain
+
+    /// Keep the identity key only in process memory.
+    case memory
+}
+
 /// Manages the account signing key used by Loom handshake and API request signatures.
 ///
 /// The key is stored in Keychain with synchronization enabled so it propagates
@@ -43,6 +52,7 @@ public final class LoomIdentityManager {
     private let account: String
     private let synchronizable: Bool
     private let fallbackToNonSynchronizableStorage: Bool
+    private let storage: LoomIdentityStorage
     private var cachedPrivateKey: P256.Signing.PrivateKey?
     private var cachedIdentity: LoomAccountIdentity?
 
@@ -54,16 +64,27 @@ public final class LoomIdentityManager {
     ///   - synchronizable: Whether to enable iCloud Keychain sync.
     ///   - fallbackToNonSynchronizableStorage: Whether to fall back to local-only Keychain storage when a
     ///     synchronized write is unavailable.
+    ///   - storage: Storage backing for the generated identity key.
     public init(
         service: String = "com.loom.identity.account.v2",
         account: String = "p256-signing",
         synchronizable: Bool = true,
-        fallbackToNonSynchronizableStorage: Bool = false
+        fallbackToNonSynchronizableStorage: Bool = false,
+        storage: LoomIdentityStorage = .keychain
     ) {
         self.service = service
         self.account = account
         self.synchronizable = synchronizable
         self.fallbackToNonSynchronizableStorage = fallbackToNonSynchronizableStorage
+        self.storage = storage
+    }
+
+    /// Creates an identity manager whose key is never persisted outside the process.
+    public static func inMemory() -> LoomIdentityManager {
+        LoomIdentityManager(
+            synchronizable: false,
+            storage: .memory
+        )
     }
 
     /// Returns the active account identity, creating one when missing.
@@ -118,7 +139,9 @@ public final class LoomIdentityManager {
 
     /// Rotates the account signing key and returns the new identity.
     public func rotateIdentity() throws -> LoomAccountIdentity {
-        try deletePrivateKey()
+        if storage == .keychain {
+            try deletePrivateKey()
+        }
         cachedPrivateKey = nil
         cachedIdentity = nil
         return try currentIdentity()
@@ -167,6 +190,12 @@ public final class LoomIdentityManager {
 
     private func loadOrCreatePrivateKey() throws -> P256.Signing.PrivateKey {
         if let cachedPrivateKey { return cachedPrivateKey }
+
+        if storage == .memory {
+            let created = P256.Signing.PrivateKey()
+            cachedPrivateKey = created
+            return created
+        }
 
         if let existing = try loadPrivateKey() {
             cachedPrivateKey = existing

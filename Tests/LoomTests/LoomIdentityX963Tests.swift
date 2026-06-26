@@ -116,6 +116,41 @@ struct LoomIdentityX963Tests {
     }
 
     @MainActor
+    @Test("In-memory identity manager keeps identity process-local")
+    func inMemoryIdentityManagerKeepsIdentityProcessLocal() throws {
+        let firstManager = LoomIdentityManager.inMemory()
+        let secondManager = LoomIdentityManager.inMemory()
+
+        let firstIdentity = try firstManager.currentIdentity()
+        let repeatedIdentity = try firstManager.currentIdentity()
+        let secondIdentity = try secondManager.currentIdentity()
+
+        #expect(firstIdentity == repeatedIdentity)
+        #expect(firstIdentity != secondIdentity)
+    }
+
+    @MainActor
+    @Test("In-memory identity manager signs and rotates without persistent storage")
+    func inMemoryIdentityManagerSignsAndRotatesWithoutPersistentStorage() throws {
+        let manager = LoomIdentityManager.inMemory()
+        let payload = Data("loom-in-memory-identity".utf8)
+
+        let firstIdentity = try manager.currentIdentity()
+        let signature = try manager.sign(payload)
+
+        #expect(LoomIdentityManager.verify(
+            signature: signature,
+            payload: payload,
+            publicKey: firstIdentity.publicKey
+        ))
+
+        let rotatedIdentity = try manager.rotateIdentity()
+
+        #expect(rotatedIdentity != firstIdentity)
+        #expect(try manager.currentIdentity() == rotatedIdentity)
+    }
+
+    @MainActor
     private func makeIdentityManager() -> LoomIdentityManager {
         LoomIdentityManager(
             service: "com.loom.tests.identity.\(UUID().uuidString)",
