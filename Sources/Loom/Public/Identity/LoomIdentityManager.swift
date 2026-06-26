@@ -42,6 +42,7 @@ public final class LoomIdentityManager {
     private let service: String
     private let account: String
     private let synchronizable: Bool
+    private let fallbackToNonSynchronizableStorage: Bool
     private var cachedPrivateKey: P256.Signing.PrivateKey?
     private var cachedIdentity: LoomAccountIdentity?
 
@@ -51,14 +52,18 @@ public final class LoomIdentityManager {
     ///   - service: Keychain service name.
     ///   - account: Keychain account key.
     ///   - synchronizable: Whether to enable iCloud Keychain sync.
+    ///   - fallbackToNonSynchronizableStorage: Whether to fall back to local-only Keychain storage when a
+    ///     synchronized write is unavailable.
     public init(
         service: String = "com.loom.identity.account.v2",
         account: String = "p256-signing",
-        synchronizable: Bool = true
+        synchronizable: Bool = true,
+        fallbackToNonSynchronizableStorage: Bool = false
     ) {
         self.service = service
         self.account = account
         self.synchronizable = synchronizable
+        self.fallbackToNonSynchronizableStorage = fallbackToNonSynchronizableStorage
     }
 
     /// Returns the active account identity, creating one when missing.
@@ -202,6 +207,41 @@ public final class LoomIdentityManager {
     }
 
     private func savePrivateKey(_ key: P256.Signing.PrivateKey) throws {
+        do {
+            try savePrivateKey(key, synchronizable: synchronizable)
+        } catch {
+            guard Self.shouldFallbackToNonSynchronizableStorage(
+                synchronizable: synchronizable,
+                fallbackEnabled: fallbackToNonSynchronizableStorage,
+                error: error
+            ) else {
+                throw error
+            }
+
+            let status = Self.keychainWriteStatus(from: error) ?? 0
+            LoomLogger.identity(
+                "Synchronizable identity key write failed status=\(status); using local Keychain storage"
+            )
+            try savePrivateKey(key, synchronizable: false)
+        }
+    }
+
+    nonisolated static func shouldFallbackToNonSynchronizableStorage(
+        synchronizable: Bool,
+        fallbackEnabled: Bool,
+        error: Error
+    ) -> Bool {
+        guard synchronizable, fallbackEnabled else { return false }
+        return keychainWriteStatus(from: error) != nil
+    }
+
+    nonisolated static func keychainWriteStatus(from error: Error) -> OSStatus? {
+        guard let identityError = error as? LoomIdentityError else { return nil }
+        guard case let .keychainWriteFailed(status) = identityError else { return nil }
+        return status
+    }
+
+    private func savePrivateKey(_ key: P256.Signing.PrivateKey, synchronizable storageSynchronizable: Bool) throws {
         let data = key.rawRepresentation
         var attributes: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -210,20 +250,21 @@ public final class LoomIdentityManager {
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         ]
-        attributes[kSecAttrSynchronizable as String] = synchronizable ? kCFBooleanTrue : kCFBooleanFalse
+        attributes[kSecAttrSynchronizable as String] = storageSynchronizable ? kCFBooleanTrue : kCFBooleanFalse
 
         let status = SecItemAdd(attributes as CFDictionary, nil)
         if status == errSecSuccess { return }
         if status == errSecDuplicateItem {
-            let query: [String: Any] = [
+            var query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,
                 kSecAttrService as String: service,
                 kSecAttrAccount as String: account,
             ]
+            query[kSecAttrSynchronizable as String] = storageSynchronizable ? kCFBooleanTrue : kCFBooleanFalse
             let update: [String: Any] = [
                 kSecValueData as String: data,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-                kSecAttrSynchronizable as String: (synchronizable ? kCFBooleanTrue : kCFBooleanFalse) as Any,
+                kSecAttrSynchronizable as String: (storageSynchronizable ? kCFBooleanTrue : kCFBooleanFalse) as Any,
             ]
             let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
             guard updateStatus == errSecSuccess else {
@@ -235,11 +276,12 @@ public final class LoomIdentityManager {
     }
 
     private func deletePrivateKey() throws {
-        let query: [String: Any] = [
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
+        query[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw LoomIdentityError.keychainDeleteFailed(status: status)

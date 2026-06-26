@@ -84,6 +84,37 @@ struct LoomIdentityX963Tests {
         }
     }
 
+    @Test("Synchronizable write failures can fall back to local storage when enabled")
+    func synchronizableWriteFailuresCanFallbackToLocalStorage() {
+        let error = LoomIdentityError.keychainWriteFailed(status: errSecMissingEntitlement)
+
+        #expect(LoomIdentityManager.shouldFallbackToNonSynchronizableStorage(
+            synchronizable: true,
+            fallbackEnabled: true,
+            error: error
+        ))
+        #expect(LoomIdentityManager.keychainWriteStatus(from: error) == errSecMissingEntitlement)
+    }
+
+    @Test("Identity fallback stays disabled for non-write failures")
+    func identityFallbackStaysDisabledForNonWriteFailures() {
+        #expect(!LoomIdentityManager.shouldFallbackToNonSynchronizableStorage(
+            synchronizable: true,
+            fallbackEnabled: true,
+            error: LoomIdentityError.keychainReadFailed(status: errSecInteractionNotAllowed)
+        ))
+        #expect(!LoomIdentityManager.shouldFallbackToNonSynchronizableStorage(
+            synchronizable: true,
+            fallbackEnabled: false,
+            error: LoomIdentityError.keychainWriteFailed(status: errSecMissingEntitlement)
+        ))
+        #expect(!LoomIdentityManager.shouldFallbackToNonSynchronizableStorage(
+            synchronizable: false,
+            fallbackEnabled: true,
+            error: LoomIdentityError.keychainWriteFailed(status: errSecMissingEntitlement)
+        ))
+    }
+
     @MainActor
     private func makeIdentityManager() -> LoomIdentityManager {
         LoomIdentityManager(
