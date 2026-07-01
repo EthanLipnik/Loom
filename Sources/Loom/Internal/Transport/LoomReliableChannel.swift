@@ -71,6 +71,8 @@ package actor LoomReliableChannel: LoomSessionTransport {
     private let immediateAckIdleThreshold: Double = 0.05
     private let recentInboundTimeoutGrace: Double = 20.0
     private let absolutePendingAckTimeout: Double = 30.0
+    private let maxPendingFragmentAssemblies = 64
+    private let maxPendingFragmentBytes = LoomMessageLimits.maxReceiveBufferBytes
 
     // MARK: - Lifecycle
 
@@ -598,12 +600,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
             close(with: terminalFailure)
         }
 
-        // Prune stale fragment assemblies
-        for (key, assembly) in fragments {
-            if now - assembly.createdAt > fragmentPruneInterval {
-                fragments.removeValue(forKey: key)
-            }
-        }
+        pruneFragmentAssemblies(now: now)
     }
 
     // MARK: - Receive Loop
@@ -794,6 +791,9 @@ package actor LoomReliableChannel: LoomSessionTransport {
         let createdAt: CFAbsoluteTime
 
         var isComplete: Bool { fragments.count == Int(fragmentCount) }
+        var totalBytes: Int {
+            fragments.values.reduce(0) { $0 + $1.count }
+        }
 
         func reassemble() -> Data {
             var result = Data()
@@ -811,8 +811,18 @@ package actor LoomReliableChannel: LoomSessionTransport {
         payload: Data,
         routeToHandshake: Bool
     ) {
+        guard header.fragmentCount > 0,
+              header.fragmentIndex < header.fragmentCount,
+              Int(header.fragmentCount) <= maxFragmentCount(routeToHandshake: routeToHandshake) else {
+            return
+        }
         let firstSeq = header.sequence &- UInt32(header.fragmentIndex)
         let key = FragmentKey(streamID: header.streamID, firstSequence: firstSeq)
+
+        if fragments[key] == nil {
+            pruneFragmentAssemblies(now: CFAbsoluteTimeGetCurrent())
+            guard fragments.count < maxPendingFragmentAssemblies else { return }
+        }
 
         var assembly = fragments[key] ?? FragmentAssembly(
             fragmentCount: header.fragmentCount,
@@ -820,6 +830,15 @@ package actor LoomReliableChannel: LoomSessionTransport {
             fragments: [:],
             createdAt: CFAbsoluteTimeGetCurrent()
         )
+        guard assembly.fragmentCount == header.fragmentCount,
+              assembly.routeToHandshake == routeToHandshake else {
+            fragments.removeValue(forKey: key)
+            return
+        }
+        if assembly.fragments[header.fragmentIndex] == nil,
+           pendingFragmentBytes + payload.count > maxPendingFragmentBytes {
+            return
+        }
 
         assembly.fragments[header.fragmentIndex] = payload
         if assembly.isComplete {
@@ -836,6 +855,23 @@ package actor LoomReliableChannel: LoomSessionTransport {
             }
         } else {
             fragments[key] = assembly
+        }
+    }
+
+    private var pendingFragmentBytes: Int {
+        fragments.values.reduce(0) { $0 + $1.totalBytes }
+    }
+
+    private func maxFragmentCount(routeToHandshake: Bool) -> Int {
+        let byteLimit = routeToHandshake
+            ? LoomMessageLimits.maxHelloFrameBytes
+            : LoomMessageLimits.maxFrameBytes
+        return max(1, (byteLimit + loomReliableMaxFragmentPayload - 1) / loomReliableMaxFragmentPayload)
+    }
+
+    private func pruneFragmentAssemblies(now: CFAbsoluteTime) {
+        for (key, assembly) in fragments where now - assembly.createdAt > fragmentPruneInterval {
+            fragments.removeValue(forKey: key)
         }
     }
 

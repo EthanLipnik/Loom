@@ -751,6 +751,8 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         trustProvider: (any LoomTrustProvider)? = nil,
         helloValidator: LoomSessionHelloValidator = LoomSessionHelloValidator(),
         encryptionPolicy: LoomSessionEncryptionPolicy = .required,
+        expectedPeerIdentityKeyID: String? = nil,
+        expectedPeerIdentityPublicKey: Data? = nil,
         queue: DispatchQueue = .global(qos: .userInitiated)
     ) async throws -> LoomAuthenticatedSessionContext {
         guard case .idle = state else {
@@ -781,6 +783,11 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                 endpointDescription: transportEndpointDescription
             )
             let peerIdentity = validatedHello.peerIdentity
+            try Self.validateExpectedPeerIdentity(
+                peerIdentity,
+                expectedKeyID: expectedPeerIdentityKeyID,
+                expectedPublicKey: expectedPeerIdentityPublicKey
+            )
             updateBootstrapProgress(phase: .remoteHelloReceived)
 
             let negotiatedFeatures = Array(
@@ -877,6 +884,21 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                     detail: "Received malformed Loom session hello over UDP: \(error.localizedDescription)"
                 )
             )
+        }
+    }
+
+    private static func validateExpectedPeerIdentity(
+        _ peerIdentity: LoomPeerIdentity,
+        expectedKeyID: String?,
+        expectedPublicKey: Data?
+    ) throws {
+        if let expectedKeyID,
+           peerIdentity.identityKeyID != expectedKeyID {
+            throw LoomError.authenticationFailed
+        }
+        if let expectedPublicKey,
+           peerIdentity.identityPublicKey != expectedPublicKey {
+            throw LoomError.authenticationFailed
         }
     }
 

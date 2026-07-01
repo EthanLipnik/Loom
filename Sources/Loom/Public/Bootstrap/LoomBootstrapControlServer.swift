@@ -28,11 +28,13 @@ public actor LoomBootstrapControlServer {
         @Sendable (LoomBootstrapControlPeer, LoomBootstrapCredentials) async throws -> LoomBootstrapControlResult
     public typealias CommandHandler =
         @Sendable (LoomBootstrapControlPeer, LoomBootstrapControlCommandPayload) async throws -> LoomBootstrapControlResult
+    public typealias PeerAuthorizer = @Sendable (LoomBootstrapControlPeer) async -> Bool
 
     private let controlAuthSecret: String
     private let statusHandler: StatusHandler
     private let unlockHandler: UnlockHandler
     private let commandHandler: CommandHandler?
+    private let peerAuthorizer: PeerAuthorizer
     private let replayProtector = LoomReplayProtector()
     private var listener: NWListener?
 
@@ -40,12 +42,14 @@ public actor LoomBootstrapControlServer {
         controlAuthSecret: String,
         onStatus: @escaping StatusHandler,
         onUnlock: @escaping UnlockHandler,
-        onCommand: CommandHandler? = nil
+        onCommand: CommandHandler? = nil,
+        isPeerAuthorized: @escaping PeerAuthorizer = { _ in true }
     ) {
         self.controlAuthSecret = controlAuthSecret
         statusHandler = onStatus
         unlockHandler = onUnlock
         commandHandler = onCommand
+        peerAuthorizer = isPeerAuthorized
     }
 
     public func start(port: UInt16 = Loom.defaultControlPort) async throws -> UInt16 {
@@ -164,7 +168,7 @@ public actor LoomBootstrapControlServer {
             throw LoomBootstrapControlError.protocolViolation("Bootstrap control key identifier mismatch.")
         }
 
-        guard await replayProtector.validate(
+        guard await replayProtector.canAccept(
             timestampMs: request.auth.timestampMs,
             nonce: request.auth.nonce
         ) else {
@@ -188,12 +192,21 @@ public actor LoomBootstrapControlServer {
         ) else {
             throw LoomBootstrapControlError.protocolViolation("Bootstrap control signature verification failed.")
         }
-
-        return LoomBootstrapControlPeer(
+        let peer = LoomBootstrapControlPeer(
             keyID: request.auth.keyID,
             publicKey: request.auth.publicKey,
             endpoint: endpoint
         )
+        guard await peerAuthorizer(peer) else {
+            throw LoomBootstrapControlError.protocolViolation("Bootstrap control peer is not authorized.")
+        }
+        guard await replayProtector.record(
+            timestampMs: request.auth.timestampMs,
+            nonce: request.auth.nonce
+        ) else {
+            throw LoomBootstrapControlError.protocolViolation("Bootstrap control replay rejected.")
+        }
+        return peer
     }
 
     private func startAndAwaitReady(_ connection: NWConnection, queue: DispatchQueue) async throws {

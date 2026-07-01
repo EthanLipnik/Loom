@@ -27,12 +27,25 @@ public actor LoomReplayProtector {
     }
 
     public func validate(timestampMs: Int64, nonce: String) -> Bool {
+        record(timestampMs: timestampMs, nonce: nonce)
+    }
+
+    public func canAccept(timestampMs: Int64, nonce: String) -> Bool {
         if nonce.isEmpty || nonce.utf8.count > maxNonceLength { return false }
         let nowMs = Self.currentTimestampMs()
         let delta = nowMs - timestampMs
         if delta > allowedClockSkewMs || delta < -allowedClockSkewMs { return false }
         if nonces[nonce] != nil { return false }
+        prune(nowMs: nowMs)
+        return true
+    }
 
+    public func record(timestampMs: Int64, nonce: String) -> Bool {
+        if nonce.isEmpty || nonce.utf8.count > maxNonceLength { return false }
+        let nowMs = Self.currentTimestampMs()
+        let delta = nowMs - timestampMs
+        if delta > allowedClockSkewMs || delta < -allowedClockSkewMs { return false }
+        if nonces[nonce] != nil { return false }
         nonces[nonce] = timestampMs
         nonceOrder.append(nonce)
         enforceBoundedSize()

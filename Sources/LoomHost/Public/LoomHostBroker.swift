@@ -186,9 +186,7 @@ public actor LoomHostBroker {
         do {
             switch frame.message {
             case let .register(clientID, app):
-                clientIDBySocketID[socketID] = clientID
-                socketIDByClientID[clientID] = socketID
-                appByClientID[clientID] = app
+                try register(clientID: clientID, app: app, socketID: socketID)
                 let runtime = try await sharedRuntime()
                 try await runtime.register(app: app)
                 try await reply(
@@ -198,16 +196,19 @@ public actor LoomHostBroker {
                 )
 
             case let .unregister(clientID):
+                try requireRegisteredClient(clientID, socketID: socketID)
                 try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
                 await unregister(clientID: clientID)
 
             case let .refreshPeers(clientID):
+                try requireRegisteredClient(clientID, socketID: socketID)
                 if let runtime {
                     await runtime.refreshPeers()
                 }
                 try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
 
             case let .startRemoteHosting(clientID, sessionID, publicHostForTCP):
+                try requireRegisteredClient(clientID, socketID: socketID)
                 let runtime = try await sharedRuntime()
                 try await runtime.startRemoteHosting(
                     sessionID: sessionID,
@@ -216,12 +217,14 @@ public actor LoomHostBroker {
                 try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
 
             case let .stopRemoteHosting(clientID):
+                try requireRegisteredClient(clientID, socketID: socketID)
                 if let runtime {
                     await runtime.stopRemoteHosting()
                 }
                 try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
 
             case let .connect(clientID, peerID):
+                try requireRegisteredClient(clientID, socketID: socketID)
                 let runtime = try await sharedRuntime()
                 let established = try await runtime.connect(
                     to: peerID,
@@ -235,6 +238,7 @@ public actor LoomHostBroker {
                 try await reply(.connected(descriptor), to: clientID, requestID: frame.requestID)
 
             case let .connectRemote(clientID, sessionID):
+                try requireRegisteredClient(clientID, socketID: socketID)
                 let runtime = try await sharedRuntime()
                 let established = try await runtime.connect(
                     remoteSessionID: sessionID,
@@ -248,10 +252,12 @@ public actor LoomHostBroker {
                 try await reply(.connected(descriptor), to: clientID, requestID: frame.requestID)
 
             case let .disconnect(clientID, connectionID):
+                try requireRegisteredClient(clientID, socketID: socketID)
                 try await disconnect(connectionID: connectionID, expectedClientID: clientID)
                 try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
 
             case let .openStream(clientID, connectionID, streamID, label):
+                try requireRegisteredClient(clientID, socketID: socketID)
                 try await openStream(
                     clientID: clientID,
                     connectionID: connectionID,
@@ -261,6 +267,7 @@ public actor LoomHostBroker {
                 try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
 
             case let .streamData(clientID, connectionID, streamID, payloadBase64):
+                try requireRegisteredClient(clientID, socketID: socketID)
                 guard let payload = Data(base64Encoded: payloadBase64) else {
                     throw LoomHostError.protocolViolation("Received invalid stream payload encoding.")
                 }
@@ -273,6 +280,7 @@ public actor LoomHostBroker {
                 try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
 
             case let .closeStream(clientID, connectionID, streamID):
+                try requireRegisteredClient(clientID, socketID: socketID)
                 try await closeStream(
                     clientID: clientID,
                     connectionID: connectionID,
@@ -299,6 +307,31 @@ public actor LoomHostBroker {
                     requestID: frame.requestID
                 )
             }
+        }
+    }
+
+    private func register(
+        clientID: UUID,
+        app: LoomHostAppDescriptor,
+        socketID: UUID
+    ) throws {
+        if let registeredClientID = clientIDBySocketID[socketID],
+           registeredClientID != clientID {
+            throw LoomHostError.protocolViolation("Shared-host socket is already registered to another client.")
+        }
+        if let registeredSocketID = socketIDByClientID[clientID],
+           registeredSocketID != socketID {
+            throw LoomHostError.protocolViolation("Shared-host client is already registered on another socket.")
+        }
+        clientIDBySocketID[socketID] = clientID
+        socketIDByClientID[clientID] = socketID
+        appByClientID[clientID] = app
+    }
+
+    private func requireRegisteredClient(_ clientID: UUID, socketID: UUID) throws {
+        guard clientIDBySocketID[socketID] == clientID,
+              socketIDByClientID[clientID] == socketID else {
+            throw LoomHostError.protocolViolation("Shared-host client is not registered on this socket.")
         }
     }
 

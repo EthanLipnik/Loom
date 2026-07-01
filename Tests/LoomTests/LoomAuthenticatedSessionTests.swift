@@ -223,7 +223,15 @@ struct LoomAuthenticatedSessionTests {
         _ = try await (clientContext, serverContext)
 
         let phases = await clientProgressTask.value.map(\.phase)
-        #expect(phases == [.idle, .transportStarting, .transportReady, .localHelloSent, .remoteHelloReceived, .ready])
+        #expect(phases == [
+            .idle,
+            .transportStarting,
+            .transportReady,
+            .localHelloSent,
+            .remoteHelloReceived,
+            .trustPendingApproval,
+            .ready,
+        ])
         #expect(await pair.client.bootstrapProgress == LoomAuthenticatedSessionBootstrapProgress(phase: .ready))
     }
 

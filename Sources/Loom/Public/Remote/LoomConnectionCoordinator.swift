@@ -21,17 +21,23 @@ public struct LoomConnectionTarget: Sendable {
     public let transportKind: LoomTransportKind
     public let endpoint: NWEndpoint
     public let requiredLocalPort: UInt16?
+    public let expectedIdentityKeyID: String?
+    public let expectedIdentityPublicKey: Data?
 
     public init(
         source: LoomConnectionTargetSource,
         transportKind: LoomTransportKind,
         endpoint: NWEndpoint,
-        requiredLocalPort: UInt16? = nil
+        requiredLocalPort: UInt16? = nil,
+        expectedIdentityKeyID: String? = nil,
+        expectedIdentityPublicKey: Data? = nil
     ) {
         self.source = source
         self.transportKind = transportKind
         self.endpoint = endpoint
         self.requiredLocalPort = requiredLocalPort
+        self.expectedIdentityKeyID = expectedIdentityKeyID
+        self.expectedIdentityPublicKey = expectedIdentityPublicKey
     }
 }
 
@@ -127,13 +133,15 @@ public final class LoomConnectionCoordinator {
         self.signalingClient = signalingClient
         self.policy = policy ?? node.configuration.directConnectionPolicy
         connector = { target, hello in
-            try await node.connect(
-                to: target.endpoint,
-                using: target.transportKind,
-                hello: hello,
-                requiredLocalPort: target.requiredLocalPort
-            )
-        }
+                try await node.connect(
+                    to: target.endpoint,
+                    using: target.transportKind,
+                    hello: hello,
+                    requiredLocalPort: target.requiredLocalPort,
+                    expectedPeerIdentityKeyID: target.expectedIdentityKeyID,
+                    expectedPeerIdentityPublicKey: target.expectedIdentityPublicKey
+                )
+            }
     }
 
     public init(
@@ -191,9 +199,18 @@ public final class LoomConnectionCoordinator {
         if let signalingSessionID,
            let signalingClient {
             let presence = try await signalingClient.fetchPresence(sessionID: signalingSessionID)
+            guard presence.acceptingConnections else {
+                return LoomConnectionPlan(targets: targets)
+            }
             let remoteCandidateTargets = presence.peerCandidates
                 .sorted(by: compareRemoteCandidates(_:_:))
-                .compactMap { Self.target(from: $0, requiredLocalPort: requiredLocalPort) }
+                .compactMap {
+                    Self.target(
+                        from: $0,
+                        requiredLocalPort: requiredLocalPort,
+                        advertisement: presence.advertisement
+                    )
+                }
             targets.append(contentsOf: remoteCandidateTargets)
         }
 
@@ -260,7 +277,8 @@ public final class LoomConnectionCoordinator {
 
     private static func target(
         from candidate: LoomRemoteCandidate,
-        requiredLocalPort: UInt16? = nil
+        requiredLocalPort: UInt16? = nil,
+        advertisement: LoomPeerAdvertisement? = nil
     ) -> LoomConnectionTarget? {
         guard let endpointPort = NWEndpoint.Port(rawValue: candidate.port) else {
             return nil
@@ -270,7 +288,8 @@ public final class LoomConnectionCoordinator {
             source: .remoteSignaling,
             transportKind: candidate.transport,
             endpoint: .hostPort(host: host, port: endpointPort),
-            requiredLocalPort: candidate.transport.usesDatagramPath ? requiredLocalPort : nil
+            requiredLocalPort: candidate.transport.usesDatagramPath ? requiredLocalPort : nil,
+            expectedIdentityKeyID: advertisement?.identityKeyID
         )
     }
 
@@ -305,7 +324,8 @@ public final class LoomConnectionCoordinator {
                     from: peer.endpoint,
                     advertisedPort: transport.port,
                     hostOverride: hostOverride
-                )
+                ),
+                expectedIdentityKeyID: peer.advertisement.identityKeyID
             )
         }
     }

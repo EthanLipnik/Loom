@@ -272,6 +272,8 @@ public final class LoomNode {
         requiredInterface: NWInterface? = nil,
         requiredInterfaceType: NWInterface.InterfaceType? = nil,
         requiredLocalPort: UInt16? = nil,
+        expectedPeerIdentityKeyID: String? = nil,
+        expectedPeerIdentityPublicKey: Data? = nil,
         queue: DispatchQueue = .global(qos: .userInitiated),
         onTrustPending: (@Sendable @MainActor () -> Void)? = nil,
         onBootstrapProgress: (@Sendable (LoomAuthenticatedSessionBootstrapProgress) -> Void)? = nil
@@ -318,6 +320,8 @@ public final class LoomNode {
                     identityManager: identityManager,
                     trustProvider: trustProvider,
                     encryptionPolicy: encryptionPolicy,
+                    expectedPeerIdentityKeyID: expectedPeerIdentityKeyID,
+                    expectedPeerIdentityPublicKey: expectedPeerIdentityPublicKey,
                     queue: queue
                 )
                 return sess

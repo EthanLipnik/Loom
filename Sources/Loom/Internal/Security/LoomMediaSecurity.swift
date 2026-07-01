@@ -143,11 +143,19 @@ package enum LoomMediaSecurity {
         key: LoomMediaPacketKey,
         direction: LoomMediaDirection
     ) throws -> Data {
-        try open(
-            wirePayload,
-            key: key.symmetricKey,
-            nonce: videoNonce(for: header, direction: direction)
-        )
+        do {
+            return try open(
+                wirePayload,
+                key: key.symmetricKey,
+                nonce: videoNonce(for: header, direction: direction)
+            )
+        } catch LoomMediaSecurityError.decryptFailed where header.epoch > UInt8.max {
+            return try open(
+                wirePayload,
+                key: key.symmetricKey,
+                nonce: legacyVideoNonce(for: header, direction: direction)
+            )
+        }
     }
 
     package static func encryptAudioPayload(
@@ -255,6 +263,21 @@ package enum LoomMediaSecurity {
     }
 
     private static func videoNonce(
+        for header: FrameHeader,
+        direction: LoomMediaDirection
+    ) throws -> AES.GCM.Nonce {
+        var nonce = [UInt8](repeating: 0, count: 12)
+        nonce[0] = 1
+        nonce[1] = direction.rawValue
+        nonce[2] = UInt8(truncatingIfNeeded: (header.epoch >> 8) + 1)
+        nonce[3] = UInt8(truncatingIfNeeded: header.epoch)
+        writeUInt16LittleEndian(header.streamID, into: &nonce, at: 4)
+        writeUInt32LittleEndian(header.sequenceNumber, into: &nonce, at: 6)
+        writeUInt16LittleEndian(header.fragmentIndex, into: &nonce, at: 10)
+        return try nonceFromBytes(nonce)
+    }
+
+    private static func legacyVideoNonce(
         for header: FrameHeader,
         direction: LoomMediaDirection
     ) throws -> AES.GCM.Nonce {

@@ -480,13 +480,15 @@ public final class LoomRemoteSignalingClient {
 
         let appPayload = Self.appAuthPayload(
             method: "GET", path: path, bodySHA256: bodyHash,
-            appID: appAuth.appID, timestampMs: timestampMs, nonce: nonce
+            appID: appAuth.appID, timestampMs: timestampMs, nonce: nonce,
+            sessionID: sessionID
         )
         let appSig = Self.hmacSHA256Base64(payload: appPayload, secret: appAuth.sharedSecret)
 
         guard let workerPayload = try? LoomIdentitySigning.workerRequestPayload(
             method: "GET", path: path, bodySHA256: bodyHash,
-            keyID: identity.keyID, timestampMs: timestampMs, nonce: nonce
+            keyID: identity.keyID, timestampMs: timestampMs, nonce: nonce,
+            sessionID: sessionID
         ),
               let sig = try? identityManager.sign(workerPayload) else { return nil }
 
@@ -536,7 +538,8 @@ public final class LoomRemoteSignalingClient {
             bodySHA256: bodyHash,
             appID: appAuthentication.appID,
             timestampMs: timestampMs,
-            nonce: nonce
+            nonce: nonce,
+            sessionID: sessionID
         )
         let appSignature = Self.hmacSHA256Base64(
             payload: appAuthPayload,
@@ -548,7 +551,8 @@ public final class LoomRemoteSignalingClient {
             bodySHA256: bodyHash,
             keyID: identity.keyID,
             timestampMs: timestampMs,
-            nonce: nonce
+            nonce: nonce,
+            sessionID: sessionID
         )
         let signature = try identityManager.sign(payload)
 
@@ -612,9 +616,10 @@ public final class LoomRemoteSignalingClient {
         bodySHA256: String,
         appID: String,
         timestampMs: Int64,
-        nonce: String
+        nonce: String,
+        sessionID: String? = nil
     ) -> Data {
-        let fields = [
+        var fields = [
             ("type", "worker-app-auth-v1"),
             ("method", method.uppercased()),
             ("path", path),
@@ -623,6 +628,11 @@ public final class LoomRemoteSignalingClient {
             ("timestampMs", "\(timestampMs)"),
             ("nonce", nonce),
         ]
+        if let sessionID {
+            fields[0] = ("type", "worker-app-auth-v2")
+            fields.append(("sessionID", sessionID))
+        }
+        let text = fields
             .sorted { lhs, rhs in
                 lhs.0 < rhs.0
             }
@@ -630,7 +640,7 @@ public final class LoomRemoteSignalingClient {
                 "\(key)=\(value)"
             }
             .joined(separator: "\n")
-        return Data(fields.utf8)
+        return Data(text.utf8)
     }
 
     private static func hmacSHA256Base64(payload: Data, secret: String) -> String {

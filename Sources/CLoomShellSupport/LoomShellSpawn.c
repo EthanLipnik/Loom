@@ -2,9 +2,11 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <signal.h>
 #include <stddef.h>
 #include <sys/ioctl.h>
+#include <sys/resource.h>
 #include <unistd.h>
 #include <util.h>
 
@@ -67,6 +69,20 @@ static int loom_shell_claim_foreground_terminal(int file_descriptor) {
     (void)sigaction(SIGTTOU, &previous_action, NULL);
     errno = saved_errno;
     return result;
+}
+
+static void loom_shell_close_inherited_file_descriptors(void) {
+    struct rlimit limit;
+    rlim_t max_file_descriptor = 256;
+    if (getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY) {
+        max_file_descriptor = limit.rlim_cur;
+    }
+    if (max_file_descriptor > INT_MAX) {
+        max_file_descriptor = INT_MAX;
+    }
+    for (int file_descriptor = STDERR_FILENO + 1; file_descriptor < (int)max_file_descriptor; file_descriptor += 1) {
+        (void)close(file_descriptor);
+    }
 }
 
 pid_t loom_shell_forkpty_spawn(
@@ -148,6 +164,7 @@ pid_t loom_shell_forkpty_spawn(
         );
     }
 
+    loom_shell_close_inherited_file_descriptors();
     execve(path, argv, envp);
     loom_shell_child_fail(
         STDERR_FILENO,

@@ -82,9 +82,10 @@ package enum LoomIdentitySigning {
         bodySHA256: String,
         keyID: String,
         timestampMs: Int64,
-        nonce: String
+        nonce: String,
+        sessionID: String? = nil
     ) throws -> Data {
-        try canonicalData([
+        var fields = [
             ("type", "worker-request-v1"),
             ("method", method.uppercased()),
             ("path", path),
@@ -92,7 +93,12 @@ package enum LoomIdentitySigning {
             ("keyID", keyID),
             ("timestampMs", "\(timestampMs)"),
             ("nonce", nonce),
-        ])
+        ]
+        if let sessionID {
+            fields[0] = ("type", "worker-request-v2")
+            fields.append(("sessionID", sessionID))
+        }
+        return try canonicalData(fields)
     }
 
     package static func bootstrapControlPayload(
