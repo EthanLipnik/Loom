@@ -127,6 +127,37 @@ public struct LoomDiscoveredInterface: Hashable, Sendable {
     }
 }
 
+/// Source of a resolved Bonjour service address.
+public enum LoomResolvedServiceAddressSource: String, Hashable, Sendable {
+    /// Address returned by `NetService.resolve()`.
+    case netService
+}
+
+/// A resolved Bonjour address with any route evidence that can be proven from
+/// the address itself.
+public struct LoomResolvedServiceAddress: Hashable, Sendable {
+    public let host: NWEndpoint.Host
+    public let interfaceName: String?
+    public let interfaceKind: LoomDiscoveredInterfaceKind?
+    public let source: LoomResolvedServiceAddressSource
+
+    public var hasInterfaceScope: Bool {
+        interfaceName != nil
+    }
+
+    public init(
+        host: NWEndpoint.Host,
+        interfaceName: String? = nil,
+        interfaceKind: LoomDiscoveredInterfaceKind? = nil,
+        source: LoomResolvedServiceAddressSource = .netService
+    ) {
+        self.host = host
+        self.interfaceName = interfaceName
+        self.interfaceKind = interfaceKind
+        self.source = source
+    }
+}
+
 /// Represents a discovered peer on the network.
 public struct LoomPeer: Identifiable, Hashable, Sendable {
     /// Unique identifier for this peer.
@@ -152,6 +183,10 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
     /// to avoid platform-specific mDNS resolution failures (e.g. iOS).
     public let resolvedAddresses: [NWEndpoint.Host]
 
+    /// Resolved Bonjour service addresses with any interface binding that was
+    /// present in the resolved socket address.
+    public let resolvedServiceAddresses: [LoomResolvedServiceAddress]
+
     /// Interfaces on which this peer was discovered.
     public let discoveredInterfaces: [LoomDiscoveredInterface]
 
@@ -172,6 +207,7 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
         endpoint: NWEndpoint,
         advertisement: LoomPeerAdvertisement,
         resolvedAddresses: [NWEndpoint.Host] = [],
+        resolvedServiceAddresses: [LoomResolvedServiceAddress] = [],
         discoveredInterfaces: [LoomDiscoveredInterface] = []
     ) {
         self.id = id
@@ -180,6 +216,9 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
         self.endpoint = endpoint
         self.advertisement = advertisement
         self.resolvedAddresses = resolvedAddresses
+        self.resolvedServiceAddresses = resolvedServiceAddresses.isEmpty
+            ? resolvedAddresses.map { LoomResolvedServiceAddress(host: $0) }
+            : resolvedServiceAddresses
         self.discoveredInterfaces = discoveredInterfaces
     }
 
@@ -191,6 +230,7 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
         endpoint: NWEndpoint,
         advertisement: LoomPeerAdvertisement,
         resolvedAddresses: [NWEndpoint.Host] = [],
+        resolvedServiceAddresses: [LoomResolvedServiceAddress] = [],
         discoveredInterfaces: [LoomDiscoveredInterface] = []
     ) {
         self.init(
@@ -200,6 +240,7 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
             endpoint: endpoint,
             advertisement: advertisement,
             resolvedAddresses: resolvedAddresses,
+            resolvedServiceAddresses: resolvedServiceAddresses,
             discoveredInterfaces: discoveredInterfaces
         )
     }
@@ -211,6 +252,7 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
         endpoint: NWEndpoint,
         advertisement: LoomPeerAdvertisement,
         resolvedAddresses: [NWEndpoint.Host] = [],
+        resolvedServiceAddresses: [LoomResolvedServiceAddress] = [],
         discoveredInterfaces: [LoomDiscoveredInterface] = []
     ) {
         self.init(
@@ -220,6 +262,7 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
             endpoint: endpoint,
             advertisement: advertisement,
             resolvedAddresses: resolvedAddresses,
+            resolvedServiceAddresses: resolvedServiceAddresses,
             discoveredInterfaces: discoveredInterfaces
         )
     }

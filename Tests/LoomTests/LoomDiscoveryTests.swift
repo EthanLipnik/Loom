@@ -307,6 +307,48 @@ struct LoomDiscoveryTests {
             NWEndpoint.Host.ipv6(anpiAddress).debugDescription,
             NWEndpoint.Host.ipv6(awdlAddress).debugDescription,
         ])
+        #expect(preferredPeer.resolvedServiceAddresses.map(\.interfaceName) == [
+            nil,
+            "anpi0",
+            "awdl0",
+        ])
+        #expect(preferredPeer.resolvedServiceAddresses.map(\.interfaceKind) == [
+            nil,
+            .applePrivateNCM,
+            .awdl,
+        ])
+    }
+
+    @MainActor
+    @Test("Discovery does not bind unscoped addresses to separate proximity interface hints")
+    func discoveryDoesNotBindUnscopedAddressesToSeparateProximityInterfaceHints() throws {
+        let deviceID = UUID()
+        let discovery = LoomDiscovery()
+        let wifiAddress = try #require(IPv4Address("192.168.1.50"))
+        let peer = makePeer(
+            id: deviceID,
+            name: "Studio Mac",
+            endpointPort: 6600,
+            directTransports: [
+                LoomDirectTransportAdvertisement(
+                    transportKind: .udp,
+                    port: 6600,
+                    pathKind: .wifi
+                ),
+            ],
+            resolvedAddresses: [.ipv4(wifiAddress)],
+            discoveredInterfaces: [
+                LoomDiscoveredInterface(name: "anpi0", type: .other, index: 9),
+                LoomDiscoveredInterface(name: "en0", type: .wifi, index: 8),
+            ]
+        )
+
+        discovery.upsertPeerForTesting(peer)
+
+        let discoveredPeer = try #require(discovery.discoveredPeers.first)
+        #expect(discoveredPeer.resolvedServiceAddresses.map(\.host) == [.ipv4(wifiAddress)])
+        #expect(discoveredPeer.resolvedServiceAddresses.map(\.interfaceName) == [nil])
+        #expect(discoveredPeer.resolvedServiceAddresses.map(\.interfaceKind) == [nil])
     }
 
     @MainActor

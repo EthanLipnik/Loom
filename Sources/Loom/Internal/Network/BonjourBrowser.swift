@@ -300,6 +300,10 @@ public final class LoomDiscovery {
             endpoint: endpoint,
             advertisement: normalizedAdvertisement,
             resolvedAddresses: resolvedAddresses,
+            resolvedServiceAddresses: Self.resolvedServiceAddresses(
+                from: resolvedAddresses,
+                discoveredInterfaces: discoveredInterfaces
+            ),
             discoveredInterfaces: discoveredInterfaces
         )
 
@@ -471,6 +475,12 @@ public final class LoomDiscovery {
             endpoint: peer.endpoint,
             advertisement: peer.advertisement,
             resolvedAddresses: peer.resolvedAddresses,
+            resolvedServiceAddresses: peer.resolvedServiceAddresses.contains(where: \.hasInterfaceScope)
+                ? peer.resolvedServiceAddresses
+                : Self.resolvedServiceAddresses(
+                    from: peer.resolvedAddresses,
+                    discoveredInterfaces: peer.discoveredInterfaces
+                ),
             discoveredInterfaces: peer.discoveredInterfaces
         )
         storeCandidate(candidate, for: peer.endpoint, peerID: peer.deviceID)
@@ -512,6 +522,10 @@ public final class LoomDiscovery {
             from: candidates.values,
             preferredCandidate: preferredCandidate
         )
+        let resolvedServiceAddresses = mergedResolvedServiceAddresses(
+            from: candidates.values,
+            preferredCandidate: preferredCandidate
+        )
 
         removeProjectedPeers(forDeviceID: peerID)
         let projections = LoomHostCatalogCodec.projections(
@@ -527,6 +541,7 @@ public final class LoomDiscovery {
                 endpoint: preferredCandidate.endpoint,
                 advertisement: projection.advertisement,
                 resolvedAddresses: resolvedAddresses,
+                resolvedServiceAddresses: resolvedServiceAddresses,
                 discoveredInterfaces: discoveredInterfaces
             )
         }
@@ -562,6 +577,37 @@ public final class LoomDiscovery {
         }
 
         return resolvedAddresses
+    }
+
+    private func mergedResolvedServiceAddresses(
+        from candidates: Dictionary<NWEndpoint, LoomHostDiscoveryCandidate>.Values,
+        preferredCandidate: LoomHostDiscoveryCandidate
+    ) -> [LoomResolvedServiceAddress] {
+        var resolvedServiceAddresses: [LoomResolvedServiceAddress] = []
+        var seenKeys: Set<String> = []
+
+        func append(_ addresses: [LoomResolvedServiceAddress]) {
+            for address in addresses {
+                let key = address.host.debugDescription.lowercased()
+                guard seenKeys.insert(key).inserted else {
+                    continue
+                }
+                resolvedServiceAddresses.append(address)
+            }
+        }
+
+        append(preferredCandidate.resolvedServiceAddresses)
+
+        let remainingCandidates = candidates
+            .filter { $0.endpoint.debugDescription != preferredCandidate.endpoint.debugDescription }
+            .sorted { lhs, rhs in
+                isPreferredPeer(lhs, rhs)
+            }
+        for candidate in remainingCandidates {
+            append(candidate.resolvedServiceAddresses)
+        }
+
+        return resolvedServiceAddresses
     }
 
     private func mergedDiscoveredInterfaces(
@@ -671,6 +717,49 @@ public final class LoomDiscovery {
             observer(peers)
         }
     }
+
+    nonisolated private static func resolvedServiceAddresses(
+        from hosts: [NWEndpoint.Host],
+        discoveredInterfaces: [LoomDiscoveredInterface]
+    ) -> [LoomResolvedServiceAddress] {
+        let interfacesByName = discoveredInterfaces.reduce(into: [String: LoomDiscoveredInterface]()) { result, discoveredInterface in
+            let name = discoveredInterface.name
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            guard !name.isEmpty else { return }
+            if result[name]?.networkInterface == nil {
+                result[name] = discoveredInterface
+            }
+        }
+
+        return hosts.map { host in
+            let interfaceName = scopedIPv6InterfaceName(host)
+            let interfaceKind = interfaceName.map { name in
+                interfacesByName[name]?.kind ??
+                    LoomDiscoveredInterface(name: name, type: .other, index: 0).kind
+            }
+            return LoomResolvedServiceAddress(
+                host: host,
+                interfaceName: interfaceName,
+                interfaceKind: interfaceKind
+            )
+        }
+    }
+
+    nonisolated private static func scopedIPv6InterfaceName(_ host: NWEndpoint.Host) -> String? {
+        guard case let .ipv6(address) = host else {
+            return nil
+        }
+        let description = String(describing: address)
+        guard let separator = description.lastIndex(of: "%") else {
+            return nil
+        }
+        let suffix = description[description.index(after: separator)...]
+        let interfaceName = suffix
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return interfaceName.isEmpty ? nil : interfaceName
+    }
 }
 
 private struct PublishedPeerSnapshot: Equatable {
@@ -680,6 +769,7 @@ private struct PublishedPeerSnapshot: Equatable {
     let endpoint: NWEndpoint
     let advertisement: LoomPeerAdvertisement
     let resolvedAddresses: [NWEndpoint.Host]
+    let resolvedServiceAddresses: [LoomResolvedServiceAddress]
     let discoveredInterfaces: [LoomDiscoveredInterface]
 
     init(_ peer: LoomPeer) {
@@ -689,6 +779,7 @@ private struct PublishedPeerSnapshot: Equatable {
         endpoint = peer.endpoint
         advertisement = peer.advertisement
         resolvedAddresses = peer.resolvedAddresses
+        resolvedServiceAddresses = peer.resolvedServiceAddresses
         discoveredInterfaces = peer.discoveredInterfaces
     }
 }
@@ -699,5 +790,6 @@ private struct LoomHostDiscoveryCandidate {
     let endpoint: NWEndpoint
     let advertisement: LoomPeerAdvertisement
     let resolvedAddresses: [NWEndpoint.Host]
+    let resolvedServiceAddresses: [LoomResolvedServiceAddress]
     let discoveredInterfaces: [LoomDiscoveredInterface]
 }
