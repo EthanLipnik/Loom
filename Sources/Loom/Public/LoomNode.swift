@@ -426,10 +426,11 @@ public final class LoomNode {
                     onSession(session)
                     await Self.keepAcceptedSessionAlive(session)
                 } catch {
-                    LoomLogger.error(
-                        .transport,
-                        error: error,
-                        message: "Authenticated tcp listener session failed sessionID=\(sessionID) service=\(serviceName)"
+                    Self.logAcceptedAuthenticatedSessionFailure(
+                        error,
+                        transportKind: connection.transportKind,
+                        sessionID: sessionID,
+                        serviceName: serviceName
                     )
                     await session.cancel()
                 }
@@ -485,10 +486,11 @@ public final class LoomNode {
                 onSession(session)
                 await Self.keepAcceptedSessionAlive(session)
             } catch {
-                LoomLogger.error(
-                    .transport,
-                    error: error,
-                    message: "Authenticated \(connection.transportKind.rawValue) direct listener session failed sessionID=\(sessionID)"
+                Self.logAcceptedAuthenticatedSessionFailure(
+                    error,
+                    transportKind: connection.transportKind,
+                    sessionID: sessionID,
+                    serviceName: nil
                 )
                 await session.cancel()
             }
@@ -514,6 +516,44 @@ public final class LoomNode {
                     "phase=\(progress.phase.rawValue)\(failureText)"
             )
         }
+    }
+
+    nonisolated private static func logAcceptedAuthenticatedSessionFailure(
+        _ error: Error,
+        transportKind: LoomTransportKind,
+        sessionID: String,
+        serviceName: String?
+    ) {
+        let serviceText = serviceName.map { " service=\($0)" } ?? ""
+        let prefix = "Authenticated \(transportKind.rawValue) listener session failed sessionID=\(sessionID)\(serviceText)"
+        if isExpectedAcceptedSessionFailure(error) {
+            LoomLogger.transport("\(prefix): \(error.localizedDescription)")
+        } else {
+            LoomLogger.error(
+                .transport,
+                error: error,
+                message: prefix
+            )
+        }
+    }
+
+    nonisolated private static func isExpectedAcceptedSessionFailure(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let loomError = error as? LoomError {
+            switch loomError {
+            case .authenticationFailed:
+                return true
+            case let .connectionFailed(underlying):
+                let failure = LoomConnectionFailure.classify(underlying)
+                return failure.reason == .cancelled ||
+                    failure.reason == .closed ||
+                    failure.reason == .transportLoss
+            default:
+                return false
+            }
+        }
+        let failure = LoomConnectionFailure.classify(error)
+        return failure.reason == .cancelled || failure.reason == .closed
     }
 
     private static func keepAcceptedSessionAlive(_ session: LoomAuthenticatedSession) async {
