@@ -37,7 +37,6 @@ struct LoomKitPortConfigurationTests {
         let ports = LoomKitPortConfiguration(
             tcpPort: 41_001,
             udpPort: 41_002,
-            quicPort: 41_003,
             overlayProbePort: 41_004
         )
         let container = try LoomContainer(

@@ -59,7 +59,6 @@ public enum LoomDirectCandidateCollector {
     ) async -> [LoomRemoteCandidate] {
         var candidates: [LoomRemoteCandidate] = []
         let udpPort = listeningPorts[.udp] ?? configuration.udpPort
-        let quicPort = listeningPorts[.quic] ?? configuration.quicPort
         let tcpPort = listeningPorts[.tcp] ?? configuration.controlPort
 
         if configuration.enabledDirectTransports.contains(.udp),
@@ -67,15 +66,6 @@ public enum LoomDirectCandidateCollector {
            let candidate = await mappedDatagramCandidate(
                 transportKind: .udp,
                 localPort: udpPort
-           ) {
-            candidates.append(candidate)
-        }
-
-        if configuration.enabledDirectTransports.contains(.quic),
-           quicPort > 0,
-           let candidate = await mappedDatagramCandidate(
-                transportKind: .quic,
-                localPort: quicPort
            ) {
             candidates.append(candidate)
         }

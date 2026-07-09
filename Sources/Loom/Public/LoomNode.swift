@@ -39,7 +39,6 @@ package enum LoomNWConnectionTransportKind: String, Codable, CaseIterable, Senda
 public enum LoomConnection: Sendable {
     case tcp(NWConnection)
     case udp(NWConnection)
-    case quic(NetworkConnection<QUIC>)
 
     package init(connection: NWConnection, transportKind: LoomNWConnectionTransportKind) {
         switch transportKind {
@@ -56,8 +55,6 @@ public enum LoomConnection: Sendable {
             .tcp
         case .udp:
             .udp
-        case .quic:
-            .quic
         }
     }
 
@@ -65,8 +62,6 @@ public enum LoomConnection: Sendable {
         switch self {
         case let .tcp(connection), let .udp(connection):
             connection.endpoint
-        case let .quic(connection):
-            connection.remoteEndpoint
         }
     }
 
@@ -74,8 +69,6 @@ public enum LoomConnection: Sendable {
         switch self {
         case let .tcp(connection), let .udp(connection):
             connection
-        case .quic:
-            nil
         }
     }
 }
@@ -375,18 +368,6 @@ public final class LoomNode {
                 ports[.udp] = udpPort
             }
 
-            if configuration.enabledDirectTransports.contains(.quic) {
-                let quicPort = try await startAuthenticatedDirectListener(
-                    transportKind: .quic,
-                    requestedPort: configuration.quicPort,
-                    identityManager: identityManager,
-                    encryptionPolicy: encryptionPolicy,
-                    helloProvider: helloProvider,
-                    onSession: onSession
-                )
-                ports[.quic] = quicPort
-            }
-
             let initialBonjourAdvertisement = Self.advertisement(
                 baseHello.advertisement,
                 withDirectTransportPorts: ports,
@@ -582,11 +563,7 @@ public final class LoomNode {
                 udpServiceClass: configuration.directDatagramServiceClass
             )
         case .quic:
-            return LoomQUICDirectListener(
-                enablePeerToPeer: configuration.enablePeerToPeer,
-                quicALPN: configuration.quicALPN,
-                serviceClass: configuration.directDatagramServiceClass
-            )
+            throw LoomError.protocolError("QUIC transport has been removed.")
         }
     }
 

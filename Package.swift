@@ -12,8 +12,8 @@ import PackageDescription
 let package = Package(
     name: "Loom",
     platforms: [
-        .macOS("26.0"),
-        .iOS("26.0"),
+        .macOS("14.0"),
+        .iOS("17.0"),
         .visionOS("26.0"),
     ],
     products: [

@@ -62,7 +62,6 @@ public final class LoomContainer {
         let networkConfiguration = LoomNetworkConfiguration(
             serviceType: trimmedServiceType,
             controlPort: self.configuration.ports.tcpPort,
-            quicPort: self.configuration.ports.quicPort,
             udpPort: self.configuration.ports.udpPort,
             overlayProbePort: self.configuration.overlayDirectory?.probePort,
             enablePeerToPeer: configuration.enablePeerToPeer,

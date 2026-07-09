@@ -30,17 +30,7 @@ package enum LoomConnectionFactory {
                 requiredLocalPort: requiredLocalPort
             )
         case .quic:
-            return .quic(
-                try LoomQUICTransportFactory.makeConnection(
-                    to: endpoint,
-                    enablePeerToPeer: enablePeerToPeer ?? configuration.enablePeerToPeer,
-                    requiredInterface: requiredInterface,
-                    requiredInterfaceType: requiredInterfaceType,
-                    requiredLocalPort: requiredLocalPort,
-                    quicALPN: configuration.quicALPN,
-                    serviceClass: configuration.directDatagramServiceClass
-                )
-            )
+            throw LoomError.protocolError("QUIC transport has been removed.")
         }
     }
 

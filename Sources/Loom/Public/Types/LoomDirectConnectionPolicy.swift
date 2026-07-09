@@ -36,7 +36,7 @@ public struct LoomDirectConnectionPolicy: Sendable, Hashable {
     /// Creates a direct connection policy for Loom-owned path and transport ranking.
     public init(
         preferredLocalPathOrder: [LoomDirectPathKind] = [.wired, .wifi, .awdl, .other],
-        preferredTransportOrder: [LoomTransportKind] = [.udp, .quic, .tcp],
+        preferredTransportOrder: [LoomTransportKind] = [.udp, .tcp],
         localDiscoveryHostOverride: String? = nil,
         racesLocalCandidates: Bool = true,
         racesRemoteCandidates: Bool = true

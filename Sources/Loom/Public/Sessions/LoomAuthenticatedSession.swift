@@ -614,8 +614,6 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
     private let recentlyClosedStreamTTL: CFAbsoluteTime = 2.0
     private let recentlyClosedStreamMaxCount = 64
     private let transportEndpointDescription: String
-    private let quicRemoteEndpoint: NWEndpoint?
-    private let quicPathSnapshotProvider: (@Sendable () -> LoomSessionNetworkPathSnapshot?)?
     private let transportServiceClassDescription: String?
     private let transportUsableDatagramSize: Int?
 
@@ -634,8 +632,6 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             transportKind = .tcp
             transport = LoomFramedConnection(connection: connection)
             transportEndpointDescription = (remoteEndpoint ?? connection.endpoint).debugDescription
-            quicRemoteEndpoint = nil
-            quicPathSnapshotProvider = nil
             transportServiceClassDescription = serviceClass.map(Self.serviceClassDescription(_:))
             transportUsableDatagramSize = nil
         case let .udp(connection):
@@ -643,24 +639,8 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             transportKind = .udp
             transport = LoomReliableChannel(connection: connection)
             transportEndpointDescription = (remoteEndpoint ?? connection.endpoint).debugDescription
-            quicRemoteEndpoint = nil
-            quicPathSnapshotProvider = nil
             transportServiceClassDescription = serviceClass.map(Self.serviceClassDescription(_:))
             transportUsableDatagramSize = Loom.defaultMaxPacketSize
-        case let .quic(connection):
-            nwConnection = nil
-            transportKind = .quic
-            transport = LoomQUICSessionTransport(
-                connection: connection,
-                role: role
-            )
-            transportEndpointDescription = (remoteEndpoint ?? connection.remoteEndpoint)?.debugDescription ?? "quic"
-            quicRemoteEndpoint = remoteEndpoint ?? connection.remoteEndpoint
-            quicPathSnapshotProvider = {
-                connection.currentPath.map(LoomSessionNetworkPathSnapshot.init(path:))
-            }
-            transportServiceClassDescription = serviceClass.map(Self.serviceClassDescription(_:))
-            transportUsableDatagramSize = LoomQUICTransportFactory.defaultMaxDatagramFrameSize
         }
         let (stream, continuation) = AsyncStream.makeStream(of: LoomMultiplexedStream.self)
         incomingStreams = stream
@@ -695,7 +675,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
 
     /// Returns the latest remote endpoint observed for this session's transport.
     public var remoteEndpoint: NWEndpoint? {
-        currentRemoteEndpoint ?? currentPathSnapshot?.remoteEndpoint ?? nwConnection?.endpoint ?? quicRemoteEndpoint
+        currentRemoteEndpoint ?? currentPathSnapshot?.remoteEndpoint ?? nwConnection?.endpoint
     }
 
     /// Returns the latest transport-path snapshot observed for this session.
@@ -945,7 +925,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         }
         // TODO: Enable the priority input lane for remote transports after
         // congestion, NAT traversal, and path-health behavior are validated.
-        guard transportKind == .udp || transportKind == .quic,
+        guard transportKind == .udp,
               transport.receiveSemantics == .independentReliableAndUnreliable else {
             throw LoomError.protocolError("Priority input lane is only available on local datagram transports.")
         }
@@ -1539,17 +1519,6 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         guard !transportObserversConfigured else { return }
         transportObserversConfigured = true
         guard let nwConnection else {
-            currentRemoteEndpoint = quicRemoteEndpoint
-            if let snapshot = quicPathSnapshotProvider?() {
-                applyTransportPathSnapshot(snapshot)
-            }
-            Task { [weak self, transport] in
-                await transport.setObservationHandler { [weak self] observation in
-                    Task {
-                        await self?.handleTransportObservation(observation)
-                    }
-                }
-            }
             return
         }
         currentRemoteEndpoint = nwConnection.endpoint

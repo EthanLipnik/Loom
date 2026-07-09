@@ -135,7 +135,9 @@ public final class LoomDiscovery {
     nonisolated package static func makeBrowserParameters(enablePeerToPeer: Bool) -> NWParameters {
         let parameters = NWParameters()
         parameters.includePeerToPeer = enablePeerToPeer
-        parameters.allowUltraConstrainedPaths = enablePeerToPeer
+        if #available(iOS 26, macOS 26, visionOS 26, *) {
+            parameters.allowUltraConstrainedPaths = enablePeerToPeer
+        }
         return parameters
     }
 

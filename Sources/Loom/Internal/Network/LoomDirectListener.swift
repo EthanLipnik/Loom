@@ -122,7 +122,9 @@ package enum LoomTransportParametersFactory {
         case .tcp:
             parameters = NWParameters.tcp
             parameters.includePeerToPeer = enablePeerToPeer
-            parameters.allowUltraConstrainedPaths = enablePeerToPeer
+            if #available(iOS 26, macOS 26, visionOS 26, *) {
+                parameters.allowUltraConstrainedPaths = enablePeerToPeer
+            }
             if let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
                 tcpOptions.noDelay = true
                 tcpOptions.enableKeepalive = true
@@ -131,7 +133,9 @@ package enum LoomTransportParametersFactory {
         case .udp:
             parameters = NWParameters.udp
             parameters.includePeerToPeer = enablePeerToPeer
-            parameters.allowUltraConstrainedPaths = enablePeerToPeer
+            if #available(iOS 26, macOS 26, visionOS 26, *) {
+                parameters.allowUltraConstrainedPaths = enablePeerToPeer
+            }
             parameters.serviceClass = udpServiceClass
         }
         if let requiredInterface {

@@ -119,7 +119,9 @@ actor BonjourAdvertiser {
         let parameters = NWParameters.tcp
         parameters.serviceClass = .interactiveVideo
         parameters.includePeerToPeer = enablePeerToPeer
-        parameters.allowUltraConstrainedPaths = enablePeerToPeer
+        if #available(iOS 26, macOS 26, visionOS 26, *) {
+            parameters.allowUltraConstrainedPaths = enablePeerToPeer
+        }
 
         if let tcpOptions = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options {
             tcpOptions.noDelay = true
