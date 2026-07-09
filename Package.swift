@@ -13,7 +13,7 @@ let package = Package(
     name: "Loom",
     platforms: [
         .macOS("14.0"),
-        .iOS("17.0"),
+        .iOS("17.4"),
         .visionOS("26.0"),
     ],
     products: [
