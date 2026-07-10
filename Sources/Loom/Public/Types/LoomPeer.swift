@@ -297,12 +297,26 @@ public struct LoomDirectTransportAdvertisement: Codable, Hashable, Sendable {
 }
 
 /// Device type enumeration.
+///
+/// Unrecognized encoded values decode as ``unknown`` so peers can add device
+/// families without making older decoders reject an entire containing payload.
 public enum DeviceType: String, Codable, Sendable {
     case mac
     case iPad
     case iPhone
     case vision
     case unknown
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let rawValue = try container.decode(String.self)
+        self = DeviceType(rawValue: rawValue) ?? .unknown
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
+    }
 
     public var displayName: String {
         switch self {
@@ -325,6 +339,32 @@ public enum DeviceType: String, Codable, Sendable {
     }
 }
 
+/// Original device-type spelling carried on the wire. Unknown values project to
+/// ``DeviceType/unknown`` without losing the bytes covered by handshake signatures.
+package struct LoomDeviceTypeWireValue: Sendable, Hashable {
+    package let rawValue: String
+
+    package init(_ deviceType: DeviceType) {
+        rawValue = deviceType.rawValue
+    }
+
+    package init(rawValue: String) {
+        self.rawValue = rawValue
+    }
+
+    package var deviceType: DeviceType {
+        DeviceType(rawValue: rawValue) ?? .unknown
+    }
+
+    package static func == (lhs: LoomDeviceTypeWireValue, rhs: LoomDeviceTypeWireValue) -> Bool {
+        lhs.deviceType == rhs.deviceType
+    }
+
+    package func hash(into hasher: inout Hasher) {
+        hasher.combine(deviceType)
+    }
+}
+
 /// Generic peer advertisement published over discovery and cloud registries.
 ///
 /// App-specific semantics should live in the namespaced `metadata` dictionary
@@ -341,6 +381,7 @@ public struct LoomPeerAdvertisement: Codable, Hashable, Sendable {
     public let hostName: String?
     public let directTransports: [LoomDirectTransportAdvertisement]
     public let metadata: [String: String]
+    private let deviceTypeWireValue: LoomDeviceTypeWireValue?
 
     public init(
         protocolVersion: Int = Int(Loom.protocolVersion),
@@ -354,16 +395,90 @@ public struct LoomPeerAdvertisement: Codable, Hashable, Sendable {
         directTransports: [LoomDirectTransportAdvertisement] = [],
         metadata: [String: String] = [:]
     ) {
+        self.init(
+            protocolVersion: protocolVersion,
+            deviceID: deviceID,
+            identityKeyID: identityKeyID,
+            deviceTypeWireValue: deviceType.map(LoomDeviceTypeWireValue.init),
+            modelIdentifier: modelIdentifier,
+            iconName: iconName,
+            machineFamily: machineFamily,
+            hostName: hostName,
+            directTransports: directTransports,
+            metadata: metadata
+        )
+    }
+
+    private init(
+        protocolVersion: Int,
+        deviceID: UUID?,
+        identityKeyID: String?,
+        deviceTypeWireValue: LoomDeviceTypeWireValue?,
+        modelIdentifier: String?,
+        iconName: String?,
+        machineFamily: String?,
+        hostName: String?,
+        directTransports: [LoomDirectTransportAdvertisement],
+        metadata: [String: String]
+    ) {
         self.protocolVersion = protocolVersion
         self.deviceID = deviceID
         self.identityKeyID = identityKeyID
-        self.deviceType = deviceType
+        self.deviceTypeWireValue = deviceTypeWireValue
+        deviceType = deviceTypeWireValue?.deviceType
         self.modelIdentifier = modelIdentifier
         self.iconName = iconName
         self.machineFamily = machineFamily
         self.hostName = hostName
         self.directTransports = directTransports
         self.metadata = metadata
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case protocolVersion
+        case deviceID
+        case identityKeyID
+        case deviceType
+        case modelIdentifier
+        case iconName
+        case machineFamily
+        case hostName
+        case directTransports
+        case metadata
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let deviceTypeRawValue = try container.decodeIfPresent(String.self, forKey: .deviceType)
+        self.init(
+            protocolVersion: try container.decode(Int.self, forKey: .protocolVersion),
+            deviceID: try container.decodeIfPresent(UUID.self, forKey: .deviceID),
+            identityKeyID: try container.decodeIfPresent(String.self, forKey: .identityKeyID),
+            deviceTypeWireValue: deviceTypeRawValue.map(LoomDeviceTypeWireValue.init(rawValue:)),
+            modelIdentifier: try container.decodeIfPresent(String.self, forKey: .modelIdentifier),
+            iconName: try container.decodeIfPresent(String.self, forKey: .iconName),
+            machineFamily: try container.decodeIfPresent(String.self, forKey: .machineFamily),
+            hostName: try container.decodeIfPresent(String.self, forKey: .hostName),
+            directTransports: try container.decode(
+                [LoomDirectTransportAdvertisement].self,
+                forKey: .directTransports
+            ),
+            metadata: try container.decode([String: String].self, forKey: .metadata)
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(protocolVersion, forKey: .protocolVersion)
+        try container.encodeIfPresent(deviceID, forKey: .deviceID)
+        try container.encodeIfPresent(identityKeyID, forKey: .identityKeyID)
+        try container.encodeIfPresent(deviceTypeWireValue?.rawValue, forKey: .deviceType)
+        try container.encodeIfPresent(modelIdentifier, forKey: .modelIdentifier)
+        try container.encodeIfPresent(iconName, forKey: .iconName)
+        try container.encodeIfPresent(machineFamily, forKey: .machineFamily)
+        try container.encodeIfPresent(hostName, forKey: .hostName)
+        try container.encode(directTransports, forKey: .directTransports)
+        try container.encode(metadata, forKey: .metadata)
     }
 
     /// Encode to a Bonjour TXT record dictionary.
@@ -378,8 +493,8 @@ public struct LoomPeerAdvertisement: Codable, Hashable, Sendable {
         if let identityKeyID {
             record[Self.identityKeyIDKey] = identityKeyID
         }
-        if let deviceType {
-            record[Self.deviceTypeKey] = deviceType.rawValue
+        if let deviceTypeWireValue {
+            record[Self.deviceTypeKey] = deviceTypeWireValue.rawValue
         }
         if let modelIdentifier {
             record[Self.modelIdentifierKey] = modelIdentifier
@@ -415,7 +530,8 @@ public struct LoomPeerAdvertisement: Codable, Hashable, Sendable {
             metadata[key] = sanitizedValue
         }
 
-        let deviceType = sanitizedTXTValue(txtRecord[deviceTypeKey]).flatMap(DeviceType.init(rawValue:))
+        let deviceTypeWireValue = sanitizedTXTValue(txtRecord[deviceTypeKey])
+            .map(LoomDeviceTypeWireValue.init(rawValue:))
         let directTransports: [LoomDirectTransportAdvertisement] = LoomTransportKind.allCases.compactMap { transportKind in
             guard let rawPort = sanitizedTXTValue(txtRecord[directTransportKey(for: transportKind)]),
                   let port = UInt16(rawPort),
@@ -435,7 +551,7 @@ public struct LoomPeerAdvertisement: Codable, Hashable, Sendable {
             protocolVersion: Int(sanitizedTXTValue(txtRecord[protocolVersionKey]) ?? "1") ?? 1,
             deviceID: sanitizedTXTValue(txtRecord[deviceIDKey]).flatMap(UUID.init(uuidString:)),
             identityKeyID: sanitizedTXTValue(txtRecord[identityKeyIDKey]),
-            deviceType: deviceType,
+            deviceTypeWireValue: deviceTypeWireValue,
             modelIdentifier: sanitizedTXTValue(txtRecord[modelIdentifierKey]),
             iconName: sanitizedTXTValue(txtRecord[iconNameKey]),
             machineFamily: sanitizedTXTValue(txtRecord[machineFamilyKey]),

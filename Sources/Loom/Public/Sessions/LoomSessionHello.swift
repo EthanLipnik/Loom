@@ -49,6 +49,7 @@ public struct LoomSessionHello: Codable, Sendable, Equatable {
     public let supportedFeatures: [String]
     public let iCloudUserID: String?
     public let identity: Identity
+    fileprivate let deviceTypeWireValue: LoomDeviceTypeWireValue
 
     public init(
         deviceID: UUID,
@@ -63,11 +64,51 @@ public struct LoomSessionHello: Codable, Sendable, Equatable {
         self.deviceID = deviceID
         self.deviceName = deviceName
         self.deviceType = deviceType
+        deviceTypeWireValue = LoomDeviceTypeWireValue(deviceType)
         self.protocolVersion = protocolVersion
         self.advertisement = advertisement
         self.supportedFeatures = supportedFeatures
         self.iCloudUserID = iCloudUserID
         self.identity = identity
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case deviceID
+        case deviceName
+        case deviceType
+        case protocolVersion
+        case advertisement
+        case supportedFeatures
+        case iCloudUserID
+        case identity
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let deviceTypeWireValue = LoomDeviceTypeWireValue(
+            rawValue: try container.decode(String.self, forKey: .deviceType)
+        )
+        deviceID = try container.decode(UUID.self, forKey: .deviceID)
+        deviceName = try container.decode(String.self, forKey: .deviceName)
+        deviceType = deviceTypeWireValue.deviceType
+        self.deviceTypeWireValue = deviceTypeWireValue
+        protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
+        advertisement = try container.decode(LoomPeerAdvertisement.self, forKey: .advertisement)
+        supportedFeatures = try container.decode([String].self, forKey: .supportedFeatures)
+        iCloudUserID = try container.decodeIfPresent(String.self, forKey: .iCloudUserID)
+        identity = try container.decode(Identity.self, forKey: .identity)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(deviceID, forKey: .deviceID)
+        try container.encode(deviceName, forKey: .deviceName)
+        try container.encode(deviceTypeWireValue.rawValue, forKey: .deviceType)
+        try container.encode(protocolVersion, forKey: .protocolVersion)
+        try container.encode(advertisement, forKey: .advertisement)
+        try container.encode(supportedFeatures, forKey: .supportedFeatures)
+        try container.encodeIfPresent(iCloudUserID, forKey: .iCloudUserID)
+        try container.encode(identity, forKey: .identity)
     }
 }
 
@@ -128,7 +169,7 @@ public enum LoomSessionHelloError: LocalizedError, Sendable, Equatable {
 private struct LoomCanonicalHelloPayload: Codable {
     let deviceID: UUID
     let deviceName: String
-    let deviceType: DeviceType
+    let deviceType: String
     let protocolVersion: Int
     let advertisement: LoomPeerAdvertisement
     let supportedFeatures: [String]
@@ -183,7 +224,7 @@ public actor LoomSessionHelloValidator {
         let canonical = LoomCanonicalHelloPayload(
             deviceID: request.deviceID,
             deviceName: request.deviceName,
-            deviceType: request.deviceType,
+            deviceType: request.deviceType.rawValue,
             protocolVersion: Int(Loom.protocolVersion),
             advertisement: request.advertisement,
             supportedFeatures: request.supportedFeatures.sorted(),
@@ -247,7 +288,7 @@ public actor LoomSessionHelloValidator {
             from: LoomCanonicalHelloPayload(
                 deviceID: hello.deviceID,
                 deviceName: hello.deviceName,
-                deviceType: hello.deviceType,
+                deviceType: hello.deviceTypeWireValue.rawValue,
                 protocolVersion: hello.protocolVersion,
                 advertisement: hello.advertisement,
                 supportedFeatures: hello.supportedFeatures.sorted(),
