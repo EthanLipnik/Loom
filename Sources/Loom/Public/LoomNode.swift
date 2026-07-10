@@ -99,6 +99,12 @@ public final class LoomNode {
     private var bonjourAdvertisingGeneration = UUID()
     private var bonjourAdvertisingRecoveryTask: Task<Void, Never>?
     private var bonjourAdvertisingRecoveryAttempt = 0
+    private let preauthenticationWorkLimiter: LoomOutstandingOperationLimiter
+    private let preauthenticationAdmission: LoomPreauthenticationAdmissionController
+    private let activeAuthenticatedSessionAdmission: LoomPreauthenticationAdmissionController
+    private let incomingRetainedCapacityBudget: LoomIncomingRetainedCapacityBudget
+    private var authenticatedAdvertisingGeneration = UUID()
+    private var isStartingAuthenticatedAdvertising = false
 
     nonisolated private static let minimumBonjourAdvertisingRecoveryDelay: Duration = .seconds(1)
 
@@ -110,6 +116,20 @@ public final class LoomNode {
         self.configuration = configuration
         self.identityManager = identityManager
         self.trustProvider = trustProvider
+        preauthenticationWorkLimiter = LoomOutstandingOperationLimiter(
+            maximumConcurrentOperations: configuration.maxPendingAuthenticatedSessions
+        )
+        preauthenticationAdmission = LoomPreauthenticationAdmissionController(
+            maxConcurrentConnections: configuration.maxPendingAuthenticatedSessions
+        )
+        activeAuthenticatedSessionAdmission = LoomPreauthenticationAdmissionController(
+            maxConcurrentConnections: configuration.maximumActiveAuthenticatedSessions
+        )
+        incomingRetainedCapacityBudget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: configuration.maximumBufferedIncomingBytesPerNode,
+            maximumPayloadCount: configuration.maximumBufferedIncomingPayloadsPerNode,
+            maximumBatchCount: configuration.maximumBufferedIncomingPayloadsPerNode
+        )
     }
 
     public func makeDiscovery(localDeviceID: UUID? = nil) -> LoomDiscovery {
@@ -137,6 +157,7 @@ public final class LoomNode {
     private func startAdvertising(
         serviceName: String,
         advertisement: LoomPeerAdvertisement,
+        authenticatedGeneration: UUID,
         onConnection: @escaping LoomDirectConnectionHandler
     ) async throws -> UInt16 {
         advertisingServiceName = serviceName
@@ -144,17 +165,27 @@ public final class LoomNode {
 
         guard configuration.enableBonjour else {
             let directListener = try makeDirectTransportListener(for: .tcp)
+            directListeners[.tcp] = directListener
             advertisingDiagnostics = advertisingDiagnostics.updating(
                 state: .starting,
                 serviceName: serviceName,
                 directListenerPorts: directListenerPorts,
                 bonjourRecoveryAttempt: 0
             )
-            let port = try await directListener.start(
-                port: configuration.controlPort,
-                onConnection: onConnection
-            )
-            directListeners[.tcp] = directListener
+            let port: UInt16
+            do {
+                port = try await directListener.start(
+                    port: configuration.controlPort,
+                    onConnection: onConnection
+                )
+                try validateAuthenticatedAdvertisingGeneration(authenticatedGeneration)
+            } catch {
+                if isCurrentDirectListener(directListener, for: .tcp) {
+                    directListeners.removeValue(forKey: .tcp)
+                }
+                await directListener.stop()
+                throw error
+            }
             directListenerPorts[.tcp] = port
             publishedAdvertisement = Self.advertisement(
                 advertisement,
@@ -176,10 +207,17 @@ public final class LoomNode {
             onConnection: onConnection
         )
         bonjourAdvertisingRecoveryAttempt = 0
-        return try await startBonjourAdvertising(context: bonjourAdvertisingContext)
+        let port = try await startBonjourAdvertising(context: bonjourAdvertisingContext)
+        try validateAuthenticatedAdvertisingGeneration(authenticatedGeneration)
+        return port
     }
 
     public func stopAdvertising() async {
+        authenticatedAdvertisingGeneration = UUID()
+        await stopAdvertisingResources()
+    }
+
+    private func stopAdvertisingResources() async {
         bonjourAdvertisingRecoveryTask?.cancel()
         bonjourAdvertisingRecoveryTask = nil
         bonjourAdvertisingGeneration = UUID()
@@ -229,12 +267,24 @@ public final class LoomNode {
         role: LoomSessionRole,
         remoteEndpoint: NWEndpoint? = nil
     ) -> LoomAuthenticatedSession {
-        LoomAuthenticatedSession(
+        incomingRetainedCapacityBudget.updateLimits(
+            maximumBytes: configuration.maximumBufferedIncomingBytesPerNode,
+            maximumPayloadCount: configuration.maximumBufferedIncomingPayloadsPerNode,
+            maximumBatchCount: configuration.maximumBufferedIncomingPayloadsPerNode
+        )
+        let session = LoomAuthenticatedSession(
             connection: connection,
             role: role,
             remoteEndpoint: remoteEndpoint,
-            serviceClass: connection.transportKind == .tcp ? nil : configuration.directDatagramServiceClass
+            serviceClass: connection.transportKind == .tcp ? nil : configuration.directDatagramServiceClass,
+            maximumConcurrentStreams: configuration.maximumConcurrentStreamsPerSession,
+            maximumBufferedIncomingBytesPerStream: configuration.maximumBufferedIncomingBytesPerStream,
+            maximumBufferedIncomingPayloadsPerStream: configuration.maximumBufferedIncomingPayloadsPerStream,
+            maximumBufferedIncomingBytesPerSession: configuration.maximumBufferedIncomingBytesPerSession,
+            maximumBufferedIncomingPayloadsPerSession: configuration.maximumBufferedIncomingPayloadsPerSession
         )
+        session.setParentIncomingRetainedCapacityBudget(incomingRetainedCapacityBudget)
+        return session
     }
 
     public func makeConnection(
@@ -315,6 +365,8 @@ public final class LoomNode {
                     encryptionPolicy: encryptionPolicy,
                     expectedPeerIdentityKeyID: expectedPeerIdentityKeyID,
                     expectedPeerIdentityPublicKey: expectedPeerIdentityPublicKey,
+                    handshakeTimeout: configuration.authenticatedSessionHandshakeTimeout,
+                    trustTimeout: configuration.authenticatedSessionTrustTimeout,
                     queue: queue
                 )
                 return sess
@@ -343,13 +395,51 @@ public final class LoomNode {
         helloProvider: @escaping @Sendable () async throws -> LoomSessionHelloRequest,
         onSession: @escaping @Sendable (LoomAuthenticatedSession) -> Void
     ) async throws -> [LoomTransportKind: UInt16] {
+        guard !isStartingAuthenticatedAdvertising else {
+            throw LoomError.alreadyAdvertising
+        }
+        isStartingAuthenticatedAdvertising = true
+        defer {
+            isStartingAuthenticatedAdvertising = false
+        }
+
+        let advertisingGeneration = UUID()
+        authenticatedAdvertisingGeneration = advertisingGeneration
         do {
+            // A sequential start is an atomic replacement. Tear down every
+            // listener from the previous generation before binding new ports.
+            await stopAdvertisingResources()
+            try validateAuthenticatedAdvertisingGeneration(advertisingGeneration)
             let identityManager = self.identityManager ?? LoomIdentityManager.shared
+            await preauthenticationWorkLimiter.updateLimit(configuration.maxPendingAuthenticatedSessions)
+            await preauthenticationAdmission.updateLimit(configuration.maxPendingAuthenticatedSessions)
+            await activeAuthenticatedSessionAdmission.updateLimit(configuration.maximumActiveAuthenticatedSessions)
+            incomingRetainedCapacityBudget.updateLimits(
+                maximumBytes: configuration.maximumBufferedIncomingBytesPerNode,
+                maximumPayloadCount: configuration.maximumBufferedIncomingPayloadsPerNode,
+                maximumBatchCount: configuration.maximumBufferedIncomingPayloadsPerNode
+            )
+            let handshakeTimeout = configuration.authenticatedSessionHandshakeTimeout
+            let preauthenticationWorkLimiter = preauthenticationWorkLimiter
+            let activeAuthenticatedSessionAdmission = activeAuthenticatedSessionAdmission
+            let incomingRetainedCapacityBudget = incomingRetainedCapacityBudget
             // Verify identity is accessible before accepting connections.
             // Fails fast at startup if Keychain is unavailable.
             _ = try await MainActor.run { try identityManager.currentIdentity() }
-            let baseHello = try await helloProvider()
+            let baseHello = try await withLoomThrowingTimeout(handshakeTimeout) {
+                try await preauthenticationWorkLimiter.run {
+                    try await helloProvider()
+                }
+            }
+            try validateAuthenticatedAdvertisingGeneration(advertisingGeneration)
             let directDatagramServiceClass = configuration.directDatagramServiceClass
+            let trustTimeout = configuration.authenticatedSessionTrustTimeout
+            let maximumConcurrentStreams = configuration.maximumConcurrentStreamsPerSession
+            let maximumBufferedIncomingBytesPerStream = configuration.maximumBufferedIncomingBytesPerStream
+            let maximumBufferedIncomingPayloadsPerStream = configuration.maximumBufferedIncomingPayloadsPerStream
+            let maximumBufferedIncomingBytesPerSession = configuration.maximumBufferedIncomingBytesPerSession
+            let maximumBufferedIncomingPayloadsPerSession = configuration.maximumBufferedIncomingPayloadsPerSession
+            let preauthenticationAdmission = preauthenticationAdmission
             var ports: [LoomTransportKind: UInt16] = [:]
 
             // Start datagram-capable direct listeners before publishing Bonjour.
@@ -362,10 +452,23 @@ public final class LoomNode {
                     requestedPort: configuration.udpPort,
                     identityManager: identityManager,
                     encryptionPolicy: encryptionPolicy,
+                    handshakeTimeout: handshakeTimeout,
+                    trustTimeout: trustTimeout,
+                    maximumConcurrentStreams: maximumConcurrentStreams,
+                    maximumBufferedIncomingBytesPerStream: maximumBufferedIncomingBytesPerStream,
+                    maximumBufferedIncomingPayloadsPerStream: maximumBufferedIncomingPayloadsPerStream,
+                    maximumBufferedIncomingBytesPerSession: maximumBufferedIncomingBytesPerSession,
+                    maximumBufferedIncomingPayloadsPerSession: maximumBufferedIncomingPayloadsPerSession,
+                    preauthenticationAdmission: preauthenticationAdmission,
+                    preauthenticationWorkLimiter: preauthenticationWorkLimiter,
+                    activeAuthenticatedSessionAdmission: activeAuthenticatedSessionAdmission,
+                    incomingRetainedCapacityBudget: incomingRetainedCapacityBudget,
+                    advertisingGeneration: advertisingGeneration,
                     helloProvider: helloProvider,
                     onSession: onSession
                 )
                 ports[.udp] = udpPort
+                try validateAuthenticatedAdvertisingGeneration(advertisingGeneration)
             }
 
             let initialBonjourAdvertisement = Self.advertisement(
@@ -375,15 +478,36 @@ public final class LoomNode {
             )
             let port = try await startAdvertising(
                 serviceName: serviceName,
-                advertisement: initialBonjourAdvertisement
+                advertisement: initialBonjourAdvertisement,
+                authenticatedGeneration: advertisingGeneration
             ) { [weak self] connection in
                 guard let self else { return }
+                guard await MainActor.run(body: {
+                    self.authenticatedAdvertisingGeneration == advertisingGeneration
+                }) else {
+                    connection.backingNWConnection?.cancel()
+                    return
+                }
+                guard await preauthenticationAdmission.acquire() else {
+                    LoomLogger.transport(
+                        "Rejected authenticated tcp listener connection before handshake: admission limit reached"
+                    )
+                    connection.backingNWConnection?.cancel()
+                    return
+                }
                 let session = LoomAuthenticatedSession(
                     connection: connection,
                     role: .receiver,
                     remoteEndpoint: connection.endpoint,
-                    serviceClass: connection.transportKind == .tcp ? nil : directDatagramServiceClass
+                    serviceClass: connection.transportKind == .tcp ? nil : directDatagramServiceClass,
+                    maximumConcurrentStreams: maximumConcurrentStreams,
+                    maximumBufferedIncomingBytesPerStream: maximumBufferedIncomingBytesPerStream,
+                    maximumBufferedIncomingPayloadsPerStream: maximumBufferedIncomingPayloadsPerStream,
+                    maximumBufferedIncomingBytesPerSession: maximumBufferedIncomingBytesPerSession,
+                    maximumBufferedIncomingPayloadsPerSession: maximumBufferedIncomingPayloadsPerSession
                 )
+                session.setParentIncomingRetainedCapacityBudget(incomingRetainedCapacityBudget)
+                await session.setPreauthenticationOperationLimiter(preauthenticationWorkLimiter)
                 let sessionID = session.id.uuidString.lowercased()
                 let endpointDescription = connection.endpoint.debugDescription
                 LoomLogger.transport(
@@ -397,16 +521,52 @@ public final class LoomNode {
                     serviceName: serviceName
                 )
                 do {
-                    let hello = try await helloProvider()
+                    let preauthenticationDeadline = ContinuousClock.now + handshakeTimeout
+                    let hello = try await withLoomThrowingDeadline(
+                        preauthenticationDeadline,
+                        onTimeout: {
+                            connection.backingNWConnection?.cancel()
+                        }
+                    ) {
+                        try await preauthenticationWorkLimiter.run {
+                            try await helloProvider()
+                        }
+                    }
+                    let remainingHandshakeTimeout = max(
+                        .milliseconds(1),
+                        ContinuousClock.now.duration(to: preauthenticationDeadline)
+                    )
                     _ = try await session.start(
                         localHello: hello,
                         identityManager: identityManager,
                         trustProvider: self.trustProvider,
-                        encryptionPolicy: encryptionPolicy
+                        encryptionPolicy: encryptionPolicy,
+                        handshakeTimeout: remainingHandshakeTimeout,
+                        trustTimeout: trustTimeout
                     )
+                    guard await MainActor.run(body: {
+                        self.authenticatedAdvertisingGeneration == advertisingGeneration
+                    }) else {
+                        await preauthenticationAdmission.release()
+                        await session.cancel()
+                        return
+                    }
+                    guard await activeAuthenticatedSessionAdmission.acquire() else {
+                        await preauthenticationAdmission.release()
+                        LoomLogger.transport(
+                            "Rejected authenticated tcp listener session after handshake: active session limit reached"
+                        )
+                        await session.cancel()
+                        return
+                    }
+                    Self.monitorAcceptedSession(
+                        session,
+                        admission: activeAuthenticatedSessionAdmission
+                    )
+                    await preauthenticationAdmission.release()
                     onSession(session)
-                    await Self.keepAcceptedSessionAlive(session)
                 } catch {
+                    await preauthenticationAdmission.release()
                     Self.logAcceptedAuthenticatedSessionFailure(
                         error,
                         transportKind: connection.transportKind,
@@ -417,11 +577,18 @@ public final class LoomNode {
                 }
             }
 
+            try validateAuthenticatedAdvertisingGeneration(advertisingGeneration)
             ports[.tcp] = port
-            try await startOverlayProbeServer(serviceName: serviceName)
+            try await startOverlayProbeServer(
+                serviceName: serviceName,
+                advertisingGeneration: advertisingGeneration
+            )
+            try validateAuthenticatedAdvertisingGeneration(advertisingGeneration)
             return ports
         } catch {
-            await stopAdvertising()
+            if authenticatedAdvertisingGeneration == advertisingGeneration {
+                await stopAdvertising()
+            }
             throw error
         }
     }
@@ -431,19 +598,55 @@ public final class LoomNode {
         requestedPort: UInt16,
         identityManager: LoomIdentityManager,
         encryptionPolicy: LoomSessionEncryptionPolicy,
+        handshakeTimeout: Duration,
+        trustTimeout: Duration,
+        maximumConcurrentStreams: Int,
+        maximumBufferedIncomingBytesPerStream: Int,
+        maximumBufferedIncomingPayloadsPerStream: Int,
+        maximumBufferedIncomingBytesPerSession: Int,
+        maximumBufferedIncomingPayloadsPerSession: Int,
+        preauthenticationAdmission: LoomPreauthenticationAdmissionController,
+        preauthenticationWorkLimiter: LoomOutstandingOperationLimiter,
+        activeAuthenticatedSessionAdmission: LoomPreauthenticationAdmissionController,
+        incomingRetainedCapacityBudget: LoomIncomingRetainedCapacityBudget,
+        advertisingGeneration: UUID,
         helloProvider: @escaping @Sendable () async throws -> LoomSessionHelloRequest,
         onSession: @escaping @Sendable (LoomAuthenticatedSession) -> Void
     ) async throws -> UInt16 {
         let directDatagramServiceClass = configuration.directDatagramServiceClass
         let listener = try makeDirectTransportListener(for: transportKind)
-        let port = try await listener.start(port: requestedPort) { [weak self] connection in
+        directListeners[transportKind] = listener
+        let port: UInt16
+        do {
+            port = try await listener.start(port: requestedPort) { [weak self] connection in
             guard let self else { return }
+            guard await MainActor.run(body: {
+                self.authenticatedAdvertisingGeneration == advertisingGeneration
+            }) else {
+                connection.backingNWConnection?.cancel()
+                return
+            }
+            guard await preauthenticationAdmission.acquire() else {
+                LoomLogger.transport(
+                    "Rejected authenticated \(connection.transportKind.rawValue) direct connection before handshake: " +
+                        "admission limit reached"
+                )
+                connection.backingNWConnection?.cancel()
+                return
+            }
             let session = LoomAuthenticatedSession(
                 connection: connection,
                 role: .receiver,
                 remoteEndpoint: connection.endpoint,
-                serviceClass: connection.transportKind == .tcp ? nil : directDatagramServiceClass
+                serviceClass: connection.transportKind == .tcp ? nil : directDatagramServiceClass,
+                maximumConcurrentStreams: maximumConcurrentStreams,
+                maximumBufferedIncomingBytesPerStream: maximumBufferedIncomingBytesPerStream,
+                maximumBufferedIncomingPayloadsPerStream: maximumBufferedIncomingPayloadsPerStream,
+                maximumBufferedIncomingBytesPerSession: maximumBufferedIncomingBytesPerSession,
+                maximumBufferedIncomingPayloadsPerSession: maximumBufferedIncomingPayloadsPerSession
             )
+            session.setParentIncomingRetainedCapacityBudget(incomingRetainedCapacityBudget)
+            await session.setPreauthenticationOperationLimiter(preauthenticationWorkLimiter)
             let sessionID = session.id.uuidString.lowercased()
             let endpointDescription = connection.endpoint.debugDescription
             LoomLogger.transport(
@@ -457,16 +660,53 @@ public final class LoomNode {
                 serviceName: nil
             )
             do {
-                let hello = try await helloProvider()
+                let preauthenticationDeadline = ContinuousClock.now + handshakeTimeout
+                let hello = try await withLoomThrowingDeadline(
+                    preauthenticationDeadline,
+                    onTimeout: {
+                        connection.backingNWConnection?.cancel()
+                    }
+                ) {
+                    try await preauthenticationWorkLimiter.run {
+                        try await helloProvider()
+                    }
+                }
+                let remainingHandshakeTimeout = max(
+                    .milliseconds(1),
+                    ContinuousClock.now.duration(to: preauthenticationDeadline)
+                )
                 _ = try await session.start(
                     localHello: hello,
                     identityManager: identityManager,
                     trustProvider: self.trustProvider,
-                    encryptionPolicy: encryptionPolicy
+                    encryptionPolicy: encryptionPolicy,
+                    handshakeTimeout: remainingHandshakeTimeout,
+                    trustTimeout: trustTimeout
                 )
+                guard await MainActor.run(body: {
+                    self.authenticatedAdvertisingGeneration == advertisingGeneration
+                }) else {
+                    await preauthenticationAdmission.release()
+                    await session.cancel()
+                    return
+                }
+                guard await activeAuthenticatedSessionAdmission.acquire() else {
+                    await preauthenticationAdmission.release()
+                    LoomLogger.transport(
+                        "Rejected authenticated \(connection.transportKind.rawValue) direct session after handshake: " +
+                            "active session limit reached"
+                    )
+                    await session.cancel()
+                    return
+                }
+                Self.monitorAcceptedSession(
+                    session,
+                    admission: activeAuthenticatedSessionAdmission
+                )
+                await preauthenticationAdmission.release()
                 onSession(session)
-                await Self.keepAcceptedSessionAlive(session)
             } catch {
+                await preauthenticationAdmission.release()
                 Self.logAcceptedAuthenticatedSessionFailure(
                     error,
                     transportKind: connection.transportKind,
@@ -475,8 +715,15 @@ public final class LoomNode {
                 )
                 await session.cancel()
             }
+            }
+            try validateAuthenticatedAdvertisingGeneration(advertisingGeneration)
+        } catch {
+            if isCurrentDirectListener(listener, for: transportKind) {
+                directListeners.removeValue(forKey: transportKind)
+            }
+            await listener.stop()
+            throw error
         }
-        directListeners[transportKind] = listener
         directListenerPorts[transportKind] = port
         return port
     }
@@ -549,6 +796,44 @@ public final class LoomNode {
         }
     }
 
+    private nonisolated static func monitorAcceptedSession(
+        _ session: LoomAuthenticatedSession,
+        admission: LoomPreauthenticationAdmissionController
+    ) {
+        Task {
+            await keepAcceptedSessionAlive(session)
+            await admission.release()
+        }
+    }
+
+    package var activeAuthenticatedSessionCountForTesting: Int {
+        get async {
+            await activeAuthenticatedSessionAdmission.activeCount
+        }
+    }
+
+    package var retainedIncomingBytesForTesting: Int {
+        incomingRetainedCapacityBudget.retainedBytesForTesting
+    }
+
+    package func admitAuthenticatedSessionForTesting(
+        _ session: LoomAuthenticatedSession
+    ) async -> Bool {
+        await activeAuthenticatedSessionAdmission.updateLimit(configuration.maximumActiveAuthenticatedSessions)
+        guard await activeAuthenticatedSessionAdmission.acquire() else { return false }
+        Self.monitorAcceptedSession(
+            session,
+            admission: activeAuthenticatedSessionAdmission
+        )
+        return true
+    }
+
+    private func validateAuthenticatedAdvertisingGeneration(_ generation: UUID) throws {
+        guard authenticatedAdvertisingGeneration == generation else {
+            throw CancellationError()
+        }
+    }
+
     private func makeDirectTransportListener(
         for transportKind: LoomTransportKind
     ) throws -> any LoomDirectTransportListener {
@@ -565,6 +850,14 @@ public final class LoomNode {
         case .quic:
             throw LoomError.protocolError("QUIC transport has been removed.")
         }
+    }
+
+    private func isCurrentDirectListener(
+        _ listener: any LoomDirectTransportListener,
+        for transportKind: LoomTransportKind
+    ) -> Bool {
+        guard let current = directListeners[transportKind] else { return false }
+        return ObjectIdentifier(current as AnyObject) == ObjectIdentifier(listener as AnyObject)
     }
 
     private func startBonjourAdvertising(context: BonjourAdvertisingContext?) async throws -> UInt16 {
@@ -609,6 +902,11 @@ public final class LoomNode {
             await advertiser.stop()
             throw error
         }
+        guard generation == bonjourAdvertisingGeneration,
+              self.advertiser === advertiser else {
+            await advertiser.stop()
+            throw CancellationError()
+        }
         let publishedAdvertisement = Self.advertisement(
             context.advertisement,
             withDirectTransportPorts: directTransportPorts(advertiserTCPPort: port),
@@ -616,6 +914,11 @@ public final class LoomNode {
         )
         self.publishedAdvertisement = publishedAdvertisement
         await advertiser.updateAdvertisement(publishedAdvertisement)
+        guard generation == bonjourAdvertisingGeneration,
+              self.advertiser === advertiser else {
+            await advertiser.stop()
+            throw CancellationError()
+        }
         bonjourAdvertisingRecoveryAttempt = 0
         advertisingDiagnostics = advertisingDiagnostics.updating(
             state: .advertising,
@@ -654,6 +957,7 @@ public final class LoomNode {
     private func scheduleBonjourAdvertisingRecovery(attempt: Int) {
         bonjourAdvertisingRecoveryTask?.cancel()
         let delay = Self.bonjourAdvertisingRecoveryDelay(attempt: attempt)
+        let authenticatedGeneration = authenticatedAdvertisingGeneration
         bonjourAdvertisingRecoveryTask = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: delay)
@@ -661,13 +965,15 @@ public final class LoomNode {
                 return
             }
 
-            await self?.recoverBonjourAdvertising()
+            await self?.recoverBonjourAdvertising(
+                authenticatedGeneration: authenticatedGeneration
+            )
         }
     }
 
-    private func recoverBonjourAdvertising() async {
-        bonjourAdvertisingRecoveryTask = nil
-        guard configuration.enableBonjour,
+    private func recoverBonjourAdvertising(authenticatedGeneration: UUID) async {
+        guard authenticatedGeneration == authenticatedAdvertisingGeneration,
+              configuration.enableBonjour,
               bonjourAdvertisingContext != nil,
               advertisingServiceName != nil else {
             return
@@ -675,8 +981,18 @@ public final class LoomNode {
 
         do {
             _ = try await startBonjourAdvertising(context: bonjourAdvertisingContext)
+            guard authenticatedGeneration == authenticatedAdvertisingGeneration else { return }
+            bonjourAdvertisingRecoveryTask = nil
             LoomLogger.discovery("Bonjour advertiser recovered")
+        } catch is CancellationError {
+            return
         } catch {
+            guard authenticatedGeneration == authenticatedAdvertisingGeneration,
+                  bonjourAdvertisingContext != nil,
+                  advertisingServiceName != nil else {
+                return
+            }
+            bonjourAdvertisingRecoveryTask = nil
             LoomLogger.discovery("Bonjour advertiser recovery failed: \(error)")
             bonjourAdvertisingRecoveryAttempt += 1
             let recoveryAttempt = bonjourAdvertisingRecoveryAttempt
@@ -707,7 +1023,10 @@ public final class LoomNode {
         return ports
     }
 
-    private func startOverlayProbeServer(serviceName: String) async throws {
+    private func startOverlayProbeServer(
+        serviceName: String,
+        advertisingGeneration: UUID
+    ) async throws {
         guard let overlayProbePort = configuration.overlayProbePort else {
             return
         }
@@ -715,7 +1034,11 @@ public final class LoomNode {
         let existingProbeServer = overlayProbeServer
         overlayProbeServer = nil
         await existingProbeServer?.stop()
-        let probeServer = LoomOverlayProbeServer(port: overlayProbePort) {
+        let probeServer = LoomOverlayProbeServer(
+            port: overlayProbePort,
+            requestTimeout: configuration.authenticatedSessionHandshakeTimeout,
+            maxPendingConnections: configuration.maxPendingAuthenticatedSessions
+        ) {
             guard let advertisement = await MainActor.run(body: { self.publishedAdvertisement }) else {
                 throw LoomError.protocolError("Overlay probe advertisement is unavailable.")
             }
@@ -725,8 +1048,17 @@ public final class LoomNode {
                 advertisement: advertisement
             )
         }
-        _ = try await probeServer.start()
         overlayProbeServer = probeServer
+        do {
+            _ = try await probeServer.start()
+            try validateAuthenticatedAdvertisingGeneration(advertisingGeneration)
+        } catch {
+            if overlayProbeServer === probeServer {
+                overlayProbeServer = nil
+            }
+            await probeServer.stop()
+            throw error
+        }
     }
 
     private static func isTransientNetworkDown(_ error: LoomError) -> Bool {

@@ -23,6 +23,13 @@ public protocol LoomTransferSink: Sendable {
     func write(_ data: Data, at offset: UInt64) async throws
     /// Finalizes the accepted object after Loom has written the expected bytes.
     func finalize(offer: LoomTransferOffer, bytesWritten: UInt64) async throws
+    /// Closes resources retained by an accepted transfer after completion, cancellation, or failure.
+    func close() async throws
+}
+
+public extension LoomTransferSink {
+    /// Default no-op close keeps existing custom sinks source compatible.
+    func close() async throws {}
 }
 
 /// URL-backed transfer source that reads from a file on disk without buffering the whole file.
@@ -81,4 +88,8 @@ public actor LoomFileTransferSink: LoomTransferSink {
     }
 
     public func finalize(offer _: LoomTransferOffer, bytesWritten _: UInt64) async throws {}
+
+    public func close() async throws {
+        try handle.close()
+    }
 }

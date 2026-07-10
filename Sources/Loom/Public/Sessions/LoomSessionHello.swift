@@ -140,9 +140,14 @@ public struct LoomSessionHelloRequest: Sendable, Equatable {
     public static let defaultFeatures: [String] = [
         "loom.handshake.v1",
         "loom.session-encryption.v1",
+        LoomSessionHelloRequest.sessionSecurityV2Feature,
         "loom.streams.v1",
         "loom.priority-input.v1",
     ]
+
+    /// Negotiates sequence-based ciphertext replay protection and an encrypted
+    /// receiver challenge before an authenticated session becomes ready.
+    public static let sessionSecurityV2Feature = "loom.session-security.v2"
 }
 
 /// Authenticated session handshake failures.
@@ -193,9 +198,16 @@ package struct LoomValidatedSessionHello {
 
 /// Builds and validates signed Loom session hellos.
 public actor LoomSessionHelloValidator {
+    private static let defaultReplayProtector = LoomReplayProtector()
     private let replayProtector: LoomReplayProtector
 
-    public init(replayProtector: LoomReplayProtector = LoomReplayProtector()) {
+    /// Creates a validator using the process-wide authenticated-session replay window.
+    public init() {
+        replayProtector = Self.defaultReplayProtector
+    }
+
+    /// Creates a validator with an explicitly scoped replay window.
+    public init(replayProtector: LoomReplayProtector) {
         self.replayProtector = replayProtector
     }
 

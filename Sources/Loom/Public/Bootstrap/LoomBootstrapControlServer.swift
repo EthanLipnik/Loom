@@ -35,20 +35,32 @@ public actor LoomBootstrapControlServer {
     private let unlockHandler: UnlockHandler
     private let commandHandler: CommandHandler?
     private let peerAuthorizer: PeerAuthorizer
+    private let requestTimeout: Duration
+    private let maxPendingConnections: Int
+    private let outstandingOperationLimiter: LoomOutstandingOperationLimiter
     private let replayProtector = LoomReplayProtector()
     private var listener: NWListener?
+    private var pendingConnectionCount = 0
 
     public init(
         controlAuthSecret: String,
         onStatus: @escaping StatusHandler,
         onUnlock: @escaping UnlockHandler,
         onCommand: CommandHandler? = nil,
+        requestTimeout: Duration = .seconds(10),
+        maxPendingConnections: Int = 16,
         isPeerAuthorized: @escaping PeerAuthorizer = { _ in true }
     ) {
         self.controlAuthSecret = controlAuthSecret
         statusHandler = onStatus
         unlockHandler = onUnlock
         commandHandler = onCommand
+        self.requestTimeout = max(.milliseconds(1), requestTimeout)
+        let maxPendingConnections = max(1, maxPendingConnections)
+        self.maxPendingConnections = maxPendingConnections
+        outstandingOperationLimiter = LoomOutstandingOperationLimiter(
+            maximumConcurrentOperations: maxPendingConnections
+        )
         peerAuthorizer = isPeerAuthorized
     }
 
@@ -60,7 +72,7 @@ public actor LoomBootstrapControlServer {
         }
         listener.newConnectionHandler = { [weak self] connection in
             Task {
-                await self?.handleConnection(connection)
+                await self?.acceptConnection(connection)
             }
         }
 
@@ -87,6 +99,31 @@ public actor LoomBootstrapControlServer {
     public func stop() {
         listener?.cancel()
         listener = nil
+    }
+
+    private func acceptConnection(_ connection: NWConnection) async {
+        guard pendingConnectionCount < maxPendingConnections else {
+            LoomLogger.log(.bootstrap, "Rejected bootstrap control connection: admission limit reached")
+            connection.cancel()
+            return
+        }
+        pendingConnectionCount += 1
+        do {
+            try await withLoomThrowingTimeout(
+                requestTimeout,
+                onTimeout: {
+                    connection.cancel()
+                }
+            ) { [weak self] in
+                guard let self else { return }
+                try await self.outstandingOperationLimiter.run {
+                    await self.handleConnection(connection)
+                }
+            }
+        } catch {
+            connection.cancel()
+        }
+        pendingConnectionCount = max(0, pendingConnectionCount - 1)
     }
 
     private func handleConnection(_ connection: NWConnection) async {

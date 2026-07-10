@@ -283,10 +283,379 @@ struct LoomTransferEngineTests {
         let incoming = try #require(await incomingTask.value)
         let sink = MemoryTransferSink(initialData: sourceData)
         let invalidOffset = UInt64(sourceData.count + 1)
-        try await incoming.accept(using: sink, resumeOffset: invalidOffset)
+        await #expect(throws: LoomTransferError.self) {
+            try await incoming.accept(using: sink, resumeOffset: invalidOffset)
+        }
 
         let outgoingTerminal = await terminalProgress(from: outgoing.progressEvents)
+        #expect(outgoingTerminal?.state == .cancelled)
+    }
+
+    @Test("Incoming payload bounds are enforced before sink writes")
+    func incomingPayloadBoundsAreEnforcedBeforeWrites() throws {
+        #expect(try LoomTransferEngine.validatedIncomingOffset(
+            offset: 8,
+            payloadCount: 2,
+            offerByteLength: 10
+        ) == 10)
+        #expect(throws: LoomTransferError.self) {
+            try LoomTransferEngine.validatedIncomingOffset(
+                offset: 8,
+                payloadCount: 3,
+                offerByteLength: 10
+            )
+        }
+        #expect(throws: LoomTransferError.self) {
+            try LoomTransferEngine.validatedIncomingOffset(
+                offset: 8,
+                payloadCount: 0,
+                offerByteLength: 10
+            )
+        }
+    }
+
+    @MainActor
+    @Test("Unmatched data streams expire instead of permanently consuming admission")
+    func unmatchedDataStreamsExpire() async throws {
+        let pair = try await makeTransferPair()
+        defer { Task { await pair.stop() } }
+        try await pair.startSessions()
+
+        let receiver = LoomTransferEngine(
+            session: pair.server,
+            configuration: LoomTransferConfiguration(
+                maxPendingDataStreams: 1,
+                pendingDataStreamTimeout: .milliseconds(50)
+            )
+        )
+        await Task.yield()
+        let transferID = UUID()
+        let unmatchedStream = try await pair.client.openStream(
+            label: "loom.transfer.data.\(transferID.uuidString.lowercased())"
+        )
+
+        #expect(await waitUntil { await receiver.pendingDataStreamCount == 1 })
+        #expect(await waitUntil { await receiver.pendingDataStreamCount == 0 })
+        try? await unmatchedStream.close()
+    }
+
+    @MainActor
+    @Test("Transfer sources cannot send beyond their granted or advertised range")
+    func oversizedSourceChunkFailsBeforeSending() async throws {
+        let pair = try await makeTransferPair()
+        defer { Task { await pair.stop() } }
+        try await pair.startSessions()
+
+        let sender = LoomTransferEngine(
+            session: pair.client,
+            configuration: LoomTransferConfiguration(
+                chunkSize: 16 * 1024,
+                perTransferWindowBytes: 16 * 1024,
+                globalWindowBytes: 16 * 1024
+            )
+        )
+        let receiver = LoomTransferEngine(session: pair.server)
+        let source = OversizedTransferSource(advertisedByteLength: 4)
+        let offer = LoomTransferOffer(logicalName: "oversized.bin", byteLength: 4)
+        let incomingTask = Task<LoomIncomingTransfer?, Never> {
+            for await incoming in receiver.incomingTransfers { return incoming }
+            return nil
+        }
+
+        let outgoing = try await sender.offerTransfer(offer, source: source)
+        let incoming = try #require(await incomingTask.value)
+        let sink = MemoryTransferSink()
+        try await incoming.accept(using: sink)
+        let outgoingTerminal = await terminalProgress(from: outgoing.progressEvents)
+
         #expect(outgoingTerminal?.state == .failed)
+        #expect(await sink.data.isEmpty)
+    }
+
+    @MainActor
+    @Test("Incoming offer state is capped and excess offers are declined")
+    func incomingOfferStateIsCapped() async throws {
+        let pair = try await makeTransferPair()
+        defer { Task { await pair.stop() } }
+        try await pair.startSessions()
+
+        let sender = LoomTransferEngine(session: pair.client)
+        let receiver = LoomTransferEngine(
+            session: pair.server,
+            configuration: LoomTransferConfiguration(maxActiveTransfersPerDirection: 1)
+        )
+        let firstData = Data([1])
+        let firstIncomingTask = Task<LoomIncomingTransfer?, Never> {
+            for await incoming in receiver.incomingTransfers { return incoming }
+            return nil
+        }
+        let first = try await sender.offerTransfer(
+            LoomTransferOffer(logicalName: "first.bin", byteLength: 1),
+            source: MemoryTransferSource(data: firstData)
+        )
+        let firstIncoming = try #require(await firstIncomingTask.value)
+
+        let second = try await sender.offerTransfer(
+            LoomTransferOffer(logicalName: "second.bin", byteLength: 1),
+            source: MemoryTransferSource(data: firstData)
+        )
+        let secondTerminal = await terminalProgress(from: second.progressEvents)
+
+        #expect(secondTerminal?.state == .declined)
+        try await firstIncoming.decline()
+        #expect(await terminalProgress(from: first.progressEvents)?.state == .declined)
+    }
+
+    @MainActor
+    @Test("Offer fields and source length are validated before state is retained")
+    func offerFieldsAreBounded() async throws {
+        let pair = try await makeTransferPair()
+        defer { Task { await pair.stop() } }
+        try await pair.startSessions()
+
+        let engine = LoomTransferEngine(
+            session: pair.client,
+            configuration: LoomTransferConfiguration(
+                maxOfferByteLength: 8,
+                maxOfferLogicalNameBytes: 4,
+                maxOfferMetadataEntries: 1,
+                maxOfferMetadataBytes: 4
+            )
+        )
+        let source = MemoryTransferSource(data: Data(repeating: 0, count: 9))
+
+        await #expect(throws: LoomTransferError.self) {
+            try await engine.offerTransfer(
+                LoomTransferOffer(logicalName: "toolong", byteLength: 9),
+                source: source
+            )
+        }
+        await #expect(throws: LoomTransferError.self) {
+            try await engine.offerTransfer(
+                LoomTransferOffer(logicalName: "ok", byteLength: 8),
+                source: source
+            )
+        }
+    }
+
+    @MainActor
+    @Test("Transfer progress coalesces one-byte fragmentation")
+    func transferProgressCoalescesOneByteFragments() async throws {
+        let pair = try await makeTransferPair()
+        defer { Task { await pair.stop() } }
+        try await pair.startSessions()
+
+        let sender = LoomTransferEngine(session: pair.client)
+        let receiver = LoomTransferEngine(session: pair.server)
+        let sourceData = Data(repeating: 0x5A, count: 100)
+        let incomingTask = Task<LoomIncomingTransfer?, Never> {
+            for await incoming in receiver.incomingTransfers { return incoming }
+            return nil
+        }
+        let outgoing = try await sender.offerTransfer(
+            LoomTransferOffer(logicalName: "fragments.bin", byteLength: UInt64(sourceData.count)),
+            source: OneByteTransferSource(data: sourceData)
+        )
+        let incoming = try #require(await incomingTask.value)
+        try await incoming.accept(using: MemoryTransferSink())
+
+        #expect(await waitUntil {
+            let outgoingCount = await sender.outgoingTransferCount
+            let incomingCount = await receiver.incomingTransferCount
+            return outgoingCount == 0 && incomingCount == 0
+        })
+        let outgoingProgress = await allProgress(from: outgoing.progressEvents)
+        let incomingProgress = await allProgress(from: incoming.progressEvents)
+        #expect(outgoingProgress == [LoomTransferProgress(
+            transferID: outgoing.offer.id,
+            logicalName: outgoing.offer.logicalName,
+            bytesTransferred: outgoing.offer.byteLength,
+            totalBytes: outgoing.offer.byteLength,
+            state: .completed
+        )])
+        #expect(incomingProgress.last?.state == .completed)
+        #expect(incomingProgress.count == 1)
+    }
+
+    @MainActor
+    @Test("Unanswered incoming offers expire and are declined")
+    func unansweredIncomingOfferExpires() async throws {
+        let pair = try await makeTransferPair()
+        defer { Task { await pair.stop() } }
+        try await pair.startSessions()
+
+        let sender = LoomTransferEngine(
+            session: pair.client,
+            configuration: LoomTransferConfiguration(offerDecisionTimeout: .seconds(1))
+        )
+        let receiver = LoomTransferEngine(
+            session: pair.server,
+            configuration: LoomTransferConfiguration(offerDecisionTimeout: .milliseconds(50))
+        )
+        let incomingTask = Task<LoomIncomingTransfer?, Never> {
+            for await incoming in receiver.incomingTransfers { return incoming }
+            return nil
+        }
+        let outgoing = try await sender.offerTransfer(
+            LoomTransferOffer(logicalName: "undecided.bin", byteLength: 1),
+            source: MemoryTransferSource(data: Data([1]))
+        )
+        let incoming = try #require(await incomingTask.value)
+
+        #expect(await terminalProgress(from: incoming.progressEvents)?.state == .declined)
+        #expect(await terminalProgress(from: outgoing.progressEvents)?.state == .declined)
+        #expect(await receiver.incomingTransferCount == 0)
+        #expect(await sender.outgoingTransferCount == 0)
+    }
+
+    @MainActor
+    @Test("Accepted transfers time out and close their sink")
+    func acceptedTransferTimeoutClosesSink() async throws {
+        let pair = try await makeTransferPair()
+        defer { Task { await pair.stop() } }
+        try await pair.startSessions()
+
+        let configuration = LoomTransferConfiguration(
+            offerDecisionTimeout: .seconds(1),
+            activeTransferTimeout: .milliseconds(75)
+        )
+        let sender = LoomTransferEngine(session: pair.client, configuration: configuration)
+        let receiver = LoomTransferEngine(session: pair.server, configuration: configuration)
+        let incomingTask = Task<LoomIncomingTransfer?, Never> {
+            for await incoming in receiver.incomingTransfers { return incoming }
+            return nil
+        }
+        let outgoing = try await sender.offerTransfer(
+            LoomTransferOffer(logicalName: "stalled.bin", byteLength: 1),
+            source: HangingTransferSource()
+        )
+        let incoming = try #require(await incomingTask.value)
+        let sink = CloseRecordingTransferSink()
+        try await incoming.accept(using: sink)
+
+        #expect(await terminalProgress(from: incoming.progressEvents)?.state == .failed)
+        let outgoingTerminal = await terminalProgress(from: outgoing.progressEvents)
+        #expect(outgoingTerminal?.state == .failed || outgoingTerminal?.state == .cancelled)
+        #expect(await sink.didClose)
+        #expect(await receiver.incomingTransferCount == 0)
+        #expect(await sender.outgoingTransferCount == 0)
+    }
+
+    @MainActor
+    @Test("Duplicate inbound control streams do not replace the active stream")
+    func duplicateInboundControlStreamIsRejected() async throws {
+        let pair = try await makeTransferPair()
+        defer { Task { await pair.stop() } }
+        try await pair.startSessions()
+
+        let sender = LoomTransferEngine(session: pair.client)
+        let receiver = LoomTransferEngine(session: pair.server)
+        let incomingTask = Task<[LoomIncomingTransfer], Never> {
+            var offers: [LoomIncomingTransfer] = []
+            for await incoming in receiver.incomingTransfers {
+                offers.append(incoming)
+                if offers.count == 2 { return offers }
+            }
+            return offers
+        }
+        let first = try await sender.offerTransfer(
+            LoomTransferOffer(logicalName: "first-control.bin", byteLength: 1),
+            source: MemoryTransferSource(data: Data([1]))
+        )
+        #expect(await waitUntil { await receiver.incomingTransferCount == 1 })
+
+        let duplicate = try await pair.client.openStream(label: "loom.transfer.control.v1")
+        try? await Task.sleep(for: .milliseconds(20))
+        let second = try await sender.offerTransfer(
+            LoomTransferOffer(logicalName: "second-control.bin", byteLength: 1),
+            source: MemoryTransferSource(data: Data([2]))
+        )
+        let incomingOffers = await incomingTask.value
+        #expect(incomingOffers.count == 2)
+        for incoming in incomingOffers {
+            try await incoming.decline()
+        }
+        #expect(await terminalProgress(from: first.progressEvents)?.state == .declined)
+        #expect(await terminalProgress(from: second.progressEvents)?.state == .declined)
+        try? await duplicate.close()
+    }
+
+    @MainActor
+    @Test("Duplicate accept messages cannot restart an active outgoing transfer")
+    func duplicateAcceptDoesNotRestartOutgoingTransfer() async throws {
+        let pair = try await makeTransferPair()
+        defer { Task { await pair.stop() } }
+        try await pair.startSessions()
+
+        let sender = LoomTransferEngine(session: pair.client)
+        let receiver = LoomTransferEngine(session: pair.server)
+        let incomingTask = Task<LoomIncomingTransfer?, Never> {
+            for await incoming in receiver.incomingTransfers { return incoming }
+            return nil
+        }
+        let outgoing = try await sender.offerTransfer(
+            LoomTransferOffer(logicalName: "duplicate-accept.bin", byteLength: 1),
+            source: HangingTransferSource()
+        )
+        _ = try #require(await incomingTask.value)
+
+        try await sender.startOutgoingTransferForTesting(id: outgoing.offer.id, resumeOffset: 0)
+        let activeStreamCount = await pair.client.activeStreamCountForTesting
+        await #expect(throws: LoomTransferError.self) {
+            try await sender.startOutgoingTransferForTesting(id: outgoing.offer.id, resumeOffset: 0)
+        }
+
+        #expect(await pair.client.activeStreamCountForTesting == activeStreamCount)
+        #expect(await sender.outgoingTransferCount == 1)
+        await outgoing.cancel()
+    }
+
+    @MainActor
+    @Test("Transfer control payloads are bounded before decoding or sending")
+    func transferControlPayloadsAreBounded() async throws {
+        let pair = try await makeTransferPair()
+        defer { Task { await pair.stop() } }
+        try await pair.startSessions()
+
+        let engine = LoomTransferEngine(
+            session: pair.client,
+            configuration: LoomTransferConfiguration(maxControlMessageBytes: 16)
+        )
+        try await engine.validateControlPayloadSizeForTesting(Data(repeating: 0, count: 16))
+        await #expect(throws: LoomTransferError.self) {
+            try await engine.validateControlPayloadSizeForTesting(Data(repeating: 0, count: 17))
+        }
+        await #expect(throws: LoomTransferError.self) {
+            try await engine.offerTransfer(
+                LoomTransferOffer(logicalName: "bounded.bin", byteLength: 1),
+                source: MemoryTransferSource(data: Data([1]))
+            )
+        }
+        #expect(await engine.outgoingTransferCount == 0)
+    }
+
+    @MainActor
+    @Test("Terminated incoming offer streams clean up and decline new offers")
+    func terminatedIncomingOfferStreamDeclinesOffer() async throws {
+        let pair = try await makeTransferPair()
+        defer { Task { await pair.stop() } }
+        try await pair.startSessions()
+
+        let sender = LoomTransferEngine(session: pair.client)
+        let receiver = LoomTransferEngine(session: pair.server)
+        let consumer = Task {
+            for await _ in receiver.incomingTransfers {}
+        }
+        await Task.yield()
+        consumer.cancel()
+        await consumer.value
+
+        let outgoing = try await sender.offerTransfer(
+            LoomTransferOffer(logicalName: "terminated-offers.bin", byteLength: 1),
+            source: MemoryTransferSource(data: Data([1]))
+        )
+        #expect(await terminalProgress(from: outgoing.progressEvents)?.state == .declined)
+        #expect(await receiver.incomingTransferCount == 0)
     }
 
     private func waitUntil(
@@ -428,6 +797,16 @@ private func terminalProgress(
     return last
 }
 
+private func allProgress(
+    from stream: AsyncStream<LoomTransferProgress>
+) async -> [LoomTransferProgress] {
+    var events: [LoomTransferProgress] = []
+    for await progress in stream {
+        events.append(progress)
+    }
+    return events
+}
+
 private struct MemoryTransferSource: LoomTransferSource {
     let data: Data
 
@@ -468,6 +847,38 @@ private struct DelayedTransferSource: LoomTransferSource {
     }
 }
 
+private struct OneByteTransferSource: LoomTransferSource {
+    let data: Data
+
+    var byteLength: UInt64 {
+        UInt64(data.count)
+    }
+
+    func read(offset: UInt64, maxLength _: Int) async throws -> Data {
+        guard offset < UInt64(data.count) else { return Data() }
+        return Data([data[Int(offset)]])
+    }
+}
+
+private struct HangingTransferSource: LoomTransferSource {
+    let byteLength: UInt64 = 1
+
+    func read(offset _: UInt64, maxLength _: Int) async throws -> Data {
+        try await Task.sleep(for: .seconds(30))
+        return Data([1])
+    }
+}
+
+private struct OversizedTransferSource: LoomTransferSource {
+    let advertisedByteLength: UInt64
+
+    var byteLength: UInt64 { advertisedByteLength }
+
+    func read(offset _: UInt64, maxLength: Int) async throws -> Data {
+        Data(repeating: 0xA5, count: maxLength + 1)
+    }
+}
+
 private actor MemoryTransferSink: LoomTransferSink {
     private(set) var data: Data
 
@@ -497,6 +908,20 @@ private actor MemoryTransferSink: LoomTransferSink {
     }
 
     func finalize(offer _: LoomTransferOffer, bytesWritten _: UInt64) async throws {}
+}
+
+private actor CloseRecordingTransferSink: LoomTransferSink {
+    private(set) var didClose = false
+
+    func truncate(to _: UInt64) async throws {}
+
+    func write(_: Data, at _: UInt64) async throws {}
+
+    func finalize(offer _: LoomTransferOffer, bytesWritten _: UInt64) async throws {}
+
+    func close() async throws {
+        didClose = true
+    }
 }
 
 private actor TransferAsyncBox<Value: Sendable> {

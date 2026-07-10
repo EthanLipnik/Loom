@@ -58,4 +58,26 @@ struct LoomReplayProtectorTests {
         #expect(await protector.validate(timestampMs: now, nonce: "n4") == true)
         #expect(await protector.validate(timestampMs: now, nonce: "n1") == true)
     }
+
+    @Test("Replay protector rejects extreme timestamps without arithmetic traps")
+    func replayProtectorRejectsExtremeTimestamps() async {
+        let protector = LoomReplayProtector()
+
+        #expect(await protector.validate(timestampMs: .min, nonce: "minimum") == false)
+        #expect(await protector.validate(timestampMs: .max, nonce: "maximum") == false)
+    }
+
+    @Test("Replay protector clamps invalid negative configuration")
+    func replayProtectorClampsNegativeConfiguration() async {
+        let protector = LoomReplayProtector(
+            allowedClockSkewMs: 60_000,
+            maxEntries: -1,
+            maxNonceLength: -1
+        )
+        let now = Int64(Date().timeIntervalSince1970 * 1000)
+
+        #expect(await protector.validate(timestampMs: now, nonce: "first-valid") == true)
+        #expect(await protector.validate(timestampMs: now, nonce: "second-valid") == true)
+        #expect(await protector.validate(timestampMs: now, nonce: "first-valid") == true)
+    }
 }

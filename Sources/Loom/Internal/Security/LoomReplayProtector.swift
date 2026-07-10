@@ -21,8 +21,8 @@ public actor LoomReplayProtector {
         maxEntries: Int = 4_096,
         maxNonceLength: Int = LoomMessageLimits.maxReplayNonceLength
     ) {
-        self.allowedClockSkewMs = allowedClockSkewMs
-        self.maxEntries = maxEntries
+        self.allowedClockSkewMs = max(0, allowedClockSkewMs)
+        self.maxEntries = max(1, maxEntries)
         self.maxNonceLength = max(16, maxNonceLength)
     }
 
@@ -33,8 +33,7 @@ public actor LoomReplayProtector {
     public func canAccept(timestampMs: Int64, nonce: String) -> Bool {
         if nonce.isEmpty || nonce.utf8.count > maxNonceLength { return false }
         let nowMs = Self.currentTimestampMs()
-        let delta = nowMs - timestampMs
-        if delta > allowedClockSkewMs || delta < -allowedClockSkewMs { return false }
+        guard isTimestampWithinAllowedSkew(timestampMs, nowMs: nowMs) else { return false }
         if nonces[nonce] != nil { return false }
         prune(nowMs: nowMs)
         return true
@@ -43,8 +42,7 @@ public actor LoomReplayProtector {
     public func record(timestampMs: Int64, nonce: String) -> Bool {
         if nonce.isEmpty || nonce.utf8.count > maxNonceLength { return false }
         let nowMs = Self.currentTimestampMs()
-        let delta = nowMs - timestampMs
-        if delta > allowedClockSkewMs || delta < -allowedClockSkewMs { return false }
+        guard isTimestampWithinAllowedSkew(timestampMs, nowMs: nowMs) else { return false }
         if nonces[nonce] != nil { return false }
         nonces[nonce] = timestampMs
         nonceOrder.append(nonce)
@@ -59,7 +57,10 @@ public actor LoomReplayProtector {
     }
 
     private func prune(nowMs: Int64) {
-        let cutoff = nowMs - allowedClockSkewMs * 2
+        let doubledSkew = allowedClockSkewMs.multipliedReportingOverflow(by: 2)
+        let retentionWindow = doubledSkew.overflow ? Int64.max : doubledSkew.partialValue
+        let cutoffResult = nowMs.subtractingReportingOverflow(retentionWindow)
+        let cutoff = cutoffResult.overflow ? Int64.min : cutoffResult.partialValue
 
         if nonces.isEmpty { return }
         var keptOrder: [String] = []
@@ -74,6 +75,13 @@ public actor LoomReplayProtector {
         nonceOrder = keptOrder
 
         enforceBoundedSize()
+    }
+
+    private func isTimestampWithinAllowedSkew(_ timestampMs: Int64, nowMs: Int64) -> Bool {
+        let delta = nowMs.subtractingReportingOverflow(timestampMs)
+        guard !delta.overflow else { return false }
+        return delta.partialValue <= allowedClockSkewMs &&
+            delta.partialValue >= -allowedClockSkewMs
     }
 
     private func enforceBoundedSize() {

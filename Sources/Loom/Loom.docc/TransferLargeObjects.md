@@ -11,7 +11,7 @@ The important boundary is unchanged:
 
 Use ``LoomNode/startAuthenticatedAdvertising(serviceName:helloProvider:onSession:)`` and ``LoomNode/connect(to:using:hello:queue:)`` so both peers negotiate an encrypted authenticated session before any transfer begins.
 
-`LoomAuthenticatedSession` requires the `loom.session-encryption.v1` feature and encrypts post-handshake traffic automatically.
+`LoomAuthenticatedSession` requires the `loom.session-encryption.v1` feature and encrypts post-handshake traffic automatically. When both endpoints advertise `loom.session-security.v2`, the session also confirms the derived keys with a receiver challenge and rejects replayed encrypted frames. The feature is negotiated from the signed hello, so peers that do not advertise it continue using the released v1 wire format.
 
 ## Create a transfer engine
 

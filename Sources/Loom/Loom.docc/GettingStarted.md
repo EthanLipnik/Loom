@@ -164,7 +164,7 @@ let ports = try await node.startAuthenticatedAdvertising(
 print("Direct transports:", ports)
 ```
 
-`LoomAuthenticatedSession` is the public session boundary for TCP, UDP, and QUIC. It requires the `loom.session-encryption.v1` feature and encrypts post-handshake control and data frames automatically. `startAuthenticatedAdvertising` republishes Loom-owned direct transport hints so nearby peers do not need to carry direct listener ports in app metadata.
+`LoomAuthenticatedSession` is the public session boundary for TCP, UDP, and QUIC. It requires the `loom.session-encryption.v1` feature and encrypts post-handshake control and data frames automatically. Current peers also advertise `loom.session-security.v2`. When both endpoints negotiate that signed feature, Loom completes an encrypted receiver-challenge exchange before the session becomes ready and uses bounded sequence windows to reject replayed ciphertext while still accepting ordinary out-of-order datagrams. If either endpoint does not advertise v2, Loom preserves the released v1 handshake and ciphertext format. `startAuthenticatedAdvertising` republishes Loom-owned direct transport hints so nearby peers do not need to carry direct listener ports in app metadata.
 
 ## Discover peers
 

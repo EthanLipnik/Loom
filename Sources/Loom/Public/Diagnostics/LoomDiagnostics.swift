@@ -189,7 +189,10 @@ private enum LoomDiagnosticsDispatchItem: Sendable {
 }
 
 private let diagnosticsSinkRegistryState = LoomDiagnosticsSinkRegistryState()
-private let diagnosticsDispatchQueue = LoomAsyncDispatchQueue<LoomDiagnosticsDispatchItem>(priority: .utility) { item in
+private let diagnosticsDispatchQueue = LoomAsyncDispatchQueue<LoomDiagnosticsDispatchItem>(
+    priority: .utility,
+    bufferingPolicy: .bufferingNewest(1_024)
+) { item in
     switch item {
     case let .log(event):
         await LoomDiagnosticsStore.shared.record(log: event)

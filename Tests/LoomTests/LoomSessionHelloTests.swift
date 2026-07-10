@@ -83,6 +83,32 @@ struct LoomSessionHelloTests {
     }
 
     @MainActor
+    @Test("Fresh default validators share replay state across sessions")
+    func defaultValidatorsRejectCrossSessionReplay() async throws {
+        let identityManager = LoomIdentityManager.inMemory()
+        let hello = try LoomSessionHelloValidator.makeSignedHello(
+            from: LoomSessionHelloRequest(
+                deviceID: UUID(),
+                deviceName: "Cross-session Replay Test",
+                deviceType: .mac,
+                advertisement: LoomPeerAdvertisement()
+            ),
+            identityManager: identityManager
+        )
+
+        _ = try await LoomSessionHelloValidator().validate(
+            hello,
+            endpointDescription: "127.0.0.1:1"
+        )
+        await #expect(throws: LoomSessionHelloError.replayRejected) {
+            try await LoomSessionHelloValidator().validate(
+                hello,
+                endpointDescription: "127.0.0.1:2"
+            )
+        }
+    }
+
+    @MainActor
     @Test("Signed hellos preserve and validate unknown device-type spellings")
     func signedHelloPreservesUnknownDeviceTypeSpellings() async throws {
         let rootDeviceTypeRawValue = "future-client"

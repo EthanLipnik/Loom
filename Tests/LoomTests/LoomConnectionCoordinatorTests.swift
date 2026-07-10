@@ -153,13 +153,13 @@ struct LoomConnectionCoordinatorTests {
                     switch target.transportKind {
                     case .udp:
                         try await Task.sleep(for: .milliseconds(10))
-                        return makeCoordinatorTestSession(transportKind: .udp)
+                        return try makeCoordinatorTestSession(transportKind: .udp)
                     case .quic:
                         try await Task.sleep(for: .milliseconds(250))
-                        return makeCoordinatorTestSession(transportKind: .quic)
+                        return try makeCoordinatorTestSession(transportKind: .quic)
                     case .tcp:
                         try await Task.sleep(for: .milliseconds(25))
-                        return makeCoordinatorTestSession(transportKind: .tcp)
+                        return try makeCoordinatorTestSession(transportKind: .tcp)
                     }
                 }
             )
@@ -194,13 +194,13 @@ struct LoomConnectionCoordinatorTests {
                 switch target.transportKind {
                 case .udp:
                     try await Task.sleep(for: .milliseconds(2))
-                    return makeCoordinatorTestSession(transportKind: .udp)
+                    return try makeCoordinatorTestSession(transportKind: .udp)
                 case .quic:
                     try await Task.sleep(for: .milliseconds(50))
-                    return makeCoordinatorTestSession(transportKind: .quic)
+                    return try makeCoordinatorTestSession(transportKind: .quic)
                 case .tcp:
                     try await Task.sleep(for: .milliseconds(5))
-                    return makeCoordinatorTestSession(transportKind: .tcp)
+                    return try makeCoordinatorTestSession(transportKind: .tcp)
                 }
             }
         )
@@ -210,8 +210,8 @@ struct LoomConnectionCoordinatorTests {
             localPeer: makeCoordinatorTestPeer()
         )
 
-        #expect(await session.transportKind == .quic)
-        #expect(await attemptRecorder.attempts() == [.quic])
+        #expect(await session.transportKind == .tcp)
+        #expect(await attemptRecorder.attempts() == [.quic, .tcp])
     }
 
     @MainActor
@@ -321,7 +321,7 @@ struct LoomConnectionCoordinatorTests {
                 signalingClient: signalingClient,
                 connector: { target, _ in
                     await attemptRecorder.record(target.transportKind, source: target.source)
-                    return makeCoordinatorTestSession(transportKind: target.transportKind)
+                    return try makeCoordinatorTestSession(transportKind: target.transportKind)
                 }
             )
 
@@ -412,22 +412,9 @@ private func makeCoordinatorTestHello() -> LoomSessionHelloRequest {
 
 private func makeCoordinatorTestSession(
     transportKind: LoomTransportKind
-) -> LoomAuthenticatedSession {
+) throws -> LoomAuthenticatedSession {
     if transportKind == .quic {
-        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: 9)!)
-        let connection = try! LoomQUICTransportFactory.makeConnection(
-            to: endpoint,
-            enablePeerToPeer: false,
-            requiredInterface: nil,
-            requiredInterfaceType: nil,
-            requiredLocalPort: nil,
-            quicALPN: ["loom"],
-            serviceClass: .interactiveVideo
-        )
-        return LoomAuthenticatedSession(
-            connection: .quic(connection),
-            role: .initiator
-        )
+        throw LoomError.protocolError("QUIC transport has been removed.")
     }
 
     let connection = NWConnection(

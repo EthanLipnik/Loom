@@ -23,6 +23,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
 
     private var nextSequence: UInt32 = 0
     private var pendingAcks: [UInt32: PendingPacket] = [:]
+    private var pendingAckByteCount = 0
     private var retryTimer: DispatchSourceTimer?
     private let sendQueue = DispatchQueue(label: "loom.reliable.send", qos: .userInteractive)
 
@@ -32,23 +33,27 @@ package actor LoomReliableChannel: LoomSessionTransport {
     private var receivedBeyondContiguous: Set<UInt32> = []
     private var hasReceivedFirstPacket = false
     private var fragments: [FragmentKey: FragmentAssembly] = [:]
+    private var pendingFragmentCount = 0
+    private var pendingFragmentByteCount = 0
+    private let fragmentBudget: LoomIncomingRetainedCapacityBudget
     private var needsAck = false
     private var lastInboundPacketAt: CFAbsoluteTime?
     private var lastDedicatedAckSentAt: CFAbsoluteTime?
 
     // MARK: - Delivery
 
-    private var deliveryContinuation: AsyncStream<Data>.Continuation?
+    private let orderedDeliveryBudget: LoomIncomingRetainedCapacityBudget
+    private let deliveryBuffer: LoomBoundedIncomingDataBuffer
     private let deliveryStream: AsyncStream<Data>
 
-    private var handshakeDeliveryContinuation: AsyncStream<Data>.Continuation?
+    private let handshakeDeliveryBuffer: LoomBoundedIncomingDataBuffer
     private let handshakeDeliveryStream: AsyncStream<Data>
     private var routesReliablePacketsToHandshake = true
 
-    private var unreliableDeliveryContinuation: AsyncStream<Data>.Continuation?
+    private let unreliableDeliveryBuffer: LoomBoundedIncomingDataBuffer
     private let unreliableDeliveryStream: AsyncStream<Data>
 
-    private var priorityUnreliableDeliveryContinuation: AsyncStream<Data>.Continuation?
+    private let priorityUnreliableDeliveryBuffer: LoomBoundedIncomingDataBuffer
     private let priorityUnreliableDeliveryStream: AsyncStream<Data>
 
     // MARK: - Ordered Delivery
@@ -73,6 +78,11 @@ package actor LoomReliableChannel: LoomSessionTransport {
     private let absolutePendingAckTimeout: Double = 30.0
     private let maxPendingFragmentAssemblies = 64
     private let maxPendingFragmentBytes = LoomMessageLimits.maxReceiveBufferBytes
+    private let maxPendingFragments = 65_536
+    private let maxPendingDeliveryMessages = LoomMessageLimits.maxBufferedPayloadsPerStream
+    private let maxPendingDeliveryBytes = LoomMessageLimits.maxReceiveBufferBytes
+    private let maxPendingReliablePackets: Int
+    private let maxPendingReliableBytes: Int
 
     // MARK: - Lifecycle
 
@@ -81,30 +91,69 @@ package actor LoomReliableChannel: LoomSessionTransport {
     private var isClosed = false
     private var terminalFailure: LoomConnectionFailure?
 
-    package init(connection: NWConnection) {
+    package init(
+        connection: NWConnection,
+        retainedCapacityBudget: LoomIncomingRetainedCapacityBudget? = nil,
+        maximumPendingReliablePackets: Int = 8_192,
+        maximumPendingReliableBytes: Int = 16 * 1024 * 1024
+    ) {
         self.connection = connection
-        let (stream, continuation) = AsyncStream.makeStream(of: Data.self)
-        deliveryStream = stream
-        deliveryContinuation = continuation
-        let (hStream, hContinuation) = AsyncStream.makeStream(of: Data.self)
-        handshakeDeliveryStream = hStream
-        handshakeDeliveryContinuation = hContinuation
-        let (uStream, uContinuation) = AsyncStream.makeStream(of: Data.self)
-        unreliableDeliveryStream = uStream
-        unreliableDeliveryContinuation = uContinuation
-        let (priorityStream, priorityContinuation) = AsyncStream.makeStream(of: Data.self)
-        priorityUnreliableDeliveryStream = priorityStream
-        priorityUnreliableDeliveryContinuation = priorityContinuation
+        maxPendingReliablePackets = max(1, maximumPendingReliablePackets)
+        maxPendingReliableBytes = max(1, maximumPendingReliableBytes)
+        fragmentBudget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: LoomMessageLimits.maxReceiveBufferBytes,
+            maximumPayloadCount: 64,
+            maximumBatchCount: 64,
+            parent: retainedCapacityBudget
+        )
+        let orderedDeliveryBudget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: LoomMessageLimits.maxReceiveBufferBytes,
+            maximumPayloadCount: LoomMessageLimits.maxBufferedPayloadsPerStream,
+            maximumBatchCount: LoomMessageLimits.maxBufferedPayloadsPerStream,
+            parent: retainedCapacityBudget
+        )
+        self.orderedDeliveryBudget = orderedDeliveryBudget
+        let deliveryBuffer = LoomBoundedIncomingDataBuffer(
+            maximumBufferedBytes: LoomMessageLimits.maxReceiveBufferBytes,
+            maximumBufferedItems: LoomMessageLimits.maxBufferedPayloadsPerStream,
+            retainedCapacityBudget: orderedDeliveryBudget
+        )
+        self.deliveryBuffer = deliveryBuffer
+        deliveryStream = deliveryBuffer.makeStream()
+
+        let handshakeDeliveryBuffer = Self.makeDeliveryBuffer(
+            maximumBytes: LoomMessageLimits.maxHelloFrameBytes,
+            maximumPayloads: 8,
+            parent: retainedCapacityBudget
+        )
+        self.handshakeDeliveryBuffer = handshakeDeliveryBuffer
+        handshakeDeliveryStream = handshakeDeliveryBuffer.makeStream()
+
+        let unreliableDeliveryBuffer = Self.makeDeliveryBuffer(
+            maximumBytes: 16 * 1024 * 1024,
+            maximumPayloads: LoomMessageLimits.maxBufferedPayloadsPerStream,
+            parent: retainedCapacityBudget
+        )
+        self.unreliableDeliveryBuffer = unreliableDeliveryBuffer
+        unreliableDeliveryStream = unreliableDeliveryBuffer.makeStream()
+
+        let priorityUnreliableDeliveryBuffer = Self.makeDeliveryBuffer(
+            maximumBytes: 8 * 1024 * 1024,
+            maximumPayloads: LoomMessageLimits.maxBufferedPayloadsPerStream,
+            parent: retainedCapacityBudget
+        )
+        self.priorityUnreliableDeliveryBuffer = priorityUnreliableDeliveryBuffer
+        priorityUnreliableDeliveryStream = priorityUnreliableDeliveryBuffer.makeStream()
     }
 
     deinit {
         retryTimer?.cancel()
         receiveTask?.cancel()
         ackTask?.cancel()
-        deliveryContinuation?.finish()
-        handshakeDeliveryContinuation?.finish()
-        unreliableDeliveryContinuation?.finish()
-        priorityUnreliableDeliveryContinuation?.finish()
+        deliveryBuffer.abort()
+        handshakeDeliveryBuffer.abort()
+        unreliableDeliveryBuffer.abort()
+        priorityUnreliableDeliveryBuffer.abort()
     }
 
     // MARK: - LoomSessionTransport
@@ -180,7 +229,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
                 payloadLength: UInt16(data.count)
             )
             let packet = header.serialize() + data
-            trackPending(seq: seq, packet: packet)
+            try trackPending(seq: seq, packet: packet)
             try await sendRaw(packet)
         } else {
             let totalFragments = (data.count + fragmentPayload - 1) / fragmentPayload
@@ -211,7 +260,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
                     payloadLength: UInt16(chunk.count)
                 )
                 let packet = header.serialize() + chunk
-                trackPending(seq: seq, packet: packet)
+                try trackPending(seq: seq, packet: packet)
                 try await sendRaw(packet)
 
                 // Yield after each batch to let the kernel drain its send buffer.
@@ -263,6 +312,9 @@ package actor LoomReliableChannel: LoomSessionTransport {
     /// never retransmitted.
     package func sendUnreliable(_ data: Data) async throws {
         guard !isClosed else { return }
+        guard let payloadLength = UInt16(exactly: data.count) else {
+            throw LoomError.protocolError("Unreliable UDP payload exceeds the wire length limit.")
+        }
 
         let header = LoomReliablePacketHeader(
             flags: [],
@@ -271,7 +323,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
             ackBitmap: currentAckBitmap(),
             fragmentIndex: 0,
             fragmentCount: 1,
-            payloadLength: UInt16(data.count)
+            payloadLength: payloadLength
         )
         try await sendRaw(header.serialize() + data)
     }
@@ -286,6 +338,10 @@ package actor LoomReliableChannel: LoomSessionTransport {
             onComplete(LoomError.protocolError("Reliable channel is closed."))
             return
         }
+        guard let payloadLength = UInt16(exactly: data.count) else {
+            onComplete(LoomError.protocolError("Unreliable UDP payload exceeds the wire length limit."))
+            return
+        }
 
         let header = LoomReliablePacketHeader(
             flags: [],
@@ -294,7 +350,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
             ackBitmap: currentAckBitmap(),
             fragmentIndex: 0,
             fragmentCount: 1,
-            payloadLength: UInt16(data.count)
+            payloadLength: payloadLength
         )
         let packet = header.serialize() + data
         queuedUnreliableSender(for: profile).enqueue(packet, options: options) { error in
@@ -354,6 +410,13 @@ package actor LoomReliableChannel: LoomSessionTransport {
         )
     }
 
+    package func prepareUnreliableReceive(maxBytes: Int) async throws {
+        guard maxBytes > 0 else {
+            throw LoomError.protocolError("Invalid unreliable receive size limit.")
+        }
+        routesReliablePacketsToHandshake = false
+    }
+
     package func cancelPendingUnreliableSends() async {
         for sender in queuedUnreliableSenders.values {
             sender.close()
@@ -374,15 +437,32 @@ package actor LoomReliableChannel: LoomSessionTransport {
         retryTimer?.cancel()
         receiveTask?.cancel()
         ackTask?.cancel()
-        deliveryContinuation?.finish()
-        deliveryContinuation = nil
-        handshakeDeliveryContinuation?.finish()
-        handshakeDeliveryContinuation = nil
-        unreliableDeliveryContinuation?.finish()
-        unreliableDeliveryContinuation = nil
-        priorityUnreliableDeliveryContinuation?.finish()
-        priorityUnreliableDeliveryContinuation = nil
+        pendingAcks.removeAll(keepingCapacity: false)
+        pendingAckByteCount = 0
+        discardRetainedIncomingState()
+        deliveryBuffer.abort()
+        handshakeDeliveryBuffer.abort()
+        unreliableDeliveryBuffer.abort()
+        priorityUnreliableDeliveryBuffer.abort()
         connection.cancel()
+    }
+
+    private nonisolated static func makeDeliveryBuffer(
+        maximumBytes: Int,
+        maximumPayloads: Int,
+        parent: LoomIncomingRetainedCapacityBudget?
+    ) -> LoomBoundedIncomingDataBuffer {
+        let budget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: maximumBytes,
+            maximumPayloadCount: maximumPayloads,
+            maximumBatchCount: maximumPayloads,
+            parent: parent
+        )
+        return LoomBoundedIncomingDataBuffer(
+            maximumBufferedBytes: maximumBytes,
+            maximumBufferedItems: maximumPayloads,
+            retainedCapacityBudget: budget
+        )
     }
 
     private func queuedUnreliableSender(
@@ -436,18 +516,24 @@ package actor LoomReliableChannel: LoomSessionTransport {
         return bitmap
     }
 
-    private func recordReceivedSequence(_ seq: UInt32) {
+    private enum ReceivedSequenceResult {
+        case new
+        case duplicate
+        case rejected
+    }
+
+    private func recordReceivedSequence(_ seq: UInt32) -> ReceivedSequenceResult {
         if !hasReceivedFirstPacket {
             hasReceivedFirstPacket = true
             highestContiguousReceived = seq
-            return
+            return .new
         }
 
         let diff = Int32(bitPattern: seq &- highestContiguousReceived)
 
         if diff <= 0 {
             // Already received or old — ignore
-            return
+            return .duplicate
         }
 
         if diff == 1 {
@@ -457,26 +543,34 @@ package actor LoomReliableChannel: LoomSessionTransport {
                 highestContiguousReceived &+= 1
             }
         } else {
-            receivedBeyondContiguous.insert(seq)
-            // Prune entries too far behind
-            let pruneThreshold = highestContiguousReceived &+ 64
-            receivedBeyondContiguous = receivedBeyondContiguous.filter { s in
-                let d = Int32(bitPattern: s &- highestContiguousReceived)
-                return d > 0 && s &- highestContiguousReceived <= 64
+            let maximumGap = UInt32(
+                maxFragmentCount(routeToHandshake: false) + maxPendingDeliveryMessages
+            )
+            guard UInt32(diff) <= maximumGap else {
+                close(
+                    with: LoomConnectionFailure(
+                        reason: .other,
+                        detail: "Reliable UDP receive sequence exceeded the bounded reordering window."
+                    )
+                )
+                return .rejected
             }
-            _ = pruneThreshold
+            guard receivedBeyondContiguous.insert(seq).inserted else {
+                return .duplicate
+            }
         }
+        return .new
     }
 
     private func processIncomingAck(ackSequence: UInt32, ackBitmap: UInt32) {
         // Remove acked packets
-        pendingAcks.removeValue(forKey: ackSequence)
+        _ = removePendingAck(sequence: ackSequence)
 
         // Process bitmap — bit N means (ackSequence + N + 1) is also acked
         for bit in 0..<32 {
             if ackBitmap & (1 << bit) != 0 {
                 let ackedSeq = ackSequence &+ UInt32(bit) &+ 1
-                if let pending = pendingAcks.removeValue(forKey: ackedSeq) {
+                if let pending = removePendingAck(sequence: ackedSeq) {
                     updateRTT(sample: CFAbsoluteTimeGetCurrent() - pending.sentAt)
                 }
             }
@@ -488,7 +582,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
             return diff >= 0
         }
         for key in toRemove {
-            if let pending = pendingAcks.removeValue(forKey: key) {
+            if let pending = removePendingAck(sequence: key) {
                 updateRTT(sample: CFAbsoluteTimeGetCurrent() - pending.sentAt)
             }
         }
@@ -514,7 +608,20 @@ package actor LoomReliableChannel: LoomSessionTransport {
         var hasLoggedTimeoutDeferral: Bool
     }
 
-    private func trackPending(seq: UInt32, packet: Data) {
+    private func trackPending(seq: UInt32, packet: Data) throws {
+        guard pendingAcks[seq] == nil,
+              pendingAcks.count < maxPendingReliablePackets,
+              packet.count <= maxPendingReliableBytes - pendingAckByteCount else {
+            close(
+                with: LoomConnectionFailure(
+                    reason: .other,
+                    detail: "Reliable UDP outbound acknowledgement window exceeded its capacity limit."
+                )
+            )
+            throw LoomError.protocolError(
+                "Reliable UDP outbound acknowledgement window exceeded its capacity limit."
+            )
+        }
         let now = CFAbsoluteTimeGetCurrent()
         pendingAcks[seq] = PendingPacket(
             packet: packet,
@@ -523,6 +630,13 @@ package actor LoomReliableChannel: LoomSessionTransport {
             retryCount: 0,
             hasLoggedTimeoutDeferral: false
         )
+        pendingAckByteCount += packet.count
+    }
+
+    private func removePendingAck(sequence: UInt32) -> PendingPacket? {
+        guard let pending = pendingAcks.removeValue(forKey: sequence) else { return nil }
+        pendingAckByteCount = max(0, pendingAckByteCount - pending.packet.count)
+        return pending
     }
 
     // MARK: - Retry Timer
@@ -624,6 +738,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
     }
 
     private func handleIncomingPacket(_ data: Data) {
+        guard !isClosed else { return }
         guard let header = LoomReliablePacketHeader.deserialize(from: data) else {
             return
         }
@@ -650,10 +765,21 @@ package actor LoomReliableChannel: LoomSessionTransport {
 
         // Unreliable packets bypass sequence tracking and ordered delivery.
         guard header.flags.contains(.reliable) else {
+            // Unauthenticated peers have no valid unreliable lane. Do not let
+            // pre-handshake traffic consume the authenticated session budget.
+            guard !routesReliablePacketsToHandshake else { return }
             if payload.first == LoomSessionTrafficClass.priorityInput.rawValue {
-                priorityUnreliableDeliveryContinuation?.yield(payload)
+                guard deliver(
+                    payload,
+                    to: priorityUnreliableDeliveryBuffer,
+                    lane: "priority unreliable"
+                ) else { return }
             } else {
-                unreliableDeliveryContinuation?.yield(payload)
+                guard deliver(
+                    payload,
+                    to: unreliableDeliveryBuffer,
+                    lane: "unreliable"
+                ) else { return }
             }
             return
         }
@@ -662,44 +788,57 @@ package actor LoomReliableChannel: LoomSessionTransport {
             guard header.flags.contains(.hello) else {
                 return
             }
-
-            recordReceivedSequence(header.sequence)
-            needsAck = true
-            if Self.shouldSendImmediateReliableAck(
-                lastAckSentAt: lastDedicatedAckSentAt,
-                now: now,
-                idleThreshold: immediateAckIdleThreshold
-            ) {
-                sendDedicatedAckIfNeeded(now: now)
-            } else {
-                scheduleAckIfNeeded()
+            if header.flags.contains(.fragment) {
+                guard validateFragmentHeader(header, routeToHandshake: true) else { return }
             }
 
+            guard recordAndAcknowledgeNewSequence(header.sequence, now: now) else { return }
             if header.flags.contains(.fragment) {
                 handleFragment(header: header, payload: payload, routeToHandshake: true)
             } else {
-                handshakeDeliveryContinuation?.yield(payload)
+                _ = deliver(
+                    payload,
+                    to: handshakeDeliveryBuffer,
+                    lane: "handshake"
+                )
             }
             return
         }
 
         if header.flags.contains(.hello) {
-            recordReceivedSequence(header.sequence)
-            needsAck = true
-            if Self.shouldSendImmediateReliableAck(
-                lastAckSentAt: lastDedicatedAckSentAt,
-                now: now,
-                idleThreshold: immediateAckIdleThreshold
-            ) {
-                sendDedicatedAckIfNeeded(now: now)
-            } else {
-                scheduleAckIfNeeded()
-            }
+            close(
+                with: LoomConnectionFailure(
+                    reason: .other,
+                    detail: "Reliable UDP received a handshake packet after authentication completed."
+                )
+            )
             return
         }
 
         // Record this sequence for our outgoing acks
-        recordReceivedSequence(header.sequence)
+        if header.flags.contains(.fragment) {
+            guard validateFragmentHeader(header, routeToHandshake: false) else { return }
+        }
+        guard recordAndAcknowledgeNewSequence(header.sequence, now: now) else { return }
+        if header.flags.contains(.fragment) {
+            handleFragment(header: header, payload: payload, routeToHandshake: false)
+        } else {
+            bufferForOrderedDelivery(
+                sequence: header.sequence,
+                sequenceSpan: 1,
+                payload: payload
+            )
+        }
+    }
+
+    private func recordAndAcknowledgeNewSequence(
+        _ sequence: UInt32,
+        now: CFAbsoluteTime
+    ) -> Bool {
+        let result = recordReceivedSequence(sequence)
+        if case .rejected = result {
+            return false
+        }
         needsAck = true
         if Self.shouldSendImmediateReliableAck(
             lastAckSentAt: lastDedicatedAckSentAt,
@@ -710,16 +849,10 @@ package actor LoomReliableChannel: LoomSessionTransport {
         } else {
             scheduleAckIfNeeded()
         }
-
-        if header.flags.contains(.fragment) {
-            handleFragment(header: header, payload: payload, routeToHandshake: false)
-        } else {
-            bufferForOrderedDelivery(
-                sequence: header.sequence,
-                sequenceSpan: 1,
-                payload: payload
-            )
+        if case .new = result {
+            return true
         }
+        return false
     }
 
     private func scheduleAckIfNeeded() {
@@ -811,17 +944,16 @@ package actor LoomReliableChannel: LoomSessionTransport {
         payload: Data,
         routeToHandshake: Bool
     ) {
-        guard header.fragmentCount > 0,
-              header.fragmentIndex < header.fragmentCount,
-              Int(header.fragmentCount) <= maxFragmentCount(routeToHandshake: routeToHandshake) else {
-            return
-        }
         let firstSeq = header.sequence &- UInt32(header.fragmentIndex)
         let key = FragmentKey(streamID: header.streamID, firstSequence: firstSeq)
 
         if fragments[key] == nil {
             pruneFragmentAssemblies(now: CFAbsoluteTimeGetCurrent())
-            guard fragments.count < maxPendingFragmentAssemblies else { return }
+            guard !isClosed else { return }
+            guard fragments.count < maxPendingFragmentAssemblies else {
+                closeForIncomingOverflow("fragment assembly count")
+                return
+            }
         }
 
         var assembly = fragments[key] ?? FragmentAssembly(
@@ -832,20 +964,45 @@ package actor LoomReliableChannel: LoomSessionTransport {
         )
         guard assembly.fragmentCount == header.fragmentCount,
               assembly.routeToHandshake == routeToHandshake else {
-            fragments.removeValue(forKey: key)
+            if let discarded = fragments.removeValue(forKey: key) {
+                releaseFragmentAssembly(discarded)
+            }
+            close(
+                with: LoomConnectionFailure(
+                    reason: .other,
+                    detail: "Reliable UDP fragment metadata changed within one assembly."
+                )
+            )
             return
         }
-        if assembly.fragments[header.fragmentIndex] == nil,
-           pendingFragmentBytes + payload.count > maxPendingFragmentBytes {
+
+        guard assembly.fragments[header.fragmentIndex] == nil else {
+            return
+        }
+        guard pendingFragmentCount < maxPendingFragments,
+              payload.count <= maxPendingFragmentBytes - pendingFragmentByteCount,
+              fragmentBudget.reserve(
+                  bytes: payload.count,
+                  payloadCount: fragments[key] == nil ? 1 : 0,
+                  startsNewBatch: fragments[key] == nil
+              ) else {
+            closeForIncomingOverflow("fragment storage")
             return
         }
 
         assembly.fragments[header.fragmentIndex] = payload
+        pendingFragmentCount += 1
+        pendingFragmentByteCount += payload.count
         if assembly.isComplete {
             fragments.removeValue(forKey: key)
             let reassembled = assembly.reassemble()
+            releaseFragmentAssembly(assembly)
             if assembly.routeToHandshake {
-                handshakeDeliveryContinuation?.yield(reassembled)
+                _ = deliver(
+                    reassembled,
+                    to: handshakeDeliveryBuffer,
+                    lane: "handshake"
+                )
             } else {
                 bufferForOrderedDelivery(
                     sequence: firstSeq,
@@ -858,10 +1015,6 @@ package actor LoomReliableChannel: LoomSessionTransport {
         }
     }
 
-    private var pendingFragmentBytes: Int {
-        fragments.values.reduce(0) { $0 + $1.totalBytes }
-    }
-
     private func maxFragmentCount(routeToHandshake: Bool) -> Int {
         let byteLimit = routeToHandshake
             ? LoomMessageLimits.maxHelloFrameBytes
@@ -869,10 +1022,48 @@ package actor LoomReliableChannel: LoomSessionTransport {
         return max(1, (byteLimit + loomReliableMaxFragmentPayload - 1) / loomReliableMaxFragmentPayload)
     }
 
-    private func pruneFragmentAssemblies(now: CFAbsoluteTime) {
-        for (key, assembly) in fragments where now - assembly.createdAt > fragmentPruneInterval {
-            fragments.removeValue(forKey: key)
+    private func validateFragmentHeader(
+        _ header: LoomReliablePacketHeader,
+        routeToHandshake: Bool
+    ) -> Bool {
+        guard header.fragmentCount > 0,
+              header.fragmentIndex < header.fragmentCount,
+              Int(header.fragmentCount) <= maxFragmentCount(routeToHandshake: routeToHandshake) else {
+            close(
+                with: LoomConnectionFailure(
+                    reason: .other,
+                    detail: "Reliable UDP received invalid fragment metadata."
+                )
+            )
+            return false
         }
+        return true
+    }
+
+    private func pruneFragmentAssemblies(now: CFAbsoluteTime) {
+        guard fragments.values.contains(where: {
+            now - $0.createdAt > fragmentPruneInterval
+        }) else {
+            return
+        }
+        close(
+            with: LoomConnectionFailure(
+                reason: .timedOut,
+                detail: "Reliable UDP fragment reassembly timed out."
+            )
+        )
+    }
+
+    private func releaseFragmentAssembly(_ assembly: FragmentAssembly) {
+        let fragmentCount = assembly.fragments.count
+        guard fragmentCount > 0 else { return }
+        pendingFragmentCount = max(0, pendingFragmentCount - fragmentCount)
+        pendingFragmentByteCount = max(0, pendingFragmentByteCount - assembly.totalBytes)
+        fragmentBudget.release(
+            bytes: assembly.totalBytes,
+            payloadCount: 1,
+            batchCount: 1
+        )
     }
 
     // MARK: - Ordered Delivery
@@ -895,6 +1086,22 @@ package actor LoomReliableChannel: LoomSessionTransport {
         // Discard messages already delivered (duplicate/retransmit)
         let diff = Int32(bitPattern: sequence &- nextDeliverySequence)
         guard diff >= 0 else { return }
+        guard pendingDelivery[sequence] == nil else { return }
+
+        let maximumSequenceGap = UInt32(
+            maxFragmentCount(routeToHandshake: false) + maxPendingDeliveryMessages
+        )
+        guard UInt32(diff) <= maximumSequenceGap,
+              pendingDelivery.count < maxPendingDeliveryMessages,
+              payload.count <= maxPendingDeliveryBytes,
+              orderedDeliveryBudget.reserve(
+                  bytes: payload.count,
+                  payloadCount: 1,
+                  startsNewBatch: true
+              ) else {
+            closeForIncomingOverflow("ordered delivery window")
+            return
+        }
 
         pendingDelivery[sequence] = PendingMessage(
             payload: payload,
@@ -905,9 +1112,59 @@ package actor LoomReliableChannel: LoomSessionTransport {
 
     private func flushDeliveryBuffer() {
         while let message = pendingDelivery.removeValue(forKey: nextDeliverySequence) {
-            deliveryContinuation?.yield(message.payload)
+            let result = deliveryBuffer.yield(message.payload, alreadyRetained: true)
+            guard case .accepted = result else {
+                orderedDeliveryBudget.release(
+                    bytes: message.payload.count,
+                    payloadCount: 1,
+                    batchCount: 1
+                )
+                closeForIncomingOverflow("ordered delivery queue")
+                return
+            }
             nextDeliverySequence &+= message.sequenceSpan
         }
+    }
+
+    @discardableResult
+    private func deliver(
+        _ payload: Data,
+        to buffer: LoomBoundedIncomingDataBuffer,
+        lane: String
+    ) -> Bool {
+        guard case .accepted = buffer.yield(payload) else {
+            closeForIncomingOverflow("\(lane) delivery queue")
+            return false
+        }
+        return true
+    }
+
+    private func closeForIncomingOverflow(_ storage: String) {
+        close(
+            with: LoomConnectionFailure(
+                reason: .other,
+                detail: "Reliable UDP \(storage) exceeded its retained-capacity limit."
+            )
+        )
+    }
+
+    private func discardRetainedIncomingState() {
+        for assembly in fragments.values {
+            releaseFragmentAssembly(assembly)
+        }
+        fragments.removeAll(keepingCapacity: false)
+        pendingFragmentCount = 0
+        pendingFragmentByteCount = 0
+
+        for message in pendingDelivery.values {
+            orderedDeliveryBudget.release(
+                bytes: message.payload.count,
+                payloadCount: 1,
+                batchCount: 1
+            )
+        }
+        pendingDelivery.removeAll(keepingCapacity: false)
+        receivedBeyondContiguous.removeAll(keepingCapacity: false)
     }
 
     // MARK: - Raw I/O

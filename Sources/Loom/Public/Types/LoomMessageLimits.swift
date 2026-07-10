@@ -26,6 +26,21 @@ public enum LoomMessageLimits {
     /// Maximum receive buffer size for control-channel parsing.
     public static let maxReceiveBufferBytes = 64 * 1024 * 1024
 
+    /// Maximum number of payload objects retained for one multiplexed stream.
+    public static let maxBufferedPayloadsPerStream = 256
+
+    /// Maximum payload bytes retained across all multiplexed streams in one session.
+    public static let maxBufferedIncomingBytesPerSession = 256 * 1024 * 1024
+
+    /// Maximum payload objects retained across all multiplexed streams in one session.
+    public static let maxBufferedPayloadsPerSession = 4_096
+
+    /// Maximum payload bytes retained across authenticated sessions owned by one node.
+    public static let maxBufferedIncomingBytesPerNode = 512 * 1024 * 1024
+
+    /// Maximum payload objects retained across authenticated sessions owned by one node.
+    public static let maxBufferedPayloadsPerNode = 8_192
+
     /// Maximum hello frame bytes consumed during connection bootstrap.
     public static let maxHelloFrameBytes = 64 * 1024
 

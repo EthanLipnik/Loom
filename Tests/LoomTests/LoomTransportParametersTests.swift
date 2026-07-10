@@ -22,9 +22,11 @@ struct LoomTransportParametersTests {
         )
 
         #expect(tcpParameters.includePeerToPeer)
-        #expect(tcpParameters.allowUltraConstrainedPaths)
         #expect(udpParameters.includePeerToPeer)
-        #expect(udpParameters.allowUltraConstrainedPaths)
+        if #available(macOS 26.0, *) {
+            #expect(tcpParameters.allowUltraConstrainedPaths)
+            #expect(udpParameters.allowUltraConstrainedPaths)
+        }
     }
 
     @Test("Non-peer-to-peer direct parameters keep ultra-constrained paths disabled")
@@ -35,12 +37,16 @@ struct LoomTransportParametersTests {
         )
 
         #expect(!parameters.includePeerToPeer)
-        #expect(!parameters.allowUltraConstrainedPaths)
+        if #available(macOS 26.0, *) {
+            #expect(!parameters.allowUltraConstrainedPaths)
+        }
     }
 
     @Test("Bonjour peer-to-peer parameters allow ultra-constrained paths")
     func bonjourPeerToPeerParametersAllowUltraConstrainedPaths() {
-        #expect(BonjourAdvertiser.makeAdvertiserParameters(enablePeerToPeer: true).allowUltraConstrainedPaths)
-        #expect(LoomDiscovery.makeBrowserParameters(enablePeerToPeer: true).allowUltraConstrainedPaths)
+        if #available(macOS 26.0, *) {
+            #expect(BonjourAdvertiser.makeAdvertiserParameters(enablePeerToPeer: true).allowUltraConstrainedPaths)
+            #expect(LoomDiscovery.makeBrowserParameters(enablePeerToPeer: true).allowUltraConstrainedPaths)
+        }
     }
 }

@@ -165,6 +165,212 @@ struct LoomReliableChannelTests {
 
         await server.close()
     }
+
+    @Test("Multi-fragment handshake messages round-trip without leaking retained capacity")
+    func multiFragmentHandshakeRoundTrip() async throws {
+        let networkQueue = DispatchQueue(label: "loom.tests.reliable-channel.fragments")
+        let serverBox = LoomReliableChannelTestBox()
+        let retainedCapacityBudget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: LoomMessageLimits.maxReceiveBufferBytes,
+            maximumPayloadCount: 64,
+            maximumBatchCount: 64
+        )
+        let listener = try NWListener(using: .udp, on: .any)
+        listener.newConnectionHandler = { connection in
+            let channel = LoomReliableChannel(
+                connection: connection,
+                retainedCapacityBudget: retainedCapacityBudget
+            )
+            serverBox.store(channel)
+            Task {
+                do {
+                    try await channel.startAndAwaitReady(queue: networkQueue)
+                } catch {
+                    serverBox.fail(error)
+                }
+            }
+        }
+        try await startAndAwaitReady(listener, queue: networkQueue)
+        let port = try #require(listener.port)
+
+        let client = LoomReliableChannel(
+            connection: NWConnection(host: "127.0.0.1", port: port, using: .udp)
+        )
+        try await client.startAndAwaitReady(queue: networkQueue)
+        defer {
+            listener.cancel()
+            Task {
+                await client.close()
+                await serverBox.channel?.close()
+            }
+        }
+
+        let payload = Data(
+            (0 ..< (loomReliableMaxFragmentPayload * 3 + 17)).map { UInt8($0 % 251) }
+        )
+        let receiveTask = Task {
+            let server = try await waitForServerChannel(serverBox)
+            return try await server.receiveHandshakeMessage(maxBytes: payload.count)
+        }
+        try await client.sendHandshakeMessage(payload)
+
+        #expect(try await awaitValue(from: receiveTask, timeout: .seconds(2)) == payload)
+        #expect(retainedCapacityBudget.retainedBytesForTesting == 0)
+    }
+
+    @Test("Unauthenticated unreliable datagrams do not consume retained capacity")
+    func dropsPreauthenticationUnreliableDatagrams() async throws {
+        let networkQueue = DispatchQueue(label: "loom.tests.reliable-channel.preauth-drop")
+        let serverBox = LoomReliableChannelTestBox()
+        let retainedCapacityBudget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: 4,
+            maximumPayloadCount: 1,
+            maximumBatchCount: 1
+        )
+        let listener = try NWListener(using: .udp, on: .any)
+        listener.newConnectionHandler = { connection in
+            let channel = LoomReliableChannel(
+                connection: connection,
+                retainedCapacityBudget: retainedCapacityBudget
+            )
+            serverBox.store(channel)
+            Task {
+                do {
+                    try await channel.startAndAwaitReady(queue: networkQueue)
+                } catch {
+                    serverBox.fail(error)
+                }
+            }
+        }
+        try await startAndAwaitReady(listener, queue: networkQueue)
+        let port = try #require(listener.port)
+        let client = NWConnection(host: "127.0.0.1", port: port, using: .udp)
+        try await startAndAwaitReady(client, queue: networkQueue)
+        defer {
+            client.cancel()
+            listener.cancel()
+            Task { await serverBox.channel?.close() }
+        }
+
+        try await sendDatagram(
+            LoomReliablePacketHeader(payloadLength: 32).serialize() + Data(repeating: 0xAA, count: 32),
+            over: client
+        )
+        let server = try await waitForServerChannel(serverBox)
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(retainedCapacityBudget.retainedBytesForTesting == 0)
+
+        let receiveTask = Task {
+            try await server.receiveHandshakeMessage(maxBytes: 4)
+        }
+        try await sendReliableDatagram(
+            Data([1]),
+            sequence: 0,
+            flags: [.reliable, .hello],
+            over: client
+        )
+        #expect(try await awaitValue(from: receiveTask, timeout: .seconds(1)) == Data([1]))
+
+        let trustStatusTask = Task {
+            try await server.receiveHandshakeMessage(maxBytes: 4)
+        }
+        try await sendReliableDatagram(
+            Data([2]),
+            sequence: 1,
+            flags: [.reliable, .hello],
+            over: client
+        )
+        #expect(try await awaitValue(from: trustStatusTask, timeout: .seconds(1)) == Data([2]))
+        try await sendDatagram(
+            LoomReliablePacketHeader(payloadLength: 32).serialize() + Data(repeating: 0xBB, count: 32),
+            over: client
+        )
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(retainedCapacityBudget.retainedBytesForTesting == 0)
+    }
+
+    @Test("Post-handshake hello packets fail closed instead of stalling ordered delivery")
+    func rejectsPostHandshakeHello() async throws {
+        let networkQueue = DispatchQueue(label: "loom.tests.reliable-channel.late-hello")
+        let serverBox = LoomReliableChannelTestBox()
+        let listener = try NWListener(using: .udp, on: .any)
+        listener.newConnectionHandler = { connection in
+            let channel = LoomReliableChannel(connection: connection)
+            serverBox.store(channel)
+            Task {
+                do {
+                    try await channel.startAndAwaitReady(queue: networkQueue)
+                } catch {
+                    serverBox.fail(error)
+                }
+            }
+        }
+        try await startAndAwaitReady(listener, queue: networkQueue)
+        let port = try #require(listener.port)
+        let client = NWConnection(host: "127.0.0.1", port: port, using: .udp)
+        try await startAndAwaitReady(client, queue: networkQueue)
+        defer {
+            client.cancel()
+            listener.cancel()
+            Task { await serverBox.channel?.close() }
+        }
+
+        try await sendReliableDatagram(
+            Data([0]),
+            sequence: 0,
+            flags: [.reliable, .hello],
+            over: client
+        )
+        let server = try await waitForServerChannel(serverBox)
+        #expect(try await server.receiveHandshakeMessage(maxBytes: 4) == Data([0]))
+
+        let receiveTask = Task {
+            try await server.receiveMessage(maxBytes: 4)
+        }
+        await Task.yield()
+        try await sendReliableDatagram(
+            Data([1]),
+            sequence: 1,
+            flags: [.reliable, .hello],
+            over: client
+        )
+
+        do {
+            _ = try await awaitValue(from: receiveTask, timeout: .seconds(1))
+            Issue.record("Post-handshake hello was accepted.")
+        } catch LoomReliableChannelTestError.timedOut {
+            Issue.record("Post-handshake hello stalled ordered delivery instead of failing closed.")
+        } catch {
+            // Expected terminal protocol failure.
+        }
+    }
+
+    @Test("Outbound reliable packets fail closed when the acknowledgement window is full")
+    func boundsPendingAcknowledgements() async throws {
+        let networkQueue = DispatchQueue(label: "loom.tests.reliable-channel.pending-acks")
+        let listener = try NWListener(using: .udp, on: .any)
+        listener.newConnectionHandler = { connection in
+            connection.start(queue: networkQueue)
+        }
+        try await startAndAwaitReady(listener, queue: networkQueue)
+        let port = try #require(listener.port)
+        let channel = LoomReliableChannel(
+            connection: NWConnection(host: "127.0.0.1", port: port, using: .udp),
+            maximumPendingReliablePackets: 2,
+            maximumPendingReliableBytes: 1_024
+        )
+        try await channel.startAndAwaitReady(queue: networkQueue)
+        defer {
+            listener.cancel()
+            Task { await channel.close() }
+        }
+
+        try await channel.sendMessage(Data([1]))
+        try await channel.sendMessage(Data([2]))
+        await #expect(throws: LoomError.self) {
+            try await channel.sendMessage(Data([3]))
+        }
+    }
 }
 
 private enum LoomReliableChannelTestError: Error {
