@@ -6,7 +6,9 @@
 //
 
 import Foundation
+#if canImport(Network)
 import Network
+#endif
 
 private final class LoomPreauthenticationOperationGate<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
@@ -826,8 +828,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         onBootstrapProgress = handler
     }
 
-    private let connection: LoomConnection
-    private let nwConnection: NWConnection?
+    private let backendConnection: any LoomNetworkConnection
     private let transport: any LoomSessionTransport
     private let incomingStreamContinuation: AsyncStream<LoomMultiplexedStream>.Continuation
     private let incomingStreamObservers: LoomAsyncBroadcaster<LoomMultiplexedStream>
@@ -852,7 +853,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
     private var preauthenticationOperationLimiter: LoomOutstandingOperationLimiter?
     private var securityContext: LoomSessionSecurityContext?
     private var encryptionEnabled = false
-    private var currentRemoteEndpoint: NWEndpoint?
+    private var currentRemoteEndpoint: LoomNetworkEndpoint?
     private var currentPathSnapshot: LoomSessionNetworkPathSnapshot?
     private var transportObserversConfigured = false
     private var pendingUnopenedUnreliableDataByStreamID: [UInt16: PendingUnopenedUnreliableStreamData] = [:]
@@ -867,6 +868,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
     private let transportServiceClassDescription: String?
     private let transportUsableDatagramSize: Int?
 
+    #if canImport(Network)
     public init(
         connection: LoomConnection,
         role: LoomSessionRole,
@@ -878,8 +880,34 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         maximumBufferedIncomingBytesPerSession: Int = LoomMessageLimits.maxBufferedIncomingBytesPerSession,
         maximumBufferedIncomingPayloadsPerSession: Int = LoomMessageLimits.maxBufferedPayloadsPerSession
     ) {
+        self.init(
+            backendConnection: connection.backendConnection,
+            role: role,
+            remoteEndpoint: remoteEndpoint.flatMap(LoomNetworkEndpoint.init),
+            serviceClass: serviceClass.map(LoomNetworkServiceClass.init),
+            maximumConcurrentStreams: maximumConcurrentStreams,
+            maximumBufferedIncomingBytesPerStream: maximumBufferedIncomingBytesPerStream,
+            maximumBufferedIncomingPayloadsPerStream: maximumBufferedIncomingPayloadsPerStream,
+            maximumBufferedIncomingBytesPerSession: maximumBufferedIncomingBytesPerSession,
+            maximumBufferedIncomingPayloadsPerSession: maximumBufferedIncomingPayloadsPerSession
+        )
+    }
+    #endif
+
+    /// Creates an authenticated session over a backend-independent connection.
+    public init(
+        backendConnection: any LoomNetworkConnection,
+        role: LoomSessionRole,
+        remoteEndpoint: LoomNetworkEndpoint? = nil,
+        serviceClass: LoomNetworkServiceClass? = nil,
+        maximumConcurrentStreams: Int = 256,
+        maximumBufferedIncomingBytesPerStream: Int = LoomMessageLimits.maxReceiveBufferBytes,
+        maximumBufferedIncomingPayloadsPerStream: Int = LoomMessageLimits.maxBufferedPayloadsPerStream,
+        maximumBufferedIncomingBytesPerSession: Int = LoomMessageLimits.maxBufferedIncomingBytesPerSession,
+        maximumBufferedIncomingPayloadsPerSession: Int = LoomMessageLimits.maxBufferedPayloadsPerSession
+    ) {
         id = UUID()
-        self.connection = connection
+        self.backendConnection = backendConnection
         self.role = role
         self.maximumConcurrentStreams = max(1, maximumConcurrentStreams)
         self.maximumBufferedIncomingBytesPerStream = max(1, maximumBufferedIncomingBytesPerStream)
@@ -893,27 +921,31 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         incomingStreamObservers = LoomAsyncBroadcaster(
             bufferingPolicy: .bufferingNewest(incomingStreamEventBuffer)
         )
-        switch connection {
-        case let .tcp(connection):
-            nwConnection = connection
+        switch backendConnection.transportKind {
+        case .tcp:
             transportKind = .tcp
             transport = LoomFramedConnection(
-                connection: connection,
+                connection: backendConnection,
                 retainedCapacityBudget: incomingRetainedCapacityBudget
             )
-            transportEndpointDescription = (remoteEndpoint ?? connection.endpoint).debugDescription
-            transportServiceClassDescription = serviceClass.map(Self.serviceClassDescription(_:))
+            transportEndpointDescription = (
+                remoteEndpoint ?? backendConnection.remoteEndpoint
+            ).description
+            transportServiceClassDescription = serviceClass?.rawValue
             transportUsableDatagramSize = nil
-        case let .udp(connection):
-            nwConnection = connection
+        case .udp:
             transportKind = .udp
             transport = LoomReliableChannel(
-                connection: connection,
+                connection: backendConnection,
                 retainedCapacityBudget: incomingRetainedCapacityBudget
             )
-            transportEndpointDescription = (remoteEndpoint ?? connection.endpoint).debugDescription
-            transportServiceClassDescription = serviceClass.map(Self.serviceClassDescription(_:))
+            transportEndpointDescription = (
+                remoteEndpoint ?? backendConnection.remoteEndpoint
+            ).description
+            transportServiceClassDescription = serviceClass?.rawValue
             transportUsableDatagramSize = Loom.defaultMaxPacketSize
+        case .quic:
+            preconditionFailure("QUIC transport has been removed.")
         }
         let (stream, continuation) = AsyncStream.makeStream(
             of: LoomMultiplexedStream.self,
@@ -949,10 +981,19 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         bootstrapProgressObservers.makeStream(initialValue: bootstrapProgress)
     }
 
+    /// Returns the latest backend-independent remote endpoint observed for the transport.
+    public var backendRemoteEndpoint: LoomNetworkEndpoint? {
+        currentRemoteEndpoint ??
+            currentPathSnapshot?.backendRemoteEndpoint ??
+            backendConnection.remoteEndpoint
+    }
+
+#if canImport(Network)
     /// Returns the latest remote endpoint observed for this session's transport.
     public var remoteEndpoint: NWEndpoint? {
-        currentRemoteEndpoint ?? currentPathSnapshot?.remoteEndpoint ?? nwConnection?.endpoint
+        backendRemoteEndpoint?.nwEndpoint
     }
+#endif
 
     /// Returns the latest transport-path snapshot observed for this session.
     public var pathSnapshot: LoomSessionNetworkPathSnapshot? {
@@ -974,25 +1015,6 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             "single-lane"
         case .independentReliableAndUnreliable:
             "independent-reliable-unreliable"
-        }
-    }
-
-    private static func serviceClassDescription(_ serviceClass: NWParameters.ServiceClass) -> String {
-        switch serviceClass {
-        case .bestEffort:
-            "best-effort"
-        case .background:
-            "background"
-        case .interactiveVideo:
-            "interactive-video"
-        case .interactiveVoice:
-            "interactive-voice"
-        case .responsiveData:
-            "responsive-data"
-        case .signaling:
-            "signaling"
-        @unknown default:
-            String(describing: serviceClass)
         }
     }
 
@@ -1128,7 +1150,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                 sessionEncrypted: encryptionNegotiated
             )
             self.context = context
-            configureTransportObserversIfNeeded()
+            await configureTransportObserversIfNeeded()
             if transport.receiveSemantics == .independentReliableAndUnreliable {
                 try await performPreauthenticationOperation(
                     deadline: trustDeadline,
@@ -1316,7 +1338,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         }
         guard Self.isLocalPriorityInputPath(
             pathSnapshot: currentPathSnapshot,
-            remoteEndpoint: remoteEndpoint
+            remoteEndpoint: backendRemoteEndpoint
         ) else {
             throw LoomError.protocolError("Priority input lane is only available on local datagram transports.")
         }
@@ -1341,7 +1363,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
 
     private static func isLocalPriorityInputPath(
         pathSnapshot: LoomSessionNetworkPathSnapshot?,
-        remoteEndpoint: NWEndpoint?
+        remoteEndpoint: LoomNetworkEndpoint?
     ) -> Bool {
         if let pathSnapshot {
             let usesLocalInterface = pathSnapshot.usesWiFi ||
@@ -1349,7 +1371,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                 pathSnapshot.usesLoopback ||
                 pathSnapshot.interfaceNames.contains(where: Self.isLocalProximityInterfaceName(_:))
             guard usesLocalInterface else { return false }
-            return isLocalPriorityInputHost(remoteEndpoint ?? pathSnapshot.remoteEndpoint)
+            return isLocalPriorityInputHost(remoteEndpoint ?? pathSnapshot.backendRemoteEndpoint)
         }
 
         return isLocalPriorityInputHost(remoteEndpoint)
@@ -1363,9 +1385,9 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             normalized.hasPrefix("bridge")
     }
 
-    private static func isLocalPriorityInputHost(_ endpoint: NWEndpoint?) -> Bool {
+    private static func isLocalPriorityInputHost(_ endpoint: LoomNetworkEndpoint?) -> Bool {
         guard case let .hostPort(host, _) = endpoint else { return false }
-        let normalized = "\(host)".lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = host.rawValue.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         if normalized == "localhost" || normalized == "::1" || normalized == "[::1]" { return true }
         if normalized.contains(".local") { return true }
         if normalized.hasPrefix("fe80:") || normalized.hasPrefix("[fe80:") { return true }
@@ -2161,36 +2183,25 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         )
     }
 
-    private func configureTransportObserversIfNeeded() {
+    private func configureTransportObserversIfNeeded() async {
         guard !transportObserversConfigured else { return }
         transportObserversConfigured = true
-        guard let nwConnection else {
-            return
+        currentRemoteEndpoint = backendConnection.remoteEndpoint
+        if let currentPath = await backendConnection.currentPath {
+            applyTransportPathSnapshot(LoomSessionNetworkPathSnapshot(backendPath: currentPath))
         }
-        currentRemoteEndpoint = nwConnection.endpoint
-
-        if let path = nwConnection.currentPath {
-            applyTransportPathSnapshot(LoomSessionNetworkPathSnapshot(path: path))
-        }
-
-        nwConnection.pathUpdateHandler = { [weak self] path in
+        await transport.setObservationHandler { [weak self] observation in
             guard let self else { return }
             Task {
-                await self.handleTransportPathUpdate(path)
-            }
-        }
-        nwConnection.stateUpdateHandler = { [weak self] state in
-            guard let self else { return }
-            Task {
-                await self.handleUnderlyingConnectionState(state)
+                await self.handleTransportObservation(observation)
             }
         }
     }
 
     private func handleTransportObservation(_ observation: LoomSessionTransportObservation) {
         switch observation {
-        case let .path(snapshot):
-            applyTransportPathSnapshot(snapshot)
+        case let .path(path):
+            applyTransportPathSnapshot(LoomSessionNetworkPathSnapshot(backendPath: path))
         case let .failed(reason):
             if case .failed = state { return }
             if case .cancelled = state { return }
@@ -2205,34 +2216,12 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         }
     }
 
-    private func handleTransportPathUpdate(_ path: NWPath) {
-        applyTransportPathSnapshot(LoomSessionNetworkPathSnapshot(path: path))
-    }
-
     private func applyTransportPathSnapshot(_ snapshot: LoomSessionNetworkPathSnapshot) {
         currentPathSnapshot = snapshot
-        if let remoteEndpoint = snapshot.remoteEndpoint {
+        if let remoteEndpoint = snapshot.backendPath.remoteEndpoint {
             currentRemoteEndpoint = remoteEndpoint
         }
         pathObservers.yield(snapshot)
-    }
-
-    private func handleUnderlyingConnectionState(_ connectionState: NWConnection.State) {
-        switch connectionState {
-        case let .failed(error):
-            if case .failed = state { return }
-            if case .cancelled = state { return }
-            finishSession(
-                state: .failed(error.localizedDescription),
-                cancelUnderlyingConnection: false
-            )
-        case .cancelled:
-            if case .cancelled = state { return }
-            if case .failed = state { return }
-            finishSession(state: .cancelled, cancelUnderlyingConnection: false)
-        default:
-            break
-        }
     }
 
     private func finishSession(
@@ -2274,7 +2263,6 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             Task {
                 await transport.closeTransport()
             }
-            connection.backingNWConnection?.cancel()
         } else {
             Task {
                 await transport.cancelPendingUnreliableSends()

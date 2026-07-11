@@ -5,6 +5,7 @@
 //  Created by Ethan Lipnik on 1/2/26.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -72,7 +73,12 @@ actor BonjourAdvertiser {
         // Set connection handler BEFORE starting the listener
         listener?.newConnectionHandler = { connection in
             Task {
-                await onConnection(.tcp(connection))
+                await onConnection(
+                    LoomNetworkFrameworkConnection(
+                        connection: connection,
+                        transportKind: .tcp
+                    )
+                )
             }
         }
 
@@ -177,3 +183,5 @@ private final class BonjourAdvertiserStartState: @unchecked Sendable {
         lock.unlock()
     }
 }
+
+#endif

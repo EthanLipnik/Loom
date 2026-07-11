@@ -8,7 +8,11 @@
 //
 
 import Foundation
+#if canImport(Darwin)
 import Darwin
+#endif
+import NIOCore
+import NIOPosix
 
 /// Wake-on-LAN failures.
 public enum LoomWakeOnLANError: LocalizedError, Sendable {
@@ -102,17 +106,36 @@ public final class LoomDefaultWakeOnLANClient: LoomWakeOnLANClient {
     }
 
     private func send(packet: Data, to targets: [String]) async throws {
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            for target in targets {
-                group.addTask {
-                    let address = try Self.ipv4Address(for: target)
-                    try Self.send(packet: packet, to: address)
-                }
+        let addresses = try targets.map { target -> SocketAddress in
+            guard Self.isIPv4Address(target) else {
+                throw LoomWakeOnLANError.sendFailed("invalid IPv4 broadcast target \(target)")
             }
-            try await group.waitForAll()
+            do {
+                return try SocketAddress(ipAddress: target, port: Int(Self.wakeOnLANPort))
+            } catch {
+                throw LoomWakeOnLANError.sendFailed("invalid IPv4 broadcast target \(target)")
+            }
+        }
+        let channel = try await DatagramBootstrap(group: MultiThreadedEventLoopGroup.singleton)
+            .channelOption(.socketOption(.so_broadcast), value: 1)
+            .bind(host: "0.0.0.0", port: 0)
+            .get()
+        do {
+            for address in addresses {
+                var buffer = channel.allocator.buffer(capacity: packet.count)
+                buffer.writeBytes(packet)
+                try await channel.writeAndFlush(
+                    AddressedEnvelope(remoteAddress: address, data: buffer)
+                ).get()
+            }
+            try await channel.close().get()
+        } catch {
+            try? await channel.close().get()
+            throw error
         }
     }
 
+#if canImport(Darwin)
     static func ipv4Address(for target: String) throws -> in_addr {
         var address = in_addr()
         let result = target.withCString { inet_pton(AF_INET, $0, &address) }
@@ -123,6 +146,15 @@ public final class LoomDefaultWakeOnLANClient: LoomWakeOnLANClient {
             throw LoomWakeOnLANError.sendFailed("invalid IPv4 broadcast target \(target)")
         }
         throw POSIXError(Self.currentPOSIXErrorCode())
+    }
+#endif
+
+    private static func isIPv4Address(_ value: String) -> Bool {
+        let components = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 4 else { return false }
+        return components.allSatisfy { component in
+            !component.isEmpty && UInt8(component) != nil
+        }
     }
 
     static func sendFailureDetail(for error: Error) -> String {
@@ -138,54 +170,6 @@ public final class LoomDefaultWakeOnLANClient: LoomWakeOnLANClient {
         return String(describing: error)
     }
 
-    private static func send(packet: Data, to address: in_addr) throws {
-        let socketDescriptor = Darwin.socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        guard socketDescriptor >= 0 else {
-            throw POSIXError(currentPOSIXErrorCode())
-        }
-        defer { Darwin.close(socketDescriptor) }
-
-        var allowBroadcast: Int32 = 1
-        guard Darwin.setsockopt(
-            socketDescriptor,
-            SOL_SOCKET,
-            SO_BROADCAST,
-            &allowBroadcast,
-            socklen_t(MemoryLayout.size(ofValue: allowBroadcast))
-        ) == 0 else {
-            throw POSIXError(currentPOSIXErrorCode())
-        }
-
-        var destination = sockaddr_in()
-        destination.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        destination.sin_family = sa_family_t(AF_INET)
-        destination.sin_port = in_port_t(wakeOnLANPort).bigEndian
-        destination.sin_addr = address
-
-        let bytesSent = packet.withUnsafeBytes { buffer -> ssize_t in
-            guard let baseAddress = buffer.baseAddress else { return -1 }
-            return withUnsafePointer(to: destination) { destinationPointer in
-                destinationPointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
-                    Darwin.sendto(
-                        socketDescriptor,
-                        baseAddress,
-                        buffer.count,
-                        0,
-                        socketAddress,
-                        socklen_t(MemoryLayout<sockaddr_in>.size)
-                    )
-                }
-            }
-        }
-
-        guard bytesSent >= 0 else {
-            throw POSIXError(currentPOSIXErrorCode())
-        }
-        guard bytesSent == packet.count else {
-            throw LoomWakeOnLANError.sendFailed("sent \(bytesSent) of \(packet.count) Wake-on-LAN bytes")
-        }
-    }
-
     private static func posixCode(from error: Error) -> POSIXErrorCode? {
         if let posixError = error as? POSIXError {
             return posixError.code
@@ -199,9 +183,11 @@ public final class LoomDefaultWakeOnLANClient: LoomWakeOnLANClient {
         return nil
     }
 
+#if canImport(Darwin)
     private static func currentPOSIXErrorCode() -> POSIXErrorCode {
         POSIXErrorCode(rawValue: errno) ?? .EIO
     }
+#endif
 
     /// Builds a standard Wake-on-LAN magic packet for a MAC address.
     ///

@@ -5,6 +5,7 @@
 //  Created by Ethan Lipnik on 3/9/26.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -576,3 +577,5 @@ private enum LoomConnectionAttemptResult {
     case failure(LoomConnectionTarget, Error)
     case cancelled(LoomConnectionTarget)
 }
+
+#endif

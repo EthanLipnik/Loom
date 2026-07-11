@@ -8,6 +8,7 @@
 //  inbound QUIC connections.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -112,3 +113,5 @@ public final class LoomSTUNKeepalive: @unchecked Sendable {
         keepaliveTask?.cancel()
     }
 }
+
+#endif

@@ -6,13 +6,14 @@
 //
 
 @_exported import Foundation
+@_exported import LoomNetworking
 
 package typealias WindowID = UInt32
 package typealias StreamID = UInt16
 package typealias StreamSessionID = UUID
 
 public enum Loom {
-    public static let version = "2.1.1"
+    public static let version = "2.2.0"
     public static let protocolVersion: UInt8 = 3
     /// Default Bonjour service type for peer discovery.
     ///

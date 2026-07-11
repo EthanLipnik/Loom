@@ -7,7 +7,12 @@
 //  Signed Cloudflare signaling client for remote session presence and peer advertisements.
 //
 
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
+#if canImport(Network)
 import Foundation
 
 /// Additional app-scoped authentication for signaling requests.
@@ -731,3 +736,5 @@ private func parseAdvertisementBlob(_ rawValue: Any?) -> LoomPeerAdvertisement? 
     }
     return try? JSONDecoder().decode(LoomPeerAdvertisement.self, from: data)
 }
+
+#endif

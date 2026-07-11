@@ -7,6 +7,7 @@
 //  Path classification helpers used for AWDL transport stabilization.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -229,3 +230,5 @@ package enum LoomNetworkPathClassifier {
         }
     }
 }
+
+#endif

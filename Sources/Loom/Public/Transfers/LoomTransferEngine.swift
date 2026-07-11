@@ -5,7 +5,11 @@
 //  Created by Ethan Lipnik on 3/10/26.
 //
 
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 
 /// Handle for an app-owned outgoing Loom transfer.
@@ -1082,7 +1086,6 @@ public actor LoomTransferEngine {
             return
         }
         outgoingTransfers.removeValue(forKey: id)
-        state.offerDecisionTask?.cancel()
         state.handle.yield(
             progress(
                 for: state.offer,
@@ -1100,7 +1103,6 @@ public actor LoomTransferEngine {
             return
         }
         incomingTransfersByID.removeValue(forKey: id)
-        state.offerDecisionTask?.cancel()
         state.handle.yield(
             progress(
                 for: state.offer,
@@ -1119,7 +1121,6 @@ public actor LoomTransferEngine {
             return
         }
         state.offerDecisionTask?.cancel()
-        state.completionDeadlineTask?.cancel()
         state.task?.cancel()
         await scheduler.finishTransfer(id: id)
         try? await state.dataStream?.close()
@@ -1141,7 +1142,6 @@ public actor LoomTransferEngine {
         }
         incomingTransfersByID.removeValue(forKey: id)
         state.offerDecisionTask?.cancel()
-        state.completionDeadlineTask?.cancel()
         state.task?.cancel()
         try? await state.sink?.close()
         state.handle.yield(

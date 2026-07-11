@@ -5,6 +5,7 @@
 //  Created by Ethan Lipnik on 3/11/26.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -183,3 +184,5 @@ package enum LoomOverlayProbeClient {
         }
     }
 }
+
+#endif

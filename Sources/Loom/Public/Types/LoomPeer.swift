@@ -6,7 +6,9 @@
 //
 
 import Foundation
+#if canImport(Network)
 import Network
+#endif
 
 /// Network-interface class inferred from Bonjour discovery metadata.
 public enum LoomDiscoveredInterfaceKind: String, Hashable, Sendable {
@@ -27,14 +29,34 @@ public struct LoomDiscoveredInterface: Hashable, Sendable {
     /// System interface name, such as `en0` or `awdl0`.
     public let name: String
 
-    /// Broad Network.framework interface type.
-    public let type: NWInterface.InterfaceType
+    /// Backend-independent interface type.
+    public let backendType: LoomNetworkInterfaceType
 
     /// System interface index.
     public let index: Int
 
+#if canImport(Network)
+    private let nativeNetworkInterface: NWInterface?
+
+    /// Broad Network.framework compatibility projection of the interface type.
+    public var type: NWInterface.InterfaceType {
+        backendType.nwInterfaceType ?? .other
+    }
+
     /// Backing Network.framework interface when this value originated from discovery.
-    public let networkInterface: NWInterface?
+    public var networkInterface: NWInterface? {
+        nativeNetworkInterface
+    }
+#endif
+
+    /// Backend-independent interface metadata for portable consumers.
+    public var backendInterface: LoomNetworkInterface {
+        LoomNetworkInterface(
+            name: name,
+            index: index,
+            type: backendType
+        )
+    }
 
     /// Interface class inferred from the system name and Network.framework type.
     public var kind: LoomDiscoveredInterfaceKind {
@@ -61,7 +83,7 @@ public struct LoomDiscoveredInterface: Hashable, Sendable {
             return .loopback
         }
 
-        switch type {
+        switch backendType {
         case .wifi:
             return .wifi
         case .wiredEthernet:
@@ -70,9 +92,7 @@ public struct LoomDiscoveredInterface: Hashable, Sendable {
             return .cellular
         case .loopback:
             return .loopback
-        case .other:
-            return .other
-        @unknown default:
+        default:
             return .other
         }
     }
@@ -105,6 +125,22 @@ public struct LoomDiscoveredInterface: Hashable, Sendable {
         kind == .awdl
     }
 
+    /// Creates interface metadata without a platform networking type.
+    public init(
+        name: String,
+        backendType: LoomNetworkInterfaceType,
+        index: Int
+    ) {
+        self.name = name
+        self.backendType = backendType
+        self.index = index
+#if canImport(Network)
+        nativeNetworkInterface = nil
+#endif
+    }
+
+#if canImport(Network)
+    /// Creates interface metadata using the released Network.framework API.
     public init(
         name: String,
         type: NWInterface.InterfaceType,
@@ -112,9 +148,9 @@ public struct LoomDiscoveredInterface: Hashable, Sendable {
         networkInterface: NWInterface? = nil
     ) {
         self.name = name
-        self.type = type
+        backendType = LoomNetworkInterfaceType(type)
         self.index = index
-        self.networkInterface = networkInterface
+        nativeNetworkInterface = networkInterface
     }
 
     public init(_ interface: NWInterface) {
@@ -124,6 +160,17 @@ public struct LoomDiscoveredInterface: Hashable, Sendable {
             index: interface.index,
             networkInterface: interface
         )
+    }
+#endif
+
+    public static func == (lhs: LoomDiscoveredInterface, rhs: LoomDiscoveredInterface) -> Bool {
+        lhs.name == rhs.name && lhs.index == rhs.index && lhs.backendType == rhs.backendType
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(name)
+        hasher.combine(index)
+        hasher.combine(backendType)
     }
 }
 
@@ -136,7 +183,7 @@ public enum LoomResolvedServiceAddressSource: String, Hashable, Sendable {
 /// A resolved Bonjour address with any route evidence that can be proven from
 /// the address itself.
 public struct LoomResolvedServiceAddress: Hashable, Sendable {
-    public let host: NWEndpoint.Host
+    public let backendHost: LoomNetworkHost
     public let interfaceName: String?
     public let interfaceKind: LoomDiscoveredInterfaceKind?
     public let source: LoomResolvedServiceAddressSource
@@ -145,17 +192,42 @@ public struct LoomResolvedServiceAddress: Hashable, Sendable {
         interfaceName != nil
     }
 
+#if canImport(Network)
+    /// Network.framework compatibility projection of the resolved host.
+    public var host: NWEndpoint.Host {
+        backendHost.nwHost
+    }
+#endif
+
+    /// Creates a resolved service address without a platform networking type.
+    public init(
+        backendHost: LoomNetworkHost,
+        interfaceName: String? = nil,
+        interfaceKind: LoomDiscoveredInterfaceKind? = nil,
+        source: LoomResolvedServiceAddressSource = .netService
+    ) {
+        self.backendHost = backendHost
+        self.interfaceName = interfaceName
+        self.interfaceKind = interfaceKind
+        self.source = source
+    }
+
+#if canImport(Network)
+    /// Creates a resolved service address using the released Network.framework API.
     public init(
         host: NWEndpoint.Host,
         interfaceName: String? = nil,
         interfaceKind: LoomDiscoveredInterfaceKind? = nil,
         source: LoomResolvedServiceAddressSource = .netService
     ) {
-        self.host = host
-        self.interfaceName = interfaceName
-        self.interfaceKind = interfaceKind
-        self.source = source
+        self.init(
+            backendHost: LoomNetworkHost(host),
+            interfaceName: interfaceName,
+            interfaceKind: interfaceKind,
+            source: source
+        )
     }
+#endif
 }
 
 /// Represents a discovered peer on the network.
@@ -169,8 +241,8 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
     /// Broad Apple-platform device classification for the peer.
     public let deviceType: DeviceType
 
-    /// Network endpoint used to connect to the peer.
-    public let endpoint: NWEndpoint
+    /// Backend-independent network endpoint used to connect to the peer.
+    public let backendEndpoint: LoomNetworkEndpoint
 
     /// Discovery advertisement published by the peer.
     public let advertisement: LoomPeerAdvertisement
@@ -181,7 +253,7 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
     /// returned by `NetService.resolve()`. IPv4 addresses appear first.
     /// Consumers should prefer these over re-resolving the advertised hostname
     /// to avoid platform-specific mDNS resolution failures (e.g. iOS).
-    public let resolvedAddresses: [NWEndpoint.Host]
+    public let backendResolvedAddresses: [LoomNetworkHost]
 
     /// Resolved Bonjour service addresses with any interface binding that was
     /// present in the resolved socket address.
@@ -189,6 +261,33 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
 
     /// Interfaces on which this peer was discovered.
     public let discoveredInterfaces: [LoomDiscoveredInterface]
+
+#if canImport(Network)
+    private let nativeEndpoint: NWEndpoint?
+
+    /// Network.framework compatibility projection of the connection endpoint.
+    public var endpoint: NWEndpoint {
+        if let nativeEndpoint {
+            return nativeEndpoint
+        }
+        switch backendEndpoint {
+        case let .hostPort(host, port):
+            return .hostPort(
+                host: host.nwHost,
+                port: NWEndpoint.Port(rawValue: port) ?? .any
+            )
+        case let .service(name, type, domain, _):
+            return .service(name: name, type: type, domain: domain, interface: nil)
+        case let .opaque(description):
+            preconditionFailure("Opaque backend endpoint cannot be projected to Network.framework: \(description)")
+        }
+    }
+
+    /// Network.framework compatibility projection of resolved service hosts.
+    public var resolvedAddresses: [NWEndpoint.Host] {
+        backendResolvedAddresses.map(\.nwHost)
+    }
+#endif
 
     /// Convenience access to the host device backing this peer.
     public var deviceID: UUID {
@@ -200,6 +299,34 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
         id.appID
     }
 
+    /// Creates a peer without exposing a platform networking type.
+    public init(
+        id: LoomPeerID,
+        name: String,
+        deviceType: DeviceType,
+        backendEndpoint: LoomNetworkEndpoint,
+        advertisement: LoomPeerAdvertisement,
+        backendResolvedAddresses: [LoomNetworkHost] = [],
+        resolvedServiceAddresses: [LoomResolvedServiceAddress] = [],
+        discoveredInterfaces: [LoomDiscoveredInterface] = []
+    ) {
+        self.id = id
+        self.name = name
+        self.deviceType = deviceType
+        self.backendEndpoint = backendEndpoint
+        self.advertisement = advertisement
+        self.backendResolvedAddresses = backendResolvedAddresses
+        self.resolvedServiceAddresses = resolvedServiceAddresses.isEmpty
+            ? backendResolvedAddresses.map { LoomResolvedServiceAddress(backendHost: $0) }
+            : resolvedServiceAddresses
+        self.discoveredInterfaces = discoveredInterfaces
+#if canImport(Network)
+        nativeEndpoint = nil
+#endif
+    }
+
+#if canImport(Network)
+    /// Creates a peer using the released Network.framework endpoint API.
     public init(
         id: LoomPeerID,
         name: String,
@@ -213,13 +340,14 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
         self.id = id
         self.name = name
         self.deviceType = deviceType
-        self.endpoint = endpoint
+        backendEndpoint = LoomNetworkEndpoint(endpoint) ?? .opaque(description: String(describing: endpoint))
         self.advertisement = advertisement
-        self.resolvedAddresses = resolvedAddresses
+        backendResolvedAddresses = resolvedAddresses.map(LoomNetworkHost.init)
         self.resolvedServiceAddresses = resolvedServiceAddresses.isEmpty
             ? resolvedAddresses.map { LoomResolvedServiceAddress(host: $0) }
             : resolvedServiceAddresses
         self.discoveredInterfaces = discoveredInterfaces
+        nativeEndpoint = endpoint
     }
 
     public init(
@@ -262,6 +390,32 @@ public struct LoomPeer: Identifiable, Hashable, Sendable {
             endpoint: endpoint,
             advertisement: advertisement,
             resolvedAddresses: resolvedAddresses,
+            resolvedServiceAddresses: resolvedServiceAddresses,
+            discoveredInterfaces: discoveredInterfaces
+        )
+    }
+#endif
+
+    /// Creates a peer identifier from a device and optional application ID
+    /// without exposing a platform networking type.
+    public init(
+        id: UUID,
+        appID: String? = nil,
+        name: String,
+        deviceType: DeviceType,
+        backendEndpoint: LoomNetworkEndpoint,
+        advertisement: LoomPeerAdvertisement,
+        backendResolvedAddresses: [LoomNetworkHost] = [],
+        resolvedServiceAddresses: [LoomResolvedServiceAddress] = [],
+        discoveredInterfaces: [LoomDiscoveredInterface] = []
+    ) {
+        self.init(
+            id: LoomPeerID(deviceID: id, appID: appID),
+            name: name,
+            deviceType: deviceType,
+            backendEndpoint: backendEndpoint,
+            advertisement: advertisement,
+            backendResolvedAddresses: backendResolvedAddresses,
             resolvedServiceAddresses: resolvedServiceAddresses,
             discoveredInterfaces: discoveredInterfaces
         )

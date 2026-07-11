@@ -5,59 +5,54 @@
 //  Created by Ethan Lipnik on 5/24/26.
 //
 
+#if canImport(Network)
 import Foundation
+import LoomNetworking
 import Network
 
 package enum LoomConnectionFactory {
-    package static func makeConnection(
+    package static func makeBackendConnection(
         to endpoint: NWEndpoint,
         using transportKind: LoomTransportKind,
         configuration: LoomNetworkConfiguration,
+        backend: any LoomNetworkBackend,
         enablePeerToPeer: Bool?,
         requiredInterface: NWInterface?,
         requiredInterfaceType: NWInterface.InterfaceType?,
         requiredLocalPort: UInt16?
-    ) throws -> LoomConnection {
-        switch transportKind {
-        case .tcp, .udp:
-            return try makeNWConnection(
+    ) throws -> any LoomNetworkConnection {
+        if let nativeBackend = backend as? LoomNetworkFrameworkBackend {
+            return try nativeBackend.makeNativeConnection(
                 to: endpoint,
                 using: transportKind,
-                configuration: configuration,
-                enablePeerToPeer: enablePeerToPeer,
+                enablePeerToPeer: enablePeerToPeer ?? configuration.enablePeerToPeer,
                 requiredInterface: requiredInterface,
                 requiredInterfaceType: requiredInterfaceType,
-                requiredLocalPort: requiredLocalPort
+                requiredLocalPort: requiredLocalPort,
+                datagramServiceClass: configuration.directDatagramServiceClass
             )
-        case .quic:
-            throw LoomError.protocolError("QUIC transport has been removed.")
         }
-    }
 
-    private static func makeNWConnection(
-        to endpoint: NWEndpoint,
-        using transportKind: LoomTransportKind,
-        configuration: LoomNetworkConfiguration,
-        enablePeerToPeer: Bool?,
-        requiredInterface: NWInterface?,
-        requiredInterfaceType: NWInterface.InterfaceType?,
-        requiredLocalPort: UInt16?
-    ) throws -> LoomConnection {
-        guard let nwTransportKind = LoomNWConnectionTransportKind(transportKind) else {
-            throw LoomError.protocolError("Transport \(transportKind.rawValue) is not backed by NWConnection.")
+        guard let backendEndpoint = LoomNetworkEndpoint(endpoint) else {
+            throw LoomNetworkError(
+                code: .unsupported,
+                detail: "The selected network backend cannot represent endpoint \(endpoint)."
+            )
         }
-        let parameters = try LoomTransportParametersFactory.makeParameters(
-            for: nwTransportKind,
-            enablePeerToPeer: enablePeerToPeer ?? configuration.enablePeerToPeer,
-            requiredInterface: requiredInterface,
-            requiredInterfaceType: requiredInterfaceType,
-            udpServiceClass: configuration.directDatagramServiceClass
+        return try backend.makeConnection(
+            to: backendEndpoint,
+            using: transportKind.networkTransportKind,
+            configuration: LoomNetworkConnectionConfiguration(
+                enablePeerToPeer: enablePeerToPeer ?? configuration.enablePeerToPeer,
+                requiredInterface: requiredInterface.map(LoomNetworkInterface.init),
+                requiredInterfaceType: requiredInterfaceType.map(LoomNetworkInterfaceType.init),
+                requiredLocalPort: requiredLocalPort,
+                datagramServiceClass: LoomNetworkServiceClass(
+                    configuration.directDatagramServiceClass
+                )
+            )
         )
-        if let requiredLocalPort, let port = NWEndpoint.Port(rawValue: requiredLocalPort) {
-            parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.any), port: port)
-            parameters.allowLocalEndpointReuse = true
-        }
-        let connection = NWConnection(to: endpoint, using: parameters)
-        return LoomConnection(connection: connection, transportKind: nwTransportKind)
     }
 }
+
+#endif

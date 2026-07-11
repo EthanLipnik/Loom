@@ -5,6 +5,7 @@
 //  Created by Ethan Lipnik on 3/11/26.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 import Observation
@@ -543,3 +544,5 @@ private struct LoomOverlayDirectoryCandidate: Sendable {
     let deviceType: DeviceType
     let advertisement: LoomPeerAdvertisement
 }
+
+#endif

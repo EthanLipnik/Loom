@@ -6,17 +6,19 @@
 //
 
 import Foundation
-import Network
+import LoomNetworking
 
 /// Reliable datagram transport for Loom sessions over UDP.
 ///
 /// Provides ordered, reliable delivery of arbitrary-size messages on top of an
-/// `NWConnection` configured for UDP. Implements selective-ACK with piggyback
+/// a message-preserving datagram connection. Implements selective-ACK with piggyback
 /// acknowledgments, automatic retransmission, and transparent fragmentation
 /// for messages exceeding a single datagram.
 package actor LoomReliableChannel: LoomSessionTransport {
-    private let connection: NWConnection
+    private let connection: any LoomNetworkConnection
+    private let serializedUnreliableSender: LoomSerializedNetworkSendQueue
     private var queuedUnreliableSenders: [LoomQueuedUnreliableSendProfile: LoomOrderedUnreliableSendQueue] = [:]
+    private var observationTask: Task<Void, Never>?
     package let receiveSemantics: LoomSessionReceiveSemantics = .independentReliableAndUnreliable
 
     // MARK: - Send State
@@ -92,12 +94,13 @@ package actor LoomReliableChannel: LoomSessionTransport {
     private var terminalFailure: LoomConnectionFailure?
 
     package init(
-        connection: NWConnection,
+        connection: any LoomNetworkConnection,
         retainedCapacityBudget: LoomIncomingRetainedCapacityBudget? = nil,
         maximumPendingReliablePackets: Int = 8_192,
         maximumPendingReliableBytes: Int = 16 * 1024 * 1024
     ) {
         self.connection = connection
+        serializedUnreliableSender = LoomSerializedNetworkSendQueue(connection: connection)
         maxPendingReliablePackets = max(1, maximumPendingReliablePackets)
         maxPendingReliableBytes = max(1, maximumPendingReliableBytes)
         fragmentBudget = LoomIncomingRetainedCapacityBudget(
@@ -150,6 +153,8 @@ package actor LoomReliableChannel: LoomSessionTransport {
         retryTimer?.cancel()
         receiveTask?.cancel()
         ackTask?.cancel()
+        observationTask?.cancel()
+        serializedUnreliableSender.close()
         deliveryBuffer.abort()
         handshakeDeliveryBuffer.abort()
         unreliableDeliveryBuffer.abort()
@@ -159,46 +164,17 @@ package actor LoomReliableChannel: LoomSessionTransport {
     // MARK: - LoomSessionTransport
 
     package func startAndAwaitReady(queue: DispatchQueue) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let box = ReadyContinuationBox(continuation: continuation)
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    box.complete(.success(()))
-                case let .failed(error):
-                    box.complete(.failure(LoomError.connectionFailed(LoomConnectionFailure.classify(error))))
-                case .cancelled:
-                    box.complete(
-                        .failure(
-                            LoomError.connectionFailed(
-                                LoomConnectionFailure(reason: .cancelled, detail: "Connection cancelled.")
-                            )
-                        )
-                    )
-                case .waiting(let error):
-                    LoomLogger.transport("UDP connection waiting: \(error)")
-                    if case .posix(let code) = error,
-                       ([.ENETDOWN, .EHOSTUNREACH, .ENETUNREACH] as [POSIXErrorCode]).contains(code) {
-                        // Give the interface 2 seconds to come up; if .ready
-                        // fires first the box is already consumed and this
-                        // completion is a safe no-op.
-                        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                            box.complete(.failure(LoomError.connectionFailed(LoomConnectionFailure.classify(error))))
-                        }
-                    }
-                default:
-                    break
-                }
-            }
-            // Handler is set — now start. All state transitions are captured.
-            connection.start(queue: queue)
+        do {
+            try await connection.start()
+        } catch {
+            throw LoomError.connectionFailed(LoomConnectionFailure.classify(error))
         }
         startReceiveLoop()
         startRetryTimer()
     }
 
     package func sendMessage(_ data: Data) async throws {
-        routesReliablePacketsToHandshake = false
+        finishHandshakeDeliveryIfNeeded()
         try await sendReliableMessage(data)
     }
 
@@ -238,7 +214,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
             }
 
             // Send fragments in batches with yields between batches to avoid
-            // overwhelming the NWConnection's kernel send buffer. Without
+            // overwhelming the socket's kernel send buffer. Without
             // backpressure, ~950 fragments (for a 1MB payload) saturate the
             // UDP send buffer and cause the connection to be cancelled.
             let sendBatchSize = 16
@@ -273,7 +249,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
     }
 
     package func receiveMessage(maxBytes: Int) async throws -> Data {
-        routesReliablePacketsToHandshake = false
+        finishHandshakeDeliveryIfNeeded()
         for await message in deliveryStream {
             if message.count > maxBytes {
                 throw LoomError.protocolError(
@@ -414,7 +390,21 @@ package actor LoomReliableChannel: LoomSessionTransport {
         guard maxBytes > 0 else {
             throw LoomError.protocolError("Invalid unreliable receive size limit.")
         }
+        finishHandshakeDeliveryIfNeeded()
+    }
+
+    /// Moves the reliable receive lane out of hello-only routing without
+    /// allowing a later post-handshake packet to become the ordering origin.
+    /// A trust frame can arrive while its peer is still decoding the hello and
+    /// is deliberately left unacknowledged for retransmission. Remembering the
+    /// sequence immediately after the accepted hello makes a subsequently
+    /// arriving key-confirmation frame wait for that trust-frame retransmit.
+    private func finishHandshakeDeliveryIfNeeded() {
+        guard routesReliablePacketsToHandshake else { return }
         routesReliablePacketsToHandshake = false
+        guard hasReceivedFirstPacket else { return }
+        nextDeliverySequence = highestContiguousReceived &+ 1
+        hasSetInitialDeliverySequence = true
     }
 
     package func cancelPendingUnreliableSends() async {
@@ -423,12 +413,22 @@ package actor LoomReliableChannel: LoomSessionTransport {
         }
     }
 
+    package func closeTransport() async {
+        await cancelPendingUnreliableSends()
+        serializedUnreliableSender.close()
+        observationTask?.cancel()
+        observationTask = nil
+        close()
+        await connection.cancel()
+    }
+
     package func close(with failure: LoomConnectionFailure? = nil) {
         guard !isClosed else { return }
         isClosed = true
         for sender in queuedUnreliableSenders.values {
             sender.close()
         }
+        serializedUnreliableSender.close()
         if let failure {
             terminalFailure = failure
         } else if terminalFailure == nil {
@@ -444,7 +444,9 @@ package actor LoomReliableChannel: LoomSessionTransport {
         handshakeDeliveryBuffer.abort()
         unreliableDeliveryBuffer.abort()
         priorityUnreliableDeliveryBuffer.abort()
-        connection.cancel()
+        Task { [connection] in
+            await connection.cancel()
+        }
     }
 
     private nonisolated static func makeDeliveryBuffer(
@@ -474,7 +476,6 @@ package actor LoomReliableChannel: LoomSessionTransport {
 
         let limits = LoomOrderedUnreliableSendQueue.limits(for: profile)
         let sender = LoomOrderedUnreliableSendQueue(
-            connection: connection,
             queue: DispatchQueue(
                 label: "loom.reliable.unreliable.send.\(profile.rawValue)",
                 qos: .userInteractive
@@ -484,7 +485,10 @@ package actor LoomReliableChannel: LoomSessionTransport {
             maxQueuedPackets: limits.maxQueuedPackets,
             replacesQueuedSends: limits.replacesQueuedSends,
             profile: profile,
-            diagnosticsLabel: profile.rawValue
+            diagnosticsLabel: profile.rawValue,
+            sendOperation: { [serializedUnreliableSender] data, onComplete in
+                serializedUnreliableSender.enqueue(data, completion: onComplete)
+            }
         )
         queuedUnreliableSenders[profile] = sender
         return sender
@@ -706,7 +710,9 @@ package actor LoomReliableChannel: LoomSessionTransport {
                 }
 
                 pendingAcks[seq] = pending
-                connection.send(content: retransmitPacket, completion: .idempotent)
+                Task { [connection] in
+                    try? await connection.send(retransmitPacket)
+                }
             }
         }
 
@@ -880,7 +886,10 @@ package actor LoomReliableChannel: LoomSessionTransport {
             ackSequence: currentAckSequence(),
             ackBitmap: currentAckBitmap()
         )
-        connection.send(content: header.serialize(), completion: .idempotent)
+        let packet = header.serialize()
+        Task { [connection] in
+            try? await connection.send(packet)
+        }
     }
 
     package nonisolated static func shouldSendImmediateReliableAck(
@@ -1170,68 +1179,47 @@ package actor LoomReliableChannel: LoomSessionTransport {
     // MARK: - Raw I/O
 
     private func sendRaw(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: data, completion: .contentProcessed { error in
-                if let error {
-                    continuation.resume(throwing: LoomError.connectionFailed(LoomConnectionFailure.classify(error)))
-                } else {
-                    continuation.resume()
-                }
-            })
+        do {
+            try await connection.send(data)
+        } catch {
+            throw LoomError.connectionFailed(LoomConnectionFailure.classify(error))
         }
     }
 
     private func receiveRawDatagram() async throws -> Data {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
-            connection.receiveMessage { data, _, isComplete, error in
-                if let error {
-                    continuation.resume(throwing: LoomError.connectionFailed(LoomConnectionFailure.classify(error)))
-                    return
-                }
-                if let data {
-                    continuation.resume(returning: data)
-                    return
-                }
-                if isComplete {
-                    continuation.resume(
-                        throwing: LoomError.connectionFailed(
-                            LoomConnectionFailure(reason: .closed, detail: "UDP connection closed.")
-                        )
-                    )
-                    return
-                }
-                continuation.resume(
-                    throwing: LoomError.protocolError("No data received from UDP connection.")
+        do {
+            guard let data = try await connection.receive(maximumBytes: 65_535) else {
+                throw LoomError.connectionFailed(
+                    LoomConnectionFailure(reason: .closed, detail: "UDP connection closed.")
                 )
             }
+            return data
+        } catch let error as LoomError {
+            throw error
+        } catch {
+            throw LoomError.connectionFailed(LoomConnectionFailure.classify(error))
         }
     }
-}
 
-// MARK: - Continuation Safety
-
-private final class ReadyContinuationBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, Error>?
-
-    init(continuation: CheckedContinuation<Void, Error>) {
-        self.continuation = continuation
-    }
-
-    func complete(_ result: Result<Void, Error>) {
-        lock.lock()
-        guard let continuation else {
-            lock.unlock()
-            return
-        }
-        self.continuation = nil
-        lock.unlock()
-
-        switch result {
-        case .success:
-            continuation.resume()
-        case let .failure(error):
-            continuation.resume(throwing: error)
+    package func setObservationHandler(
+        _ handler: (@Sendable (LoomSessionTransportObservation) -> Void)?
+    ) async {
+        observationTask?.cancel()
+        observationTask = nil
+        guard let handler else { return }
+        let events = await connection.makeEventStream()
+        observationTask = Task {
+            for await event in events {
+                guard !Task.isCancelled else { break }
+                switch event {
+                case let .path(path):
+                    handler(.path(path))
+                case let .failed(error):
+                    handler(.failed(error.detail))
+                case .cancelled:
+                    handler(.cancelled)
+                }
+            }
         }
     }
 }

@@ -6,22 +6,25 @@
 //
 
 import Foundation
-import Network
 import Dispatch
+import LoomNetworking
 
 package actor LoomFramedConnection: LoomSessionTransport {
-    private let connection: NWConnection
+    private let connection: any LoomNetworkConnection
+    private let serializedUnreliableSender: LoomSerializedNetworkSendQueue
     private var queuedUnreliableSenders: [LoomQueuedUnreliableSendProfile: LoomOrderedUnreliableSendQueue] = [:]
+    private var observationTask: Task<Void, Never>?
     private let receiveBuffer: LoomFramedReceiveBuffer
     private let incompleteFrameTimeout: Duration
     package let receiveSemantics: LoomSessionReceiveSemantics = .singleLane
 
     package init(
-        connection: NWConnection,
+        connection: any LoomNetworkConnection,
         retainedCapacityBudget: LoomIncomingRetainedCapacityBudget? = nil,
         incompleteFrameTimeout: Duration = .seconds(60)
     ) {
         self.connection = connection
+        serializedUnreliableSender = LoomSerializedNetworkSendQueue(connection: connection)
         receiveBuffer = LoomFramedReceiveBuffer(
             retainedCapacityBudget: retainedCapacityBudget
         )
@@ -96,12 +99,17 @@ package actor LoomFramedConnection: LoomSessionTransport {
         for sender in queuedUnreliableSenders.values {
             sender.close()
         }
+        serializedUnreliableSender.close()
+        observationTask?.cancel()
     }
 
     package func closeTransport() async {
         await cancelPendingUnreliableSends()
+        serializedUnreliableSender.close()
+        observationTask?.cancel()
+        observationTask = nil
         receiveBuffer.discard()
-        connection.cancel()
+        await connection.cancel()
     }
 
     private func queuedUnreliableSender(
@@ -113,7 +121,6 @@ package actor LoomFramedConnection: LoomSessionTransport {
 
         let limits = LoomOrderedUnreliableSendQueue.limits(for: profile)
         let sender = LoomOrderedUnreliableSendQueue(
-            connection: connection,
             queue: DispatchQueue(
                 label: "loom.framed.unreliable.send.\(profile.rawValue)",
                 qos: .userInteractive
@@ -123,48 +130,21 @@ package actor LoomFramedConnection: LoomSessionTransport {
             maxQueuedPackets: limits.maxQueuedPackets,
             replacesQueuedSends: limits.replacesQueuedSends,
             profile: profile,
-            diagnosticsLabel: profile.rawValue
+            diagnosticsLabel: profile.rawValue,
+            sendOperation: { [serializedUnreliableSender] data, onComplete in
+                serializedUnreliableSender.enqueue(data, completion: onComplete)
+            }
         )
         queuedUnreliableSenders[profile] = sender
         return sender
     }
 
     package func startAndAwaitReady(queue: DispatchQueue) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            let completion = LoomReadyContinuationBox(continuation: continuation)
-            connection.stateUpdateHandler = { state in
-                switch state {
-                case .ready:
-                    completion.complete(.success(()))
-                case let .failed(error):
-                    completion.complete(.failure(LoomError.connectionFailed(LoomConnectionFailure.classify(error))))
-                case .cancelled:
-                    completion.complete(
-                        .failure(
-                            LoomError.connectionFailed(
-                                LoomConnectionFailure(reason: .cancelled, detail: "Connection cancelled.")
-                            )
-                        )
-                    )
-                case .waiting(let error):
-                    LoomLogger.transport("TCP/QUIC connection waiting: \(error)")
-                    if Self.shouldFailAfterWaiting(error) {
-                        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
-                            completion.complete(.failure(LoomError.connectionFailed(LoomConnectionFailure.classify(error))))
-                        }
-                    }
-                default:
-                    break
-                }
-            }
-            // Handler is set — now start. All state transitions are captured.
-            connection.start(queue: queue)
+        do {
+            try await connection.start()
+        } catch {
+            throw LoomError.connectionFailed(LoomConnectionFailure.classify(error))
         }
-    }
-
-    package nonisolated static func shouldFailAfterWaiting(_ error: NWError) -> Bool {
-        guard case .posix(let code) = error else { return false }
-        return ([.ENETDOWN, .EHOSTUNREACH, .ENETUNREACH, .ENOTCONN] as [POSIXErrorCode]).contains(code)
     }
 
     package func sendFrame(_ data: Data) async throws {
@@ -221,20 +201,16 @@ package actor LoomFramedConnection: LoomSessionTransport {
             return try receiveBuffer.consumeCompleteFrame(requiredBytes: requiredBytes)
         } catch {
             receiveBuffer.discard()
-            connection.cancel()
+            await connection.cancel()
             throw error
         }
     }
 
     private func send(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: data, completion: .contentProcessed { error in
-                if let error {
-                    continuation.resume(throwing: LoomError.connectionFailed(LoomConnectionFailure.classify(error)))
-                } else {
-                    continuation.resume()
-                }
-            })
+        do {
+            try await connection.send(data)
+        } catch {
+            throw LoomError.connectionFailed(LoomConnectionFailure.classify(error))
         }
     }
 
@@ -247,7 +223,9 @@ package actor LoomFramedConnection: LoomSessionTransport {
             chunk = try await withLoomThrowingDeadline(
                 deadline,
                 onTimeout: { [connection] in
-                    connection.cancel()
+                    Task {
+                        await connection.cancel()
+                    }
                 },
                 timeoutError: {
                     LoomError.protocolError("Timed out while receiving an incomplete Loom frame.")
@@ -275,54 +253,38 @@ package actor LoomFramedConnection: LoomSessionTransport {
     }
 
     private nonisolated static func receiveChunk(
-        from connection: NWConnection,
+        from connection: any LoomNetworkConnection,
         maximumLength: Int
     ) async throws -> Data {
         guard maximumLength > 0 else {
             throw LoomError.protocolError("Invalid Loom framed receive length.")
         }
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Data, Error>) in
-            connection.receive(minimumIncompleteLength: 1, maximumLength: maximumLength) { data, _, isComplete, error in
-                if let error {
-                    continuation.resume(throwing: LoomError.connectionFailed(LoomConnectionFailure.classify(error)))
-                    return
+        do {
+            return try await connection.receive(maximumBytes: maximumLength) ?? Data()
+        } catch {
+            throw LoomError.connectionFailed(LoomConnectionFailure.classify(error))
+        }
+    }
+
+    package func setObservationHandler(
+        _ handler: (@Sendable (LoomSessionTransportObservation) -> Void)?
+    ) async {
+        observationTask?.cancel()
+        observationTask = nil
+        guard let handler else { return }
+        let events = await connection.makeEventStream()
+        observationTask = Task {
+            for await event in events {
+                guard !Task.isCancelled else { break }
+                switch event {
+                case let .path(path):
+                    handler(.path(path))
+                case let .failed(error):
+                    handler(.failed(error.detail))
+                case .cancelled:
+                    handler(.cancelled)
                 }
-                if let data {
-                    continuation.resume(returning: data)
-                    return
-                }
-                if isComplete {
-                    continuation.resume(returning: Data())
-                    return
-                }
-                continuation.resume(throwing: LoomError.protocolError("No data received from connection."))
             }
-        }
-    }
-}
-
-private final class LoomReadyContinuationBox: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, Error>?
-
-    init(continuation: CheckedContinuation<Void, Error>) {
-        self.continuation = continuation
-    }
-
-    func complete(_ result: Result<Void, Error>) {
-        lock.lock()
-        guard let continuation else {
-            lock.unlock()
-            return
-        }
-        self.continuation = nil
-        lock.unlock()
-
-        switch result {
-        case .success:
-            continuation.resume()
-        case let .failure(error):
-            continuation.resume(throwing: error)
         }
     }
 }

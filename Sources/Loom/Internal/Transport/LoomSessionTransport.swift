@@ -14,7 +14,7 @@ package enum LoomSessionReceiveSemantics: Sendable {
 }
 
 package enum LoomSessionTransportObservation: Sendable {
-    case path(LoomSessionNetworkPathSnapshot)
+    case path(LoomNetworkPath)
     case failed(String)
     case cancelled
 }
@@ -30,8 +30,7 @@ package protocol LoomSessionTransport: Sendable {
 
     /// Start the underlying connection and block until it is ready for I/O.
     ///
-    /// Sets the `stateUpdateHandler` **before** calling `NWConnection.start(queue:)`
-    /// so that no state transitions are lost — per Apple's Network.framework documentation.
+    /// Starts the backend connection and waits for it to become usable.
     func startAndAwaitReady(queue: DispatchQueue) async throws
 
     /// Send a complete message reliably (ordered, retransmitted if needed).
@@ -52,8 +51,8 @@ package protocol LoomSessionTransport: Sendable {
     /// Enqueue an unreliable message for ordered, non-blocking transmission.
     ///
     /// The method returns after the transport has accepted the payload for send
-    /// scheduling. Completion runs later when Network.framework either accepts
-    /// or rejects the underlying send operation.
+    /// scheduling. Completion runs later when the backend either accepts or
+    /// rejects the underlying send operation.
     func sendUnreliableQueued(
         _ data: Data,
         profile: LoomQueuedUnreliableSendProfile,

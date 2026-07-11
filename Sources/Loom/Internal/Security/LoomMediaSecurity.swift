@@ -7,7 +7,11 @@
 //  Media session key derivation, registration authentication, and packet AEAD helpers.
 //
 
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 
 package enum LoomMediaDirection: UInt8, Sendable {

@@ -5,6 +5,7 @@
 //  Created by Ethan Lipnik on 1/2/26.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 import Observation
@@ -795,3 +796,5 @@ private struct LoomHostDiscoveryCandidate {
     let resolvedServiceAddresses: [LoomResolvedServiceAddress]
     let discoveredInterfaces: [LoomDiscoveredInterface]
 }
+
+#endif

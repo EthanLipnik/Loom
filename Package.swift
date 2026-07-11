@@ -18,6 +18,14 @@ let package = Package(
     ],
     products: [
         .library(
+            name: "LoomNetworking",
+            targets: ["LoomNetworking"]
+        ),
+        .library(
+            name: "LoomNetworkingNIO",
+            targets: ["LoomNetworkingNIO"]
+        ),
+        .library(
             name: "Loom",
             targets: ["Loom"]
         ),
@@ -39,10 +47,39 @@ let package = Package(
         ),
     ],
     dependencies: [
+        .package(url: "https://github.com/apple/swift-crypto.git", exact: "4.5.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.81.0"),
         .package(url: "https://github.com/apple/swift-nio-ssh.git", from: "0.12.0"),
     ],
     targets: [
+        .target(
+            name: "LoomNetworking"
+        ),
+        .target(
+            name: "LoomNetworkingNIO",
+            dependencies: [
+                "LoomNetworking",
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOPosix", package: "swift-nio"),
+            ]
+        ),
+        .target(
+            name: "CLoomPlatformSupport",
+            publicHeadersPath: "include",
+            linkerSettings: [
+                .linkedLibrary("advapi32", .when(platforms: [.windows])),
+                .linkedLibrary("crypt32", .when(platforms: [.windows])),
+                .linkedLibrary("dnsapi", .when(platforms: [.windows])),
+                .linkedLibrary("ws2_32", .when(platforms: [.windows])),
+            ]
+        ),
+        .target(
+            name: "LoomPlatformAdapters",
+            dependencies: [
+                "CLoomPlatformSupport",
+                "LoomNetworking",
+            ]
+        ),
         .target(
             name: "CLoomShellSupport",
             publicHeadersPath: "include"
@@ -50,6 +87,10 @@ let package = Package(
         .target(
             name: "Loom",
             dependencies: [
+                "LoomNetworking",
+                "LoomNetworkingNIO",
+                "LoomPlatformAdapters",
+                .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOConcurrencyHelpers", package: "swift-nio"),
@@ -88,8 +129,29 @@ let package = Package(
             path: "Sources/LoomHost"
         ),
         .testTarget(
+            name: "LoomNetworkingTests",
+            dependencies: ["LoomNetworking"]
+        ),
+        .testTarget(
+            name: "LoomNetworkingNIOTests",
+            dependencies: [
+                "LoomNetworking",
+                "LoomNetworkingNIO",
+            ]
+        ),
+        .testTarget(
+            name: "LoomPlatformAdaptersTests",
+            dependencies: [
+                "LoomNetworking",
+                "LoomPlatformAdapters",
+            ]
+        ),
+        .testTarget(
             name: "LoomTests",
-            dependencies: ["Loom"]
+            dependencies: [
+                "Loom",
+                "LoomNetworkingNIO",
+            ]
         ),
         .testTarget(
             name: "LoomShellTests",

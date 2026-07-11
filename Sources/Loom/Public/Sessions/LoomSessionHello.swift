@@ -5,7 +5,11 @@
 //  Created by Ethan Lipnik on 3/9/26.
 //
 
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 
 /// Connection role used by authenticated Loom sessions.

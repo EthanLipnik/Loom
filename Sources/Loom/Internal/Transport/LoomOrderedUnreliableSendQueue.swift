@@ -7,7 +7,6 @@
 
 import Dispatch
 import Foundation
-import Network
 
 package final class LoomOrderedUnreliableSendQueue: @unchecked Sendable {
     package struct Limits: Sendable, Equatable {
@@ -188,39 +187,6 @@ package final class LoomOrderedUnreliableSendQueue: @unchecked Sendable {
              .throughputProbe,
              .none:
             return (maxPackets: nil, intervalSeconds: 0)
-        }
-    }
-
-    package init(
-        connection: NWConnection,
-        queue: DispatchQueue,
-        maxOutstandingPackets: Int = defaultMaxOutstandingPackets,
-        maxOutstandingBytes: Int = defaultMaxOutstandingBytes,
-        maxQueuedPackets: Int? = nil,
-        replacesQueuedSends: Bool = false,
-        maxDrainBurstPackets: Int? = nil,
-        drainBurstIntervalSeconds: TimeInterval? = nil,
-        profile: LoomQueuedUnreliableSendProfile? = nil,
-        diagnosticsLabel: String = "unlabeled"
-    ) {
-        let burstPolicy = Self.resolvedDrainBurstPolicy(
-            profile: profile,
-            maxDrainBurstPackets: maxDrainBurstPackets,
-            drainBurstIntervalSeconds: drainBurstIntervalSeconds
-        )
-        self.queue = queue
-        self.maxOutstandingPackets = max(1, maxOutstandingPackets)
-        self.maxOutstandingBytes = max(1, maxOutstandingBytes)
-        self.maxQueuedPackets = maxQueuedPackets.map { max(0, $0) }
-        self.replacesQueuedSends = replacesQueuedSends
-        self.maxDrainBurstPackets = burstPolicy.maxPackets
-        self.drainBurstIntervalSeconds = burstPolicy.intervalSeconds
-        self.profile = profile
-        self.diagnosticsLabel = diagnosticsLabel
-        sendOperation = { [connection] data, onComplete in
-            connection.send(content: data, completion: .contentProcessed { error in
-                onComplete(error)
-            })
         }
     }
 

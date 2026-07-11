@@ -7,6 +7,7 @@
 //  Runtime for bootstrap control handoff.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -502,3 +503,5 @@ private final class ReadyContinuationBox: @unchecked Sendable {
         }
     }
 }
+
+#endif

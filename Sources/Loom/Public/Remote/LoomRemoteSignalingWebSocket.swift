@@ -9,6 +9,7 @@
 //  instead of polling.
 //
 
+#if canImport(Network)
 import Foundation
 
 /// Events delivered through the signaling WebSocket.
@@ -176,3 +177,5 @@ public actor LoomRemoteSignalingWebSocket {
         eventContinuation?.finish()
     }
 }
+
+#endif

@@ -7,7 +7,11 @@
 //  Authenticated line-based JSON protocol used for peer bootstrap control handoff.
 //
 
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 
 /// Bootstrap control operation kind.

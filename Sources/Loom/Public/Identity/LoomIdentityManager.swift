@@ -7,9 +7,16 @@
 //  Account-scoped signing identity backed by Keychain-synchronized P256 keys.
 //
 
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
-import Security
+import LoomNetworking
+#if os(Windows)
+import LoomPlatformAdapters
+#endif
 
 /// Public identity metadata for Loom authenticated handshakes.
 public struct LoomAccountIdentity: Sendable, Equatable {
@@ -32,7 +39,9 @@ public struct LoomAccountIdentity: Sendable, Equatable {
 
 /// Storage backing for a Loom account identity key.
 public enum LoomIdentityStorage: Sendable, Equatable {
-    /// Persist the identity key in Keychain.
+    /// Persist the identity key in Keychain on Apple platforms.
+    ///
+    /// On Windows this source-compatible spelling uses current-user DPAPI storage.
     case keychain
 
     /// Keep the identity key only in process memory.
@@ -48,11 +57,7 @@ public final class LoomIdentityManager {
     /// Shared singleton used by default across Loom services.
     public static let shared = LoomIdentityManager()
 
-    private let service: String
-    private let account: String
-    private let synchronizable: Bool
-    private let fallbackToNonSynchronizableStorage: Bool
-    private let storage: LoomIdentityStorage
+    private let keyStorage: any LoomIdentityKeyStorage
     private var cachedPrivateKey: P256.Signing.PrivateKey?
     private var cachedIdentity: LoomAccountIdentity?
 
@@ -72,11 +77,27 @@ public final class LoomIdentityManager {
         fallbackToNonSynchronizableStorage: Bool = false,
         storage: LoomIdentityStorage = .keychain
     ) {
-        self.service = service
-        self.account = account
-        self.synchronizable = synchronizable
-        self.fallbackToNonSynchronizableStorage = fallbackToNonSynchronizableStorage
-        self.storage = storage
+        keyStorage = Self.makeDefaultKeyStorage(
+            service: service,
+            account: account,
+            synchronizable: synchronizable,
+            fallbackToNonSynchronizableStorage: fallbackToNonSynchronizableStorage,
+            storage: storage
+        )
+    }
+
+    /// Creates an identity manager with an explicitly supplied protected-key backend.
+    ///
+    /// This overload is primarily for deterministic tests and platform adapters.
+    public init(
+        service: String,
+        account: String,
+        synchronizable: Bool,
+        fallbackToNonSynchronizableStorage: Bool,
+        storage: LoomIdentityStorage,
+        identityKeyStorage: any LoomIdentityKeyStorage
+    ) {
+        keyStorage = identityKeyStorage
     }
 
     /// Creates an identity manager whose key is never persisted outside the process.
@@ -139,9 +160,7 @@ public final class LoomIdentityManager {
 
     /// Rotates the account signing key and returns the new identity.
     public func rotateIdentity() throws -> LoomAccountIdentity {
-        if storage == .keychain {
-            try deletePrivateKey()
-        }
+        try keyStorage.deletePrivateKey()
         cachedPrivateKey = nil
         cachedIdentity = nil
         return try currentIdentity()
@@ -186,73 +205,50 @@ public final class LoomIdentityManager {
         return parsed.x963Representation
     }
 
-    // MARK: - Keychain
+    // MARK: - Key Storage
+
+    private static func makeDefaultKeyStorage(
+        service: String,
+        account: String,
+        synchronizable: Bool,
+        fallbackToNonSynchronizableStorage: Bool,
+        storage: LoomIdentityStorage
+    ) -> any LoomIdentityKeyStorage {
+        if storage == .memory {
+            return LoomMemoryIdentityKeyStorage()
+        }
+
+        #if canImport(Security)
+        return LoomKeychainIdentityKeyStorage(
+            service: service,
+            account: account,
+            synchronizable: synchronizable,
+            fallbackToNonSynchronizableStorage: fallbackToNonSynchronizableStorage
+        )
+        #elseif os(Windows)
+        return LoomPlatformProtectedIdentityKeyStorage(service: service, account: account)
+        #else
+        return LoomUnavailableIdentityKeyStorage()
+        #endif
+    }
 
     private func loadOrCreatePrivateKey() throws -> P256.Signing.PrivateKey {
         if let cachedPrivateKey { return cachedPrivateKey }
 
-        if storage == .memory {
-            let created = P256.Signing.PrivateKey()
-            cachedPrivateKey = created
-            return created
-        }
-
-        if let existing = try loadPrivateKey() {
-            cachedPrivateKey = existing
-            return existing
+        if let existingData = try keyStorage.loadPrivateKey() {
+            do {
+                let existing = try P256.Signing.PrivateKey(rawRepresentation: existingData)
+                cachedPrivateKey = existing
+                return existing
+            } catch {
+                throw LoomIdentityError.invalidKeyData
+            }
         }
 
         let created = P256.Signing.PrivateKey()
-        try savePrivateKey(created)
+        try keyStorage.storePrivateKey(created.rawRepresentation)
         cachedPrivateKey = created
         return created
-    }
-
-    private func loadPrivateKey() throws -> P256.Signing.PrivateKey? {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        query[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess else {
-            throw LoomIdentityError.keychainReadFailed(status: status)
-        }
-        guard let data = item as? Data else {
-            throw LoomIdentityError.invalidKeyData
-        }
-
-        do {
-            return try P256.Signing.PrivateKey(rawRepresentation: data)
-        } catch {
-            throw LoomIdentityError.invalidKeyData
-        }
-    }
-
-    private func savePrivateKey(_ key: P256.Signing.PrivateKey) throws {
-        do {
-            try savePrivateKey(key, synchronizable: synchronizable)
-        } catch {
-            guard Self.shouldFallbackToNonSynchronizableStorage(
-                synchronizable: synchronizable,
-                fallbackEnabled: fallbackToNonSynchronizableStorage,
-                error: error
-            ) else {
-                throw error
-            }
-
-            let status = Self.keychainWriteStatus(from: error) ?? 0
-            LoomLogger.identity(
-                "Synchronizable identity key write failed status=\(status); using local Keychain storage"
-            )
-            try savePrivateKey(key, synchronizable: false)
-        }
     }
 
     nonisolated static func shouldFallbackToNonSynchronizableStorage(
@@ -264,65 +260,41 @@ public final class LoomIdentityManager {
         return keychainWriteStatus(from: error) != nil
     }
 
-    nonisolated static func keychainWriteStatus(from error: Error) -> OSStatus? {
+    nonisolated static func keychainWriteStatus(from error: Error) -> Int32? {
         guard let identityError = error as? LoomIdentityError else { return nil }
         guard case let .keychainWriteFailed(status) = identityError else { return nil }
         return status
     }
+}
 
-    private func savePrivateKey(_ key: P256.Signing.PrivateKey, synchronizable storageSynchronizable: Bool) throws {
-        let data = key.rawRepresentation
-        var attributes: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: data,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-        ]
-        attributes[kSecAttrSynchronizable as String] = storageSynchronizable ? kCFBooleanTrue : kCFBooleanFalse
-
-        let status = SecItemAdd(attributes as CFDictionary, nil)
-        if status == errSecSuccess { return }
-        if status == errSecDuplicateItem {
-            var query: [String: Any] = [
-                kSecClass as String: kSecClassGenericPassword,
-                kSecAttrService as String: service,
-                kSecAttrAccount as String: account,
-            ]
-            query[kSecAttrSynchronizable as String] = storageSynchronizable ? kCFBooleanTrue : kCFBooleanFalse
-            let update: [String: Any] = [
-                kSecValueData as String: data,
-                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-                kSecAttrSynchronizable as String: (storageSynchronizable ? kCFBooleanTrue : kCFBooleanFalse) as Any,
-            ]
-            let updateStatus = SecItemUpdate(query as CFDictionary, update as CFDictionary)
-            guard updateStatus == errSecSuccess else {
-                throw LoomIdentityError.keychainWriteFailed(status: updateStatus)
-            }
-            return
-        }
-        throw LoomIdentityError.keychainWriteFailed(status: status)
+private struct LoomUnavailableIdentityKeyStorage: LoomIdentityKeyStorage {
+    func loadPrivateKey() throws -> Data? {
+        throw LoomIdentityKeyStorageError.persistenceFailed(
+            code: 50,
+            detail: "No protected identity storage backend is available."
+        )
     }
 
-    private func deletePrivateKey() throws {
-        var query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        query[kSecAttrSynchronizable as String] = kSecAttrSynchronizableAny
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else {
-            throw LoomIdentityError.keychainDeleteFailed(status: status)
-        }
+    func storePrivateKey(_ privateKey: Data) throws {
+        throw LoomIdentityKeyStorageError.persistenceFailed(
+            code: 50,
+            detail: "No protected identity storage backend is available."
+        )
+    }
+
+    func deletePrivateKey() throws {
+        throw LoomIdentityKeyStorageError.persistenceFailed(
+            code: 50,
+            detail: "No protected identity storage backend is available."
+        )
     }
 }
 
 /// Identity manager failures.
 public enum LoomIdentityError: LocalizedError, Sendable {
-    case keychainReadFailed(status: OSStatus)
-    case keychainWriteFailed(status: OSStatus)
-    case keychainDeleteFailed(status: OSStatus)
+    case keychainReadFailed(status: Int32)
+    case keychainWriteFailed(status: Int32)
+    case keychainDeleteFailed(status: Int32)
     case invalidKeyData
 
     /// Human-readable error text for diagnostics and user-visible failures.

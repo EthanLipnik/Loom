@@ -345,6 +345,62 @@ struct LoomReliableChannelTests {
         }
     }
 
+    @Test("Post-handshake ordering starts after the accepted hello sequence")
+    func preservesFirstPostHandshakeSequenceAcrossEarlyArrival() async throws {
+        let networkQueue = DispatchQueue(label: "loom.tests.reliable-channel.handshake-transition")
+        let serverBox = LoomReliableChannelTestBox()
+        let listener = try NWListener(using: .udp, on: .any)
+        listener.newConnectionHandler = { connection in
+            let channel = LoomReliableChannel(connection: connection)
+            serverBox.store(channel)
+            Task {
+                do {
+                    try await channel.startAndAwaitReady(queue: networkQueue)
+                } catch {
+                    serverBox.fail(error)
+                }
+            }
+        }
+        try await startAndAwaitReady(listener, queue: networkQueue)
+        let port = try #require(listener.port)
+        let client = NWConnection(host: "127.0.0.1", port: port, using: .udp)
+        try await startAndAwaitReady(client, queue: networkQueue)
+        defer {
+            client.cancel()
+            listener.cancel()
+            Task { await serverBox.channel?.close() }
+        }
+
+        try await sendReliableDatagram(
+            Data([0]),
+            sequence: 0,
+            flags: [.reliable, .hello],
+            over: client
+        )
+        let server = try await waitForServerChannel(serverBox)
+        #expect(try await server.receiveHandshakeMessage(maxBytes: 4) == Data([0]))
+
+        let firstReceive = Task {
+            try await server.receiveMessage(maxBytes: 4)
+        }
+        await Task.yield()
+        try await sendReliableDatagram(
+            Data([2]),
+            sequence: 2,
+            flags: [.reliable],
+            over: client
+        )
+        try await sendReliableDatagram(
+            Data([1]),
+            sequence: 1,
+            flags: [.reliable],
+            over: client
+        )
+
+        #expect(try await awaitValue(from: firstReceive, timeout: .seconds(1)) == Data([1]))
+        #expect(try await server.receiveMessage(maxBytes: 4) == Data([2]))
+    }
+
     @Test("Outbound reliable packets fail closed when the acknowledgement window is full")
     func boundsPendingAcknowledgements() async throws {
         let networkQueue = DispatchQueue(label: "loom.tests.reliable-channel.pending-acks")

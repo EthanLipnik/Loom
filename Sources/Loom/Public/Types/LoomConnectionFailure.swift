@@ -6,7 +6,10 @@
 //
 
 import Foundation
+import LoomNetworking
+#if canImport(Network)
 import Network
+#endif
 
 public enum LoomConnectionFailureReason: String, Sendable, Codable {
     case cancelled
@@ -74,9 +77,29 @@ public struct LoomConnectionFailure: Error, LocalizedError, Sendable {
             return LoomConnectionFailure(reason: .cancelled, detail: error.localizedDescription)
         }
 
+        if let networkError = error as? LoomNetworkError {
+            let reason: LoomConnectionFailureReason = switch networkError.code {
+            case .cancelled:
+                .cancelled
+            case .closed:
+                .closed
+            case .connectionRefused:
+                .connectionRefused
+            case .timedOut:
+                .timedOut
+            case .networkDown, .unreachable:
+                .transportLoss
+            case .invalidConfiguration, .unsupported, .other:
+                .other
+            }
+            return LoomConnectionFailure(reason: reason, detail: networkError.detail)
+        }
+
+#if canImport(Network)
         if let nwError = error as? NWError {
             return classify(nwError)
         }
+#endif
 
         let nsError = error as NSError
         if nsError.domain == NSPOSIXErrorDomain,
@@ -87,6 +110,7 @@ public struct LoomConnectionFailure: Error, LocalizedError, Sendable {
         return LoomConnectionFailure(reason: .other, detail: error.localizedDescription)
     }
 
+#if canImport(Network)
     public static func classify(_ error: NWError) -> LoomConnectionFailure {
         switch error {
         case let .posix(code):
@@ -101,6 +125,7 @@ public struct LoomConnectionFailure: Error, LocalizedError, Sendable {
             return LoomConnectionFailure(reason: .other, detail: error.localizedDescription)
         }
     }
+#endif
 
     public static func classify(
         _ code: POSIXErrorCode,

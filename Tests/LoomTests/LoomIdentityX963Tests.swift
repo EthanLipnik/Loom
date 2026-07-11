@@ -151,6 +151,23 @@ struct LoomIdentityX963Tests {
     }
 
     @MainActor
+    @Test("Unreadable protected identity storage fails without regenerating a key")
+    func unreadableStorageFailsClosed() {
+        let manager = LoomIdentityManager(
+            service: "com.loom.tests.identity.unreadable",
+            account: "p256-signing",
+            synchronizable: false,
+            fallbackToNonSynchronizableStorage: false,
+            storage: .keychain,
+            identityKeyStorage: UnreadableIdentityKeyStorage()
+        )
+
+        #expect(throws: LoomIdentityKeyStorageError.self) {
+            _ = try manager.currentIdentity()
+        }
+    }
+
+    @MainActor
     private func makeIdentityManager() -> LoomIdentityManager {
         LoomIdentityManager(
             service: "com.loom.tests.identity.\(UUID().uuidString)",
@@ -167,4 +184,19 @@ struct LoomIdentityX963Tests {
         }
         .joined()
     }
+}
+
+private struct UnreadableIdentityKeyStorage: LoomIdentityKeyStorage {
+    func loadPrivateKey() throws -> Data? {
+        throw LoomIdentityKeyStorageError.unreadable(
+            code: 13,
+            detail: "Synthetic protected-file failure."
+        )
+    }
+
+    func storePrivateKey(_ privateKey: Data) throws {
+        Issue.record("Identity manager must not replace an unreadable protected key.")
+    }
+
+    func deletePrivateKey() throws {}
 }

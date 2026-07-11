@@ -5,8 +5,23 @@
 //  Created by Ethan Lipnik on 1/2/26.
 //
 
-import CoreGraphics
 import Foundation
+
+package struct LoomContentRect: Equatable, Sendable {
+    package let x: Double
+    package let y: Double
+    package let width: Double
+    package let height: Double
+
+    package init(x: Double, y: Double, width: Double, height: Double) {
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+    }
+
+    package static let zero = LoomContentRect(x: 0, y: 0, width: 0, height: 0)
+}
 
 /// Magic number for packet validation.
 package let loomProtocolMagic: UInt32 = 0x4C4F_4F4D // "LOOM"
@@ -314,7 +329,7 @@ package struct FrameHeader {
         payloadLength: UInt32,
         frameByteCount: UInt32,
         checksum: UInt32,
-        contentRect: CGRect = .zero,
+        contentRect: LoomContentRect = .zero,
         dimensionToken: UInt16 = 0,
         epoch: UInt16 = 0
     ) {
@@ -328,21 +343,21 @@ package struct FrameHeader {
         self.payloadLength = payloadLength
         self.frameByteCount = frameByteCount
         self.checksum = checksum
-        contentRectX = Float32(contentRect.origin.x)
-        contentRectY = Float32(contentRect.origin.y)
-        contentRectWidth = Float32(contentRect.size.width)
-        contentRectHeight = Float32(contentRect.size.height)
+        contentRectX = Float32(contentRect.x)
+        contentRectY = Float32(contentRect.y)
+        contentRectWidth = Float32(contentRect.width)
+        contentRectHeight = Float32(contentRect.height)
         self.dimensionToken = dimensionToken
         self.epoch = epoch
     }
 
-    /// Get contentRect as CGRect
-    package var contentRect: CGRect {
-        CGRect(
-            x: CGFloat(contentRectX),
-            y: CGFloat(contentRectY),
-            width: CGFloat(contentRectWidth),
-            height: CGFloat(contentRectHeight)
+    /// Returns the decoded content rectangle.
+    package var contentRect: LoomContentRect {
+        LoomContentRect(
+            x: Double(contentRectX),
+            y: Double(contentRectY),
+            width: Double(contentRectWidth),
+            height: Double(contentRectHeight)
         )
     }
 
@@ -479,11 +494,11 @@ package struct FrameHeader {
             payloadLength: payloadLength,
             frameByteCount: frameByteCount,
             checksum: checksum,
-            contentRect: CGRect(
-                x: CGFloat(contentRectX),
-                y: CGFloat(contentRectY),
-                width: CGFloat(contentRectWidth),
-                height: CGFloat(contentRectHeight)
+            contentRect: LoomContentRect(
+                x: Double(contentRectX),
+                y: Double(contentRectY),
+                width: Double(contentRectWidth),
+                height: Double(contentRectHeight)
             ),
             dimensionToken: dimensionToken,
             epoch: epoch

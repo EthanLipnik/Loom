@@ -6,6 +6,7 @@
 //
 
 import Foundation
+import LoomNetworking
 
 /// Direct transport kinds supported by Loom session establishment.
 public enum LoomTransportKind: String, Codable, CaseIterable, Sendable {
@@ -15,6 +16,28 @@ public enum LoomTransportKind: String, Codable, CaseIterable, Sendable {
 }
 
 package extension LoomTransportKind {
+    init(_ networkTransportKind: LoomNetworking.LoomTransportKind) {
+        switch networkTransportKind {
+        case .tcp:
+            self = .tcp
+        case .quic:
+            self = .quic
+        case .udp:
+            self = .udp
+        }
+    }
+
+    var networkTransportKind: LoomNetworking.LoomTransportKind {
+        switch self {
+        case .tcp:
+            .tcp
+        case .quic:
+            .quic
+        case .udp:
+            .udp
+        }
+    }
+
     var directConnectionRank: Int {
         switch self {
         case .udp:

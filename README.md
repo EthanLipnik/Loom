@@ -1,10 +1,10 @@
 # Loom
 
-Build high-throughput, low-latency Apple device-to-device features without building a networking stack from scratch.
+Build high-throughput, low-latency device-to-device features without building a networking stack from scratch.
 
 Loom is a Swift package for apps that need to find other devices, connect directly, verify identity, make trust decisions, and keep working when the local network is not the whole story.
 
-It is designed for Apple platforms, stays product-agnostic, and gives you a clean base for the part every multi-device app eventually has to build. The transport is built for high-throughput, low-latency data movement between Apple devices, and the package includes a SwiftUI-first `LoomKit` surface for apps that want a plug-and-play integration path.
+It stays product-agnostic and gives you a clean base for the part every multi-device app eventually has to build. Direct transport and identity primitives are portable, while Apple-specific products retain their Network.framework, CloudKit, and SwiftUI integrations. The package includes a SwiftUI-first `LoomKit` surface for Apple apps that want a plug-and-play integration path.
 
 If you want the default integration path, start with `LoomKit`. Drop down to `Loom` only when you need to own discovery, advertising, handshake policy, or transport composition yourself.
 
@@ -49,7 +49,9 @@ Loom is a good fit for things like:
 ### Core package: `Loom`
 
 - Nearby peer discovery over Bonjour, including peer-to-peer support
-- Direct sessions built on `Network.framework`
+- Authenticated direct sessions over backend-independent TCP and UDP connections
+- Network.framework compatibility APIs on Apple platforms
+- SwiftNIO direct transport plus platform DNS-SD and protected identity adapters where Network.framework is unavailable
 - Stable device identity and key management
 - Pluggable trust policy and local trust storage
 - Seed-driven overlay discovery for Tailscale, Headscale, and other VPN-style networks
@@ -71,6 +73,12 @@ Loom is a good fit for things like:
 - CloudKit-backed peer sharing
 - CloudKit-backed trust decisions
 - Share and participant management for multi-device apps
+
+### Portable networking packages
+
+- `LoomNetworking` defines backend-independent endpoints, interfaces, paths, DNS-SD, identity storage, and socket contracts without external dependencies.
+- `LoomNetworkingNIO` implements those direct TCP and UDP contracts with SwiftNIO.
+- `LoomPlatformAdapters` is an internal support target used by `Loom` for platform DNS-SD and protected identity storage; it is not a standalone library product.
 
 ## What Loom does not do
 
@@ -159,6 +167,10 @@ For most apps, `LoomKit` should be the default dependency.
         .product(name: "LoomKit", package: "Loom"),
         // Or drop down to the lower-level primitives:
         // .product(name: "Loom", package: "Loom"),
+        // Backend-independent network contracts only:
+        // .product(name: "LoomNetworking", package: "Loom"),
+        // Portable SwiftNIO TCP/UDP backend:
+        // .product(name: "LoomNetworkingNIO", package: "Loom"),
         // Add this if you want the optional terminal/session layer:
         // .product(name: "LoomShell", package: "Loom"),
         // Add this too if you want CloudKit-backed peer sharing or trust:
@@ -271,9 +283,14 @@ That split is what keeps Loom reusable instead of turning it into someone else's
 ## Requirements
 
 - Swift 6.2+
-- macOS 26+
-- iOS 26+
+- macOS 14+
+- iOS 17.4+
 - visionOS 26+
+
+The direct `LoomNetworking` and `LoomNetworkingNIO` products are portable to
+the platforms and Swift toolchains supported by SwiftNIO and Loom's available
+platform adapters. Apple UI, CloudKit, Network.framework compatibility, and
+local-network entitlement guidance remain specific to their Apple products.
 
 ## Local network setup
 
@@ -301,6 +318,8 @@ If you want the deeper material, go to the docs:
 
 - [LoomKit Documentation](https://ethanlipnik.github.io/Loom/documentation/loomkit/)
 - [Loom Documentation](https://ethanlipnik.github.io/Loom/documentation/loom/)
+- [LoomNetworking Documentation](https://ethanlipnik.github.io/Loom/documentation/loomnetworking/)
+- [LoomNetworkingNIO Documentation](https://ethanlipnik.github.io/Loom/documentation/loomnetworkingnio/)
 - [LoomShell Documentation](https://ethanlipnik.github.io/Loom/documentation/loomshell/)
 - [Architecture notes](Architecture.md)
 

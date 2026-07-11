@@ -5,6 +5,7 @@
 //  Created by Ethan Lipnik on 3/12/26.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -318,3 +319,5 @@ final class BonjourTXTRecordMonitor: NSObject, NetServiceBrowserDelegate, NetSer
         return ipv4Hosts + ipv6Hosts
     }
 }
+
+#endif

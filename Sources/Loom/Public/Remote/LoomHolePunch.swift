@@ -7,6 +7,7 @@
 //  UDP hole-punch utility for NAT traversal.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 import os
@@ -144,3 +145,5 @@ public enum LoomHolePunch {
         }
     }
 }
+
+#endif

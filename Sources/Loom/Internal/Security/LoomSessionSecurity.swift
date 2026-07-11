@@ -5,7 +5,11 @@
 //  Created by Ethan Lipnik on 3/10/26.
 //
 
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 
 package enum LoomSessionTrafficClass: UInt8, Sendable, Hashable {

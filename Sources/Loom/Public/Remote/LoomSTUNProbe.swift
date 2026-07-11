@@ -7,6 +7,7 @@
 //  Direct STUN probe utilities for remote connectivity preflight.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -427,3 +428,5 @@ private func readUInt32(_ data: Data, at offset: Int) -> UInt32 {
     let fourth = UInt32(data[offset + 3])
     return (first << 24) | (second << 16) | (third << 8) | fourth
 }
+
+#endif

@@ -5,6 +5,7 @@
 //  Created by Ethan Lipnik on 3/22/26.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -196,3 +197,5 @@ private final class HostCacheEntry: @unchecked Sendable {
         self.timestamp = CFAbsoluteTimeGetCurrent()
     }
 }
+
+#endif

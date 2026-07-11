@@ -7,7 +7,11 @@
 //  Minimal identity verification helpers for bootstrap daemon auth.
 //
 
+#if canImport(CryptoKit)
 import CryptoKit
+#else
+import Crypto
+#endif
 import Foundation
 
 public enum LoomBootstrapIdentityVerification {

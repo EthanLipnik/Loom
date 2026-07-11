@@ -4,6 +4,7 @@ This document describes the generic networking package in `Loom/`.
 
 It applies to:
 
+- `Sources/LoomNetworking`
 - `Sources/Loom`
 - `Sources/LoomCloudKit`
 - `Tests/LoomTests`
@@ -11,21 +12,37 @@ It applies to:
 
 ## 1. Package Topology
 
-Loom is a standalone Swift package with two products:
+Loom is a standalone Swift package with these library products:
 
+- `LoomNetworking`
+- `LoomNetworkingNIO`
 - `Loom`
+- `LoomShell`
 - `LoomCloudKit`
+- `LoomKit`
+- `LoomSharedRuntime`
 
-Supported platforms:
+Minimum Apple deployment targets:
 
-- macOS 26+
-- iOS 26+
+- macOS 14+
+- iOS 17.4+
 - visionOS 26+
 
 External dependencies:
 
 - `swift-nio`
 - `swift-nio-ssh`
+- `swift-crypto`
+
+`LoomNetworking` has no external dependencies and owns backend-independent
+endpoint, interface, path, service-class, and direct-connection policy values.
+`LoomNetworkingNIO` supplies the portable SwiftNIO TCP and UDP backend.
+`LoomPlatformAdapters` is an internal support target for platform DNS-SD and
+protected identity storage; it is composed into `Loom` rather than shipped as
+a standalone product.
+The `Loom` target provides the current Network.framework backend and preserves
+its released Apple-facing API while selecting the SwiftNIO backend on platforms
+without Network.framework.
 
 ## 2. Ownership Boundary
 

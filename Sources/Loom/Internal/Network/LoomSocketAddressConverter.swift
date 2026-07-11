@@ -5,6 +5,7 @@
 //  Created by OpenAI on 5/19/26.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -53,3 +54,5 @@ package enum LoomSocketAddressConverter {
             (raw[raw.index(after: raw.startIndex)] & 0xC0) == 0x80
     }
 }
+
+#endif

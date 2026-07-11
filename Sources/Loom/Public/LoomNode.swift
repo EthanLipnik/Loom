@@ -6,10 +6,15 @@
 //
 
 import Foundation
+#if canImport(Network)
 import Network
+#else
+import LoomNetworkingNIO
+#endif
 import Observation
 
-/// Direct transport kinds backed by `NWConnection`.
+#if canImport(Network)
+/// Direct transport kinds backed by Network.framework compatibility adapters.
 package enum LoomNWConnectionTransportKind: String, Codable, CaseIterable, Sendable {
     case tcp
     case udp
@@ -65,13 +70,42 @@ public enum LoomConnection: Sendable {
         }
     }
 
+    /// Backend-independent endpoint for this connection.
+    public var backendEndpoint: LoomNetworkEndpoint {
+        switch self {
+        case let .tcp(connection), let .udp(connection):
+            LoomNetworkEndpoint(connection.endpoint) ??
+                .opaque(description: String(describing: connection.endpoint))
+        }
+    }
+
     package var backingNWConnection: NWConnection? {
         switch self {
         case let .tcp(connection), let .udp(connection):
             connection
         }
     }
+
+    package var backendConnection: any LoomNetworkConnection {
+        switch self {
+        case let .tcp(connection):
+            LoomNetworkFrameworkConnection(
+                connection: connection,
+                transportKind: .tcp
+            )
+        case let .udp(connection):
+            LoomNetworkFrameworkConnection(
+                connection: connection,
+                transportKind: .udp
+            )
+        }
+    }
+
+    package func cancel() async {
+        await backendConnection.cancel()
+    }
 }
+#endif
 
 @Observable
 @MainActor
@@ -94,7 +128,9 @@ public final class LoomNode {
     private var publishedAdvertisement: LoomPeerAdvertisement?
     private var directListeners: [LoomTransportKind: any LoomDirectTransportListener] = [:]
     private var directListenerPorts: [LoomTransportKind: UInt16] = [:]
+#if canImport(Network)
     private var overlayProbeServer: LoomOverlayProbeServer?
+#endif
     private var bonjourAdvertisingContext: BonjourAdvertisingContext?
     private var bonjourAdvertisingGeneration = UUID()
     private var bonjourAdvertisingRecoveryTask: Task<Void, Never>?
@@ -105,6 +141,7 @@ public final class LoomNode {
     private let incomingRetainedCapacityBudget: LoomIncomingRetainedCapacityBudget
     private var authenticatedAdvertisingGeneration = UUID()
     private var isStartingAuthenticatedAdvertising = false
+    private let networkBackend: any LoomNetworkBackend
 
     nonisolated private static let minimumBonjourAdvertisingRecoveryDelay: Duration = .seconds(1)
 
@@ -116,6 +153,38 @@ public final class LoomNode {
         self.configuration = configuration
         self.identityManager = identityManager
         self.trustProvider = trustProvider
+#if canImport(Network)
+        networkBackend = LoomNetworkFrameworkBackend()
+#else
+        networkBackend = LoomNIONetworkBackend()
+#endif
+        preauthenticationWorkLimiter = LoomOutstandingOperationLimiter(
+            maximumConcurrentOperations: configuration.maxPendingAuthenticatedSessions
+        )
+        preauthenticationAdmission = LoomPreauthenticationAdmissionController(
+            maxConcurrentConnections: configuration.maxPendingAuthenticatedSessions
+        )
+        activeAuthenticatedSessionAdmission = LoomPreauthenticationAdmissionController(
+            maxConcurrentConnections: configuration.maximumActiveAuthenticatedSessions
+        )
+        incomingRetainedCapacityBudget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: configuration.maximumBufferedIncomingBytesPerNode,
+            maximumPayloadCount: configuration.maximumBufferedIncomingPayloadsPerNode,
+            maximumBatchCount: configuration.maximumBufferedIncomingPayloadsPerNode
+        )
+    }
+
+    /// Creates a node with an explicitly supplied backend-independent network implementation.
+    public init(
+        configuration: LoomNetworkConfiguration,
+        identityManager: LoomIdentityManager?,
+        trustProvider: (any LoomTrustProvider)?,
+        networkBackend: any LoomNetworkBackend
+    ) {
+        self.configuration = configuration
+        self.identityManager = identityManager
+        self.trustProvider = trustProvider
+        self.networkBackend = networkBackend
         preauthenticationWorkLimiter = LoomOutstandingOperationLimiter(
             maximumConcurrentOperations: configuration.maxPendingAuthenticatedSessions
         )
@@ -223,8 +292,10 @@ public final class LoomNode {
         bonjourAdvertisingGeneration = UUID()
         bonjourAdvertisingContext = nil
         bonjourAdvertisingRecoveryAttempt = 0
+#if canImport(Network)
         let overlayProbeServer = self.overlayProbeServer
         self.overlayProbeServer = nil
+#endif
         let advertiser = self.advertiser
         self.advertiser = nil
         advertisingServiceName = nil
@@ -233,7 +304,9 @@ public final class LoomNode {
         self.directListeners.removeAll()
         self.directListenerPorts.removeAll()
 
+#if canImport(Network)
         await overlayProbeServer?.stop()
+#endif
         await advertiser?.stop()
         for listener in directListeners {
             await listener.stop()
@@ -262,6 +335,7 @@ public final class LoomNode {
         await advertiser?.updateAdvertisement(merged)
     }
 
+#if canImport(Network)
     public func makeAuthenticatedSession(
         connection: LoomConnection,
         role: LoomSessionRole,
@@ -295,17 +369,51 @@ public final class LoomNode {
         requiredInterfaceType: NWInterface.InterfaceType? = nil,
         requiredLocalPort: UInt16? = nil
     ) throws -> LoomConnection {
-        try LoomConnectionFactory.makeConnection(
+        guard transportKind != .quic else {
+            throw LoomError.protocolError("QUIC transport has been removed.")
+        }
+        let backendConnection = try LoomConnectionFactory.makeBackendConnection(
             to: endpoint,
             using: transportKind,
             configuration: configuration,
+            backend: networkBackend,
             enablePeerToPeer: enablePeerToPeer ?? configuration.enablePeerToPeer,
             requiredInterface: requiredInterface,
             requiredInterfaceType: requiredInterfaceType,
             requiredLocalPort: requiredLocalPort
         )
+        guard let nativeConnection = backendConnection as? LoomNetworkFrameworkConnection,
+              let nativeTransportKind = LoomNWConnectionTransportKind(transportKind) else {
+            throw LoomNetworkError(
+                code: .unsupported,
+                detail: "Use makeNetworkConnection(to:using:configuration:) with a portable network backend."
+            )
+        }
+        return LoomConnection(
+            connection: nativeConnection.nativeConnection,
+            transportKind: nativeTransportKind
+        )
+    }
+#endif
+
+    /// Creates a backend-independent direct connection.
+    public func makeNetworkConnection(
+        to endpoint: LoomNetworkEndpoint,
+        using transportKind: LoomTransportKind,
+        configuration requestedConfiguration: LoomNetworkConnectionConfiguration? = nil
+    ) throws -> any LoomNetworkConnection {
+        let resolvedConfiguration = requestedConfiguration ?? LoomNetworkConnectionConfiguration(
+            enablePeerToPeer: configuration.enablePeerToPeer,
+            datagramServiceClass: configuration.backendDirectDatagramServiceClass
+        )
+        return try networkBackend.makeConnection(
+            to: endpoint,
+            using: transportKind.networkTransportKind,
+            configuration: resolvedConfiguration
+        )
     }
 
+#if canImport(Network)
     public func connect(
         to endpoint: NWEndpoint,
         using transportKind: LoomTransportKind,
@@ -342,18 +450,28 @@ public final class LoomNode {
         let identityManager = self.identityManager ?? LoomIdentityManager.shared
 
         func attemptConnect(to target: NWEndpoint) async throws -> LoomAuthenticatedSession {
-            let connection = try makeConnection(
+            let connection = try LoomConnectionFactory.makeBackendConnection(
                 to: target,
                 using: transportKind,
+                configuration: configuration,
+                backend: networkBackend,
                 enablePeerToPeer: enablePeerToPeer,
                 requiredInterface: requiredInterface,
                 requiredInterfaceType: requiredInterfaceType,
                 requiredLocalPort: requiredLocalPort
             )
-            let sess = makeAuthenticatedSession(
-                connection: connection,
+            let sess = LoomAuthenticatedSession(
+                backendConnection: connection,
                 role: .initiator,
-                remoteEndpoint: target
+                remoteEndpoint: LoomNetworkEndpoint(target),
+                serviceClass: connection.transportKind == .tcp
+                    ? nil
+                    : configuration.backendDirectDatagramServiceClass,
+                maximumConcurrentStreams: configuration.maximumConcurrentStreamsPerSession,
+                maximumBufferedIncomingBytesPerStream: configuration.maximumBufferedIncomingBytesPerStream,
+                maximumBufferedIncomingPayloadsPerStream: configuration.maximumBufferedIncomingPayloadsPerStream,
+                maximumBufferedIncomingBytesPerSession: configuration.maximumBufferedIncomingBytesPerSession,
+                maximumBufferedIncomingPayloadsPerSession: configuration.maximumBufferedIncomingPayloadsPerSession
             )
             await sess.setOnTrustPending(onTrustPending)
             await sess.setOnBootstrapProgress(onBootstrapProgress)
@@ -386,6 +504,61 @@ public final class LoomNode {
             guard Self.isTransientNetworkDown(error) else { throw error }
             LoomLogger.transport("Recreating connection after transient ENETDOWN")
             return try await attemptConnect(to: resolvedEndpoint)
+        }
+    }
+#endif
+
+    /// Connects and authenticates using backend-independent endpoint and socket options.
+    public func connect(
+        to endpoint: LoomNetworkEndpoint,
+        using transportKind: LoomTransportKind,
+        hello: LoomSessionHelloRequest,
+        encryptionPolicy: LoomSessionEncryptionPolicy = .required,
+        networkConfiguration: LoomNetworkConnectionConfiguration? = nil,
+        expectedPeerIdentityKeyID: String? = nil,
+        expectedPeerIdentityPublicKey: Data? = nil,
+        queue: DispatchQueue = .global(qos: .userInitiated),
+        onTrustPending: (@Sendable @MainActor () -> Void)? = nil,
+        onBootstrapProgress: (@Sendable (LoomAuthenticatedSessionBootstrapProgress) -> Void)? = nil
+    ) async throws -> LoomAuthenticatedSession {
+        let connection = try makeNetworkConnection(
+            to: endpoint,
+            using: transportKind,
+            configuration: networkConfiguration
+        )
+        let session = LoomAuthenticatedSession(
+            backendConnection: connection,
+            role: .initiator,
+            remoteEndpoint: endpoint,
+            serviceClass: connection.transportKind == .tcp
+                ? nil
+                : (networkConfiguration?.datagramServiceClass ?? configuration.backendDirectDatagramServiceClass),
+            maximumConcurrentStreams: configuration.maximumConcurrentStreamsPerSession,
+            maximumBufferedIncomingBytesPerStream: configuration.maximumBufferedIncomingBytesPerStream,
+            maximumBufferedIncomingPayloadsPerStream: configuration.maximumBufferedIncomingPayloadsPerStream,
+            maximumBufferedIncomingBytesPerSession: configuration.maximumBufferedIncomingBytesPerSession,
+            maximumBufferedIncomingPayloadsPerSession: configuration.maximumBufferedIncomingPayloadsPerSession
+        )
+        await session.setOnTrustPending(onTrustPending)
+        await session.setOnBootstrapProgress(onBootstrapProgress)
+        let identityManager = identityManager ?? LoomIdentityManager.shared
+        return try await withTaskCancellationHandler {
+            _ = try await session.start(
+                localHello: hello,
+                identityManager: identityManager,
+                trustProvider: trustProvider,
+                encryptionPolicy: encryptionPolicy,
+                expectedPeerIdentityKeyID: expectedPeerIdentityKeyID,
+                expectedPeerIdentityPublicKey: expectedPeerIdentityPublicKey,
+                handshakeTimeout: configuration.authenticatedSessionHandshakeTimeout,
+                trustTimeout: configuration.authenticatedSessionTrustTimeout,
+                queue: queue
+            )
+            return session
+        } onCancel: {
+            Task {
+                await session.cancel()
+            }
         }
     }
 
@@ -432,7 +605,7 @@ public final class LoomNode {
                 }
             }
             try validateAuthenticatedAdvertisingGeneration(advertisingGeneration)
-            let directDatagramServiceClass = configuration.directDatagramServiceClass
+            let directDatagramServiceClass = configuration.backendDirectDatagramServiceClass
             let trustTimeout = configuration.authenticatedSessionTrustTimeout
             let maximumConcurrentStreams = configuration.maximumConcurrentStreamsPerSession
             let maximumBufferedIncomingBytesPerStream = configuration.maximumBufferedIncomingBytesPerStream
@@ -485,21 +658,23 @@ public final class LoomNode {
                 guard await MainActor.run(body: {
                     self.authenticatedAdvertisingGeneration == advertisingGeneration
                 }) else {
-                    connection.backingNWConnection?.cancel()
+                    await connection.cancel()
                     return
                 }
                 guard await preauthenticationAdmission.acquire() else {
                     LoomLogger.transport(
                         "Rejected authenticated tcp listener connection before handshake: admission limit reached"
                     )
-                    connection.backingNWConnection?.cancel()
+                    await connection.cancel()
                     return
                 }
                 let session = LoomAuthenticatedSession(
-                    connection: connection,
+                    backendConnection: connection,
                     role: .receiver,
-                    remoteEndpoint: connection.endpoint,
-                    serviceClass: connection.transportKind == .tcp ? nil : directDatagramServiceClass,
+                    remoteEndpoint: connection.remoteEndpoint,
+                    serviceClass: connection.transportKind == .tcp
+                        ? nil
+                        : directDatagramServiceClass,
                     maximumConcurrentStreams: maximumConcurrentStreams,
                     maximumBufferedIncomingBytesPerStream: maximumBufferedIncomingBytesPerStream,
                     maximumBufferedIncomingPayloadsPerStream: maximumBufferedIncomingPayloadsPerStream,
@@ -509,14 +684,14 @@ public final class LoomNode {
                 session.setParentIncomingRetainedCapacityBudget(incomingRetainedCapacityBudget)
                 await session.setPreauthenticationOperationLimiter(preauthenticationWorkLimiter)
                 let sessionID = session.id.uuidString.lowercased()
-                let endpointDescription = connection.endpoint.debugDescription
+                let endpointDescription = connection.remoteEndpoint.description
                 LoomLogger.transport(
                     "Accepted authenticated tcp listener session sessionID=\(sessionID) " +
                         "endpoint=\(endpointDescription) service=\(serviceName)"
                 )
                 await Self.installAuthenticatedListenerBootstrapProgressLogger(
                     on: session,
-                    transportKind: connection.transportKind,
+                    transportKind: LoomTransportKind(connection.transportKind),
                     endpointDescription: endpointDescription,
                     serviceName: serviceName
                 )
@@ -525,7 +700,9 @@ public final class LoomNode {
                     let hello = try await withLoomThrowingDeadline(
                         preauthenticationDeadline,
                         onTimeout: {
-                            connection.backingNWConnection?.cancel()
+                            Task {
+                                await connection.cancel()
+                            }
                         }
                     ) {
                         try await preauthenticationWorkLimiter.run {
@@ -569,7 +746,7 @@ public final class LoomNode {
                     await preauthenticationAdmission.release()
                     Self.logAcceptedAuthenticatedSessionFailure(
                         error,
-                        transportKind: connection.transportKind,
+                        transportKind: LoomTransportKind(connection.transportKind),
                         sessionID: sessionID,
                         serviceName: serviceName
                     )
@@ -613,7 +790,7 @@ public final class LoomNode {
         helloProvider: @escaping @Sendable () async throws -> LoomSessionHelloRequest,
         onSession: @escaping @Sendable (LoomAuthenticatedSession) -> Void
     ) async throws -> UInt16 {
-        let directDatagramServiceClass = configuration.directDatagramServiceClass
+        let directDatagramServiceClass = configuration.backendDirectDatagramServiceClass
         let listener = try makeDirectTransportListener(for: transportKind)
         directListeners[transportKind] = listener
         let port: UInt16
@@ -623,7 +800,7 @@ public final class LoomNode {
             guard await MainActor.run(body: {
                 self.authenticatedAdvertisingGeneration == advertisingGeneration
             }) else {
-                connection.backingNWConnection?.cancel()
+                await connection.cancel()
                 return
             }
             guard await preauthenticationAdmission.acquire() else {
@@ -631,14 +808,16 @@ public final class LoomNode {
                     "Rejected authenticated \(connection.transportKind.rawValue) direct connection before handshake: " +
                         "admission limit reached"
                 )
-                connection.backingNWConnection?.cancel()
+                await connection.cancel()
                 return
             }
             let session = LoomAuthenticatedSession(
-                connection: connection,
+                backendConnection: connection,
                 role: .receiver,
-                remoteEndpoint: connection.endpoint,
-                serviceClass: connection.transportKind == .tcp ? nil : directDatagramServiceClass,
+                remoteEndpoint: connection.remoteEndpoint,
+                serviceClass: connection.transportKind == .tcp
+                    ? nil
+                    : directDatagramServiceClass,
                 maximumConcurrentStreams: maximumConcurrentStreams,
                 maximumBufferedIncomingBytesPerStream: maximumBufferedIncomingBytesPerStream,
                 maximumBufferedIncomingPayloadsPerStream: maximumBufferedIncomingPayloadsPerStream,
@@ -648,14 +827,14 @@ public final class LoomNode {
             session.setParentIncomingRetainedCapacityBudget(incomingRetainedCapacityBudget)
             await session.setPreauthenticationOperationLimiter(preauthenticationWorkLimiter)
             let sessionID = session.id.uuidString.lowercased()
-            let endpointDescription = connection.endpoint.debugDescription
+            let endpointDescription = connection.remoteEndpoint.description
             LoomLogger.transport(
                 "Accepted authenticated \(connection.transportKind.rawValue) direct listener session " +
                     "sessionID=\(sessionID) endpoint=\(endpointDescription)"
             )
             await Self.installAuthenticatedListenerBootstrapProgressLogger(
                 on: session,
-                transportKind: connection.transportKind,
+                transportKind: LoomTransportKind(connection.transportKind),
                 endpointDescription: endpointDescription,
                 serviceName: nil
             )
@@ -664,7 +843,9 @@ public final class LoomNode {
                 let hello = try await withLoomThrowingDeadline(
                     preauthenticationDeadline,
                     onTimeout: {
-                        connection.backingNWConnection?.cancel()
+                        Task {
+                            await connection.cancel()
+                        }
                     }
                 ) {
                     try await preauthenticationWorkLimiter.run {
@@ -709,7 +890,7 @@ public final class LoomNode {
                 await preauthenticationAdmission.release()
                 Self.logAcceptedAuthenticatedSessionFailure(
                     error,
-                    transportKind: connection.transportKind,
+                    transportKind: LoomTransportKind(connection.transportKind),
                     sessionID: sessionID,
                     serviceName: nil
                 )
@@ -839,13 +1020,14 @@ public final class LoomNode {
     ) throws -> any LoomDirectTransportListener {
         switch transportKind {
         case .tcp, .udp:
-            guard let nwTransportKind = LoomNWConnectionTransportKind(transportKind) else {
-                throw LoomError.protocolError("Transport \(transportKind.rawValue) is not backed by NWConnection.")
-            }
             return LoomDirectListener(
-                transportKind: nwTransportKind,
-                enablePeerToPeer: configuration.enablePeerToPeer,
-                udpServiceClass: configuration.directDatagramServiceClass
+                listener: try networkBackend.makeListener(
+                    using: transportKind.networkTransportKind,
+                    configuration: LoomNetworkListenerConfiguration(
+                        enablePeerToPeer: configuration.enablePeerToPeer,
+                        datagramServiceClass: configuration.backendDirectDatagramServiceClass
+                    )
+                )
             )
         case .quic:
             throw LoomError.protocolError("QUIC transport has been removed.")
@@ -874,20 +1056,32 @@ public final class LoomNode {
             bonjourRecoveryAttempt: bonjourAdvertisingRecoveryAttempt
         )
 
+        let onFailureAfterReady: @Sendable (String) -> Void = { [weak self] failureDescription in
+            Task { @MainActor [weak self] in
+                self?.handleBonjourAdvertisingFailure(
+                    failureDescription,
+                    generation: generation
+                )
+            }
+        }
+#if canImport(Network)
         let advertiser = BonjourAdvertiser(
             serviceName: context.serviceName,
             advertisement: context.advertisement,
             serviceType: configuration.serviceType,
             enablePeerToPeer: configuration.enablePeerToPeer,
-            onFailureAfterReady: { [weak self] failureDescription in
-                Task { @MainActor [weak self] in
-                    self?.handleBonjourAdvertisingFailure(
-                        failureDescription,
-                        generation: generation
-                    )
-                }
-            }
+            onFailureAfterReady: onFailureAfterReady
         )
+#else
+        let advertiser = BonjourAdvertiser(
+            serviceName: context.serviceName,
+            advertisement: context.advertisement,
+            serviceType: configuration.serviceType,
+            enablePeerToPeer: configuration.enablePeerToPeer,
+            networkBackend: networkBackend,
+            onFailureAfterReady: onFailureAfterReady
+        )
+#endif
         self.advertiser = advertiser
         let port: UInt16
         do {
@@ -1027,6 +1221,7 @@ public final class LoomNode {
         serviceName: String,
         advertisingGeneration: UUID
     ) async throws {
+#if canImport(Network)
         guard let overlayProbePort = configuration.overlayProbePort else {
             return
         }
@@ -1059,6 +1254,7 @@ public final class LoomNode {
             await probeServer.stop()
             throw error
         }
+#endif
     }
 
     private static func isTransientNetworkDown(_ error: LoomError) -> Bool {

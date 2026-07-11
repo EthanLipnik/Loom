@@ -10,6 +10,7 @@
 //  hosts behind aggressive or symmetric NATs.
 //
 
+#if canImport(dnssd)
 import Foundation
 import dnssd
 
@@ -216,3 +217,5 @@ private func htons(_ value: UInt16) -> UInt16 {
 private func ntohs(_ value: UInt16) -> UInt16 {
     UInt16(bigEndian: value)
 }
+
+#endif

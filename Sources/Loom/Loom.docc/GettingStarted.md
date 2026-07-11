@@ -200,7 +200,7 @@ After that point, your app owns the rest:
 - reconnection policy
 - stream, document, or UI semantics
 
-If you publish multiple local or remote direct candidates, use ``LoomConnectionCoordinator`` with a ``LoomDirectConnectionPolicy`` so path ranking, transport preference, and bounded candidate racing stay in Loom instead of getting hardcoded in app code. For local test or preview runtimes where Bonjour discovery should keep its advertised ports but connect through a known host, set ``LoomDirectConnectionPolicy/localDiscoveryHostOverride``.
+If you publish multiple local or remote direct candidates, use ``LoomConnectionCoordinator`` with a `LoomDirectConnectionPolicy` so path ranking, transport preference, and bounded candidate racing stay in Loom instead of getting hardcoded in app code. For local test or preview runtimes where Bonjour discovery should keep its advertised ports but connect through a known host, set `LoomDirectConnectionPolicy.localDiscoveryHostOverride`.
 
 That split is the main thing to get right. If a type starts carrying app-specific naming, product roles, or CloudKit record assumptions, it probably belongs above Loom.
 

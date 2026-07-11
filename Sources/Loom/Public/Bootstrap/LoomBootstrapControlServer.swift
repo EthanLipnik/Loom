@@ -5,6 +5,7 @@
 //  Created by Ethan Lipnik on 3/9/26.
 //
 
+#if canImport(Network)
 import Foundation
 import Network
 
@@ -367,3 +368,5 @@ private final class BootstrapServerReadyContinuationBox: @unchecked Sendable {
         }
     }
 }
+
+#endif
