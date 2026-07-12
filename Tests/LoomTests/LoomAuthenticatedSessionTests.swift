@@ -151,6 +151,39 @@ struct LoomAuthenticatedSessionTests {
     }
 
     @MainActor
+    @Test("Unreliable incoming overflow drops payload without failing the session")
+    func unreliableIncomingOverflowRemainsStreamScoped() async throws {
+        let pair = try await makeLoopbackPair(
+            maximumBufferedIncomingBytesPerStream: 16,
+            maximumBufferedIncomingPayloadsPerStream: 2,
+            maximumBufferedIncomingBytesPerSession: 16
+        )
+        defer { Task { await pair.stop() } }
+
+        let incomingStreamTask = Task<LoomMultiplexedStream?, Never> {
+            for await stream in pair.server.incomingStreams {
+                return stream
+            }
+            return nil
+        }
+        try await pair.server.injectOpenForTesting(streamID: 41, label: "video/test")
+        let stream = try #require(await incomingStreamTask.value)
+
+        try await pair.server.injectUnreliableDataForTesting(streamID: 41, payload: Data([1]))
+        try await pair.server.injectUnreliableDataForTesting(streamID: 41, payload: Data([2]))
+        try await pair.server.injectUnreliableDataForTesting(streamID: 41, payload: Data([3]))
+
+        var iterator = stream.incomingBytes.makeAsyncIterator()
+        #expect(await iterator.next() == Data([1]))
+        #expect(await iterator.next() == Data([2]))
+        try await pair.server.injectUnreliableDataForTesting(streamID: 41, payload: Data([4]))
+        #expect(await iterator.next() == Data([4]))
+        if case .failed = await pair.server.state {
+            Issue.record("Unreliable payload overflow must not fail the authenticated session.")
+        }
+    }
+
+    @MainActor
     @Test("Authenticated sessions reject empty data envelopes")
     func authenticatedSessionRejectsEmptyDataEnvelope() async throws {
         let pair = try await makeLoopbackPair()
@@ -2110,6 +2143,7 @@ private func makeLoopbackPair(
     serverFeatures: [String] = LoomSessionHelloRequest.defaultFeatures,
     maximumConcurrentStreams: Int = 256,
     maximumBufferedIncomingBytesPerStream: Int = LoomMessageLimits.maxReceiveBufferBytes,
+    maximumBufferedIncomingPayloadsPerStream: Int = LoomMessageLimits.maxBufferedPayloadsPerStream,
     maximumBufferedIncomingBytesPerSession: Int = LoomMessageLimits.maxBufferedIncomingBytesPerSession
 ) async throws -> LoopbackSessionPair {
     let clientIdentityManager = LoomIdentityManager(
@@ -2156,6 +2190,7 @@ private func makeLoopbackPair(
         role: .initiator,
         maximumConcurrentStreams: maximumConcurrentStreams,
         maximumBufferedIncomingBytesPerStream: maximumBufferedIncomingBytesPerStream,
+        maximumBufferedIncomingPayloadsPerStream: maximumBufferedIncomingPayloadsPerStream,
         maximumBufferedIncomingBytesPerSession: maximumBufferedIncomingBytesPerSession
     )
     let server = LoomAuthenticatedSession(
@@ -2163,6 +2198,7 @@ private func makeLoopbackPair(
         role: .receiver,
         maximumConcurrentStreams: maximumConcurrentStreams,
         maximumBufferedIncomingBytesPerStream: maximumBufferedIncomingBytesPerStream,
+        maximumBufferedIncomingPayloadsPerStream: maximumBufferedIncomingPayloadsPerStream,
         maximumBufferedIncomingBytesPerSession: maximumBufferedIncomingBytesPerSession
     )
 

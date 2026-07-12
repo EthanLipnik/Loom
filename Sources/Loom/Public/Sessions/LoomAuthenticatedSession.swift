@@ -842,6 +842,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         bufferingPolicy: .bufferingNewest(1)
     )
     private var streams: [UInt16: LoomMultiplexedStream] = [:]
+    private var reportedUnreliableIncomingOverflowStreamIDs: Set<UInt16> = []
     private var openedRemoteStreamIDs: Set<UInt16> = []
     private let maximumConcurrentStreams: Int
     private let maximumBufferedIncomingBytesPerStream: Int
@@ -1524,9 +1525,28 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                 throw LoomError.protocolError("Received data for unknown Loom stream \(envelope.streamID).")
             }
             guard stream.yield(payload) else {
-                throw LoomError.protocolError(
-                    "Authenticated Loom stream incoming payload buffer exceeded its limit."
+                if lane == .unreliable {
+                    if reportedUnreliableIncomingOverflowStreamIDs.insert(envelope.streamID).inserted {
+                        LoomLogger.transport(
+                            "Dropped unreliable payload after incoming buffer overflow " +
+                                "stream=\(envelope.streamID) label=\(stream.label ?? "unlabeled") " +
+                                "payloadBytes=\(payload.count) maxBytes=\(maximumBufferedIncomingBytesPerStream) " +
+                                "maxPayloads=\(maximumBufferedIncomingPayloadsPerStream)"
+                        )
+                    }
+                    return
+                }
+                let error = LoomError.protocolError(
+                    "Authenticated Loom stream \(envelope.streamID) incoming payload buffer exceeded its limit " +
+                        "(label=\(stream.label ?? "unlabeled"), payloadBytes=\(payload.count), " +
+                        "maxBytes=\(maximumBufferedIncomingBytesPerStream), " +
+                        "maxPayloads=\(maximumBufferedIncomingPayloadsPerStream))."
                 )
+                finishSession(
+                    state: .failed(error.localizedDescription),
+                    cancelUnderlyingConnection: true
+                )
+                throw error
             }
         case .close:
             discardPendingUnopenedUnreliablePayloads(
@@ -1536,6 +1556,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             guard let stream = streams.removeValue(forKey: envelope.streamID) else {
                 return
             }
+            reportedUnreliableIncomingOverflowStreamIDs.remove(envelope.streamID)
             markRecentlyClosedStream(envelope.streamID)
             stream.finishInbound()
         }
@@ -1823,11 +1844,9 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             maximumBufferedIncomingPayloads: maximumBufferedIncomingPayloadsPerStream,
             sharedIncomingRetainedCapacityBudget: incomingRetainedCapacityBudget,
             incomingRetainedCapacityBudget: pendingRetainedCapacityBudget,
-            onIncomingBufferOverflow: { [weak self] in
-                Task {
-                    await self?.failForIncomingStreamBufferOverflow(streamID: id)
-                }
-            },
+            // Overflow is handled synchronously by handleEnvelope so unreliable
+            // payload loss can remain stream-scoped instead of killing the session.
+            onIncomingBufferOverflow: {},
             closeHandler: { [weak self] in
                 guard let self else {
                     throw LoomError.protocolError("Authenticated Loom session no longer exists.")
@@ -1845,24 +1864,11 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         )
     }
 
-    private func failForIncomingStreamBufferOverflow(streamID: UInt16) {
-        switch state {
-        case .cancelled, .failed:
-            return
-        default:
-            finishSession(
-                state: .failed(
-                    "Authenticated Loom stream \(streamID) incoming payload buffer exceeded its byte limit."
-                ),
-                cancelUnderlyingConnection: true
-            )
-        }
-    }
-
     private func removeStream(id: UInt16) {
         guard streams.removeValue(forKey: id) != nil else {
             return
         }
+        reportedUnreliableIncomingOverflowStreamIDs.remove(id)
         markRecentlyClosedStream(id)
     }
 
