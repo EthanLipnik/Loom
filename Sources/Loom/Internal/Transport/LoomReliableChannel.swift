@@ -221,6 +221,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
             guard totalFragments <= Int(UInt16.max) else {
                 throw LoomError.protocolError("Message too large to fragment (\(data.count) bytes).")
             }
+            let firstSequence = allocateSequenceRange(count: totalFragments)
 
             // Send fragments in batches with yields between batches to avoid
             // overwhelming the socket's kernel send buffer. Without
@@ -231,7 +232,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
                 let start = i * fragmentPayload
                 let end = min(start + fragmentPayload, data.count)
                 let chunk = data[start..<end]
-                let seq = allocateSequence()
+                let seq = firstSequence &+ UInt32(i)
                 var flags: LoomReliablePacketFlags = [.reliable, .fragment]
                 flags.formUnion(additionalFlags)
 
@@ -542,6 +543,13 @@ package actor LoomReliableChannel: LoomSessionTransport {
         let seq = nextSequence
         nextSequence &+= 1
         return seq
+    }
+
+    private func allocateSequenceRange(count: Int) -> UInt32 {
+        precondition(count > 0)
+        let firstSequence = nextSequence
+        nextSequence &+= UInt32(count)
+        return firstSequence
     }
 
     // MARK: - Ack State

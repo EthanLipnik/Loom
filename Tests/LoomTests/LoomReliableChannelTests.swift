@@ -267,6 +267,37 @@ struct LoomReliableChannelTests {
         #expect(retainedCapacityBudget.retainedBytesForTesting == 0)
     }
 
+    @Test("Concurrent reliable sends preserve contiguous fragment sequence ranges")
+    func concurrentReliableSendsPreserveFragmentSequenceRanges() async throws {
+        let connection = LoomSuspendingReliableSendTestConnection()
+        let channel = LoomReliableChannel(connection: connection)
+        let payload = Data(repeating: 0xAA, count: loomReliableMaxFragmentPayload * 3 + 17)
+
+        let fragmentedSend = Task {
+            try await channel.sendMessage(payload)
+        }
+        try await connection.waitForSendCount(1)
+
+        let concurrentSend = Task {
+            try await channel.sendMessage(Data([0xBB]))
+        }
+        try await connection.waitForSendCount(2)
+        await connection.resumeFirstSend()
+
+        try await fragmentedSend.value
+        try await concurrentSend.value
+
+        let sentPackets = await connection.sentPackets
+        let fragmentHeaders = sentPackets
+            .compactMap { LoomReliablePacketHeader.deserialize(from: $0) }
+            .filter { $0.flags.contains(.fragment) }
+            .sorted { $0.fragmentIndex < $1.fragmentIndex }
+        let firstSequence = try #require(fragmentHeaders.first?.sequence)
+
+        #expect(fragmentHeaders.count == 4)
+        #expect(fragmentHeaders.map(\.sequence) == (0..<4).map { firstSequence &+ UInt32($0) })
+    }
+
     @Test("Unauthenticated unreliable datagrams do not consume retained capacity")
     func dropsPreauthenticationUnreliableDatagrams() async throws {
         let networkQueue = DispatchQueue(label: "loom.tests.reliable-channel.preauth-drop")
@@ -849,6 +880,56 @@ private final class LoomConcurrentQueuedSendTestConnection: LoomConcurrentQueued
     }
 
     func cancel() async {}
+}
+
+private actor LoomSuspendingReliableSendTestConnection: LoomNetworkConnection {
+    nonisolated let transportKind = LoomNetworking.LoomTransportKind.udp
+    nonisolated let remoteEndpoint = LoomNetworkEndpoint.opaque(description: "suspending-reliable-send-test")
+    var localEndpoint: LoomNetworkEndpoint? { get async { nil } }
+    var currentPath: LoomNetworkPath? { get async { nil } }
+
+    private var packets: [Data] = []
+    private var firstSendContinuation: CheckedContinuation<Void, Never>?
+
+    var sentPackets: [Data] {
+        packets
+    }
+
+    func start() async throws {}
+
+    func send(_ data: Data) async throws {
+        packets.append(data)
+        guard packets.count == 1 else { return }
+        await withCheckedContinuation { continuation in
+            firstSendContinuation = continuation
+        }
+    }
+
+    func receive(maximumBytes: Int) async throws -> Data? {
+        _ = maximumBytes
+        return nil
+    }
+
+    func makeEventStream() async -> AsyncStream<LoomNetworkConnectionEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func cancel() async {}
+
+    func waitForSendCount(_ expectedCount: Int) async throws {
+        let deadline = ContinuousClock.now + .seconds(1)
+        while packets.count < expectedCount {
+            guard ContinuousClock.now < deadline else {
+                throw LoomReliableChannelTestError.timedOut
+            }
+            await Task.yield()
+        }
+    }
+
+    func resumeFirstSend() {
+        firstSendContinuation?.resume()
+        firstSendContinuation = nil
+    }
 }
 
 private func waitForCount(
