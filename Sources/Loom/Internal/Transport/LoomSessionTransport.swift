@@ -74,6 +74,10 @@ package protocol LoomSessionTransport: Sendable {
     /// Receive the next unreliable message.
     func receiveUnreliable(maxBytes: Int) async throws -> Data
 
+    /// Receive a bounded batch of unreliable messages when the transport can
+    /// drain a message-preserving lane without an extra suspension per message.
+    func receiveUnreliableBatch(maxBytes: Int, maximumMessages: Int) async throws -> [Data]
+
     /// Prepare the unreliable receive lane before the authenticated session is
     /// advertised as ready. Transports with lazily-created datagram flows use
     /// this to avoid dropping the first media packet after bootstrap.
@@ -121,6 +125,16 @@ extension LoomSessionTransport {
     }
 
     package func prepareUnreliableReceive(maxBytes: Int) async throws {}
+
+    package func receiveUnreliableBatch(
+        maxBytes: Int,
+        maximumMessages: Int
+    ) async throws -> [Data] {
+        guard maximumMessages > 0 else {
+            throw LoomError.protocolError("Invalid unreliable receive batch size.")
+        }
+        return [try await receiveUnreliable(maxBytes: maxBytes)]
+    }
 
     package func setObservationHandler(
         _ handler: (@Sendable (LoomSessionTransportObservation) -> Void)?

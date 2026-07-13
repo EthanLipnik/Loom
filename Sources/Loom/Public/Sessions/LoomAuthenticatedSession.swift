@@ -1436,10 +1436,11 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
 
     private func runUnreliableReadLoop() async {
         while !Task.isCancelled {
-            let data: Data
+            let batch: [Data]
             do {
-                data = try await transport.receiveUnreliable(
-                    maxBytes: LoomMessageLimits.maxFrameBytes
+                batch = try await transport.receiveUnreliableBatch(
+                    maxBytes: LoomMessageLimits.maxFrameBytes,
+                    maximumMessages: 64
                 )
             } catch {
                 if case .cancelled = state { return }
@@ -1447,15 +1448,17 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                 return
             }
 
-            do {
-                let envelope = try decryptEnvelope(data)
-                try await handleEnvelope(envelope, lane: .unreliable)
-            } catch {
-                finishSession(
-                    state: .failed(error.localizedDescription),
-                    cancelUnderlyingConnection: true
-                )
-                return
+            for data in batch {
+                do {
+                    let envelope = try decryptEnvelope(data)
+                    try await handleEnvelope(envelope, lane: .unreliable)
+                } catch {
+                    finishSession(
+                        state: .failed(error.localizedDescription),
+                        cancelUnderlyingConnection: true
+                    )
+                    return
+                }
             }
         }
     }

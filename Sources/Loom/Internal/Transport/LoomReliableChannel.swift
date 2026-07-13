@@ -62,7 +62,6 @@ package actor LoomReliableChannel: LoomSessionTransport {
     private var routesReliablePacketsToHandshake = true
 
     private let unreliableDeliveryBuffer: LoomBoundedIncomingDataBuffer
-    private let unreliableDeliveryStream: AsyncStream<Data>
 
     private let priorityUnreliableDeliveryBuffer: LoomBoundedIncomingDataBuffer
     private let priorityUnreliableDeliveryStream: AsyncStream<Data>
@@ -145,15 +144,14 @@ package actor LoomReliableChannel: LoomSessionTransport {
 
         let unreliableDeliveryBuffer = Self.makeDeliveryBuffer(
             maximumBytes: 16 * 1024 * 1024,
-            maximumPayloads: LoomMessageLimits.maxBufferedPayloadsPerStream,
+            maximumPayloads: LoomMessageLimits.maxBufferedPayloadsPerSession,
             parent: retainedCapacityBudget
         )
         self.unreliableDeliveryBuffer = unreliableDeliveryBuffer
-        unreliableDeliveryStream = unreliableDeliveryBuffer.makeStream()
 
         let priorityUnreliableDeliveryBuffer = Self.makeDeliveryBuffer(
             maximumBytes: 8 * 1024 * 1024,
-            maximumPayloads: LoomMessageLimits.maxBufferedPayloadsPerStream,
+            maximumPayloads: LoomMessageLimits.maxBufferedPayloadsPerSession,
             parent: retainedCapacityBudget
         )
         self.priorityUnreliableDeliveryBuffer = priorityUnreliableDeliveryBuffer
@@ -364,20 +362,39 @@ package actor LoomReliableChannel: LoomSessionTransport {
     }
 
     package func receiveUnreliable(maxBytes: Int) async throws -> Data {
-        for await message in unreliableDeliveryStream {
-            if message.count > maxBytes {
-                throw LoomError.protocolError(
-                    "Received unreliable message exceeds limit: \(message.count) > \(maxBytes)"
-                )
+        guard let message = try await receiveUnreliableBatch(
+            maxBytes: maxBytes,
+            maximumMessages: 1
+        ).first else {
+            throw LoomError.connectionFailed(
+                LoomConnectionFailure(reason: .cancelled, detail: "Reliable channel cancelled.")
+            )
+        }
+        return message
+    }
+
+    package func receiveUnreliableBatch(
+        maxBytes: Int,
+        maximumMessages: Int
+    ) async throws -> [Data] {
+        guard maxBytes > 0, maximumMessages > 0 else {
+            throw LoomError.protocolError("Invalid unreliable receive batch limit.")
+        }
+        let messages = await unreliableDeliveryBuffer.nextBatch(maximumCount: maximumMessages)
+        for message in messages where message.count > maxBytes {
+            throw LoomError.protocolError(
+                "Received unreliable message exceeds limit: \(message.count) > \(maxBytes)"
+            )
+        }
+        guard !messages.isEmpty else {
+            if let terminalFailure {
+                throw LoomError.connectionFailed(terminalFailure)
             }
-            return message
+            throw LoomError.connectionFailed(
+                LoomConnectionFailure(reason: .cancelled, detail: "Reliable channel cancelled.")
+            )
         }
-        if let terminalFailure {
-            throw LoomError.connectionFailed(terminalFailure)
-        }
-        throw LoomError.connectionFailed(
-            LoomConnectionFailure(reason: .cancelled, detail: "Reliable channel cancelled.")
-        )
+        return messages
     }
 
     package func receivePriorityUnreliable(maxBytes: Int) async throws -> Data {

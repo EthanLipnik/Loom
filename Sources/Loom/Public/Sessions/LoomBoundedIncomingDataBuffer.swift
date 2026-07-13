@@ -68,6 +68,44 @@ final class LoomBoundedIncomingDataBuffer: @unchecked Sendable {
         )
     }
 
+    /// Waits for one payload, then drains the payloads already available up to
+    /// the requested batch size. The byte and retained-capacity budgets are
+    /// released as each payload leaves the buffer.
+    func nextBatch(maximumCount: Int) async -> [Data] {
+        guard maximumCount > 0, let first = await next() else { return [] }
+        guard maximumCount > 1 else { return [first] }
+
+        return [first] + drainAvailable(maximumCount: maximumCount - 1)
+    }
+
+    private func drainAvailable(maximumCount: Int) -> [Data] {
+        var payloads: [Data] = []
+        var releasedBytes = 0
+        var releasedPayloadCount = 0
+
+        lock.lock()
+        while payloads.count < maximumCount,
+              bufferedPayloadIndex < bufferedPayloads.count {
+            let payload = bufferedPayloads[bufferedPayloadIndex]
+            bufferedPayloadIndex += 1
+            bufferedBytes -= payload.count
+            releasedBytes += payload.count
+            releasedPayloadCount += 1
+            payloads.append(payload)
+        }
+        compactBufferedPayloadsIfNeededLocked()
+        lock.unlock()
+
+        if releasedPayloadCount > 0 {
+            retainedCapacityBudget.release(
+                bytes: releasedBytes,
+                payloadCount: releasedPayloadCount,
+                batchCount: releasedPayloadCount
+            )
+        }
+        return payloads
+    }
+
     /// Delivers directly to a suspended consumer or retains the payload within the byte budget.
     func yield(
         _ data: Data,

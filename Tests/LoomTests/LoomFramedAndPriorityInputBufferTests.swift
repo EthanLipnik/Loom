@@ -190,6 +190,28 @@ struct LoomFramedAndPriorityInputBufferTests {
         #expect(budget.retainedBytesForTesting == 0)
     }
 
+    @Test("Bounded data buffering drains available payloads in batches")
+    func boundedDataBufferDrainsAvailableBatch() async {
+        let budget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: 16,
+            maximumPayloadCount: 4,
+            maximumBatchCount: 4
+        )
+        let buffer = LoomBoundedIncomingDataBuffer(
+            maximumBufferedBytes: 16,
+            maximumBufferedItems: 4,
+            retainedCapacityBudget: budget
+        )
+
+        #expect(buffer.yield(Data([1])) == .accepted)
+        #expect(buffer.yield(Data([2])) == .accepted)
+        #expect(buffer.yield(Data([3])) == .accepted)
+        #expect(await buffer.nextBatch(maximumCount: 2) == [Data([1]), Data([2])])
+        #expect(budget.retainedBytesForTesting == 1)
+        #expect(await buffer.nextBatch(maximumCount: 2) == [Data([3])])
+        #expect(budget.retainedBytesForTesting == 0)
+    }
+
     @MainActor
     @Test("Priority endpoint terminates its producer and releases budget on output overflow")
     func priorityEndpointTerminatesOnOutputOverflow() async throws {

@@ -191,6 +191,30 @@ struct LoomReliableChannelTests {
         #expect(connection.maximumConcurrentSendCount > 1)
     }
 
+    @Test("Native framed media sends preserve the profile concurrency window")
+    func nativeFramedQueuedMediaSendsRemainConcurrent() async throws {
+        let connection = LoomConcurrentQueuedSendTestConnection(transportKind: .tcp)
+        let framedConnection = LoomFramedConnection(connection: connection)
+        let completionCounter = LoomReliableChannelTestCounter()
+        defer {
+            Task { await framedConnection.closeTransport() }
+        }
+
+        for value in 0 ..< 64 {
+            await framedConnection.sendUnreliableQueued(
+                Data([UInt8(value)]),
+                profile: .interactiveMedia,
+                options: .none
+            ) { error in
+                #expect(error == nil)
+                completionCounter.increment()
+            }
+        }
+
+        try await waitForCount(completionCounter, expected: 64)
+        #expect(connection.maximumConcurrentSendCount > 1)
+    }
+
     @Test("Multi-fragment handshake messages round-trip without leaking retained capacity")
     func multiFragmentHandshakeRoundTrip() async throws {
         let networkQueue = DispatchQueue(label: "loom.tests.reliable-channel.fragments")
@@ -489,16 +513,26 @@ struct LoomReliableChannelTests {
         #expect(try await server.receiveHandshakeMessage(maxBytes: 4) == Data([0]))
         try await server.prepareUnreliableReceive(maxBytes: 64)
 
-        for value in 0 ..< (LoomMessageLimits.maxBufferedPayloadsPerStream + 64) {
+        let mediaBurstPayloadCount = LoomMessageLimits.maxBufferedPayloadsPerStream * 2
+        for value in 0 ..< mediaBurstPayloadCount {
             let payload = Data([
                 LoomSessionTrafficClass.data.rawValue,
                 UInt8(truncatingIfNeeded: value),
+                UInt8(truncatingIfNeeded: value >> 8),
             ])
             try await sendDatagram(
                 LoomReliablePacketHeader(payloadLength: UInt16(payload.count)).serialize() + payload,
                 over: client
             )
         }
+
+        var receivedValues: [Int] = []
+        for _ in 0 ..< mediaBurstPayloadCount {
+            let payload = try await server.receiveUnreliable(maxBytes: 64)
+            receivedValues.append(Int(payload[1]) | Int(payload[2]) << 8)
+        }
+        #expect(receivedValues == Array(0 ..< mediaBurstPayloadCount))
+
         for value in 0 ..< (LoomMessageLimits.maxBufferedPayloadsPerStream + 64) {
             let payload = Data([
                 LoomSessionTrafficClass.priorityInput.rawValue,
@@ -755,7 +789,7 @@ private final class LoomReliableChannelTestCounter: @unchecked Sendable {
 }
 
 private final class LoomConcurrentQueuedSendTestConnection: LoomConcurrentQueuedSendConnection, @unchecked Sendable {
-    let transportKind: LoomNetworking.LoomTransportKind = .udp
+    let transportKind: LoomNetworking.LoomTransportKind
     let remoteEndpoint = LoomNetworkEndpoint.opaque(description: "concurrent-send-test")
     var localEndpoint: LoomNetworkEndpoint? { get async { nil } }
     var currentPath: LoomNetworkPath? { get async { nil } }
@@ -763,6 +797,10 @@ private final class LoomConcurrentQueuedSendTestConnection: LoomConcurrentQueued
     private let lock = NSLock()
     private var activeSendCount = 0
     private var maximumConcurrentSendCountStorage = 0
+
+    init(transportKind: LoomNetworking.LoomTransportKind = .udp) {
+        self.transportKind = transportKind
+    }
 
     var maximumConcurrentSendCount: Int {
         lock.lock()

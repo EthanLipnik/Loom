@@ -131,7 +131,13 @@ package actor LoomFramedConnection: LoomSessionTransport {
             replacesQueuedSends: limits.replacesQueuedSends,
             profile: profile,
             diagnosticsLabel: profile.rawValue,
-            sendOperation: { [serializedUnreliableSender] data, onComplete in
+            sendOperation: { [connection, serializedUnreliableSender] data, onComplete in
+#if canImport(Network)
+                if let concurrentConnection = connection as? any LoomConcurrentQueuedSendConnection {
+                    concurrentConnection.sendQueued(data, completion: onComplete)
+                    return
+                }
+#endif
                 serializedUnreliableSender.enqueue(data, completion: onComplete)
             }
         )
