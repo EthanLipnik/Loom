@@ -16,6 +16,11 @@ final class LoomBoundedIncomingDataBuffer: @unchecked Sendable {
         case terminated
     }
 
+    struct ReplacingYieldResult {
+        let result: YieldResult
+        let replacedPayloadCount: Int
+    }
+
     private final class Waiter: @unchecked Sendable {
         let id = UUID()
         var isCancelled = false
@@ -113,6 +118,72 @@ final class LoomBoundedIncomingDataBuffer: @unchecked Sendable {
         }
         waiter?.resume(returning: data)
         return .accepted
+    }
+
+    /// Delivers directly to a suspended consumer or replaces the oldest buffered
+    /// payloads until the newest payload fits. Intended for explicitly lossy lanes.
+    func yieldReplacingOldest(_ data: Data) -> ReplacingYieldResult {
+        let waiter: CheckedContinuation<Data?, Never>?
+        var replacedPayloadCount = 0
+
+        lock.lock()
+        guard !isFinished else {
+            lock.unlock()
+            return ReplacingYieldResult(result: .terminated, replacedPayloadCount: 0)
+        }
+        guard !data.isEmpty else {
+            lock.unlock()
+            return ReplacingYieldResult(result: .invalid, replacedPayloadCount: 0)
+        }
+        guard data.count <= maximumBufferedBytes else {
+            lock.unlock()
+            return ReplacingYieldResult(result: .overflow, replacedPayloadCount: 0)
+        }
+        if let waiterEntry = waiters.first {
+            waiters.removeValue(forKey: waiterEntry.key)
+            waiterEntry.value.waiter.isCompleted = true
+            waiter = waiterEntry.value.continuation
+        } else {
+            var replacedBytes = 0
+            while bufferedPayloadIndex < bufferedPayloads.count,
+                  data.count > maximumBufferedBytes - bufferedBytes ||
+                  bufferedPayloads.count - bufferedPayloadIndex >= maximumBufferedItems {
+                let replacedPayload = bufferedPayloads[bufferedPayloadIndex]
+                bufferedPayloadIndex += 1
+                bufferedBytes -= replacedPayload.count
+                replacedBytes += replacedPayload.count
+                replacedPayloadCount += 1
+            }
+            compactBufferedPayloadsIfNeededLocked()
+            if replacedPayloadCount > 0 {
+                retainedCapacityBudget.release(
+                    bytes: replacedBytes,
+                    payloadCount: replacedPayloadCount,
+                    batchCount: replacedPayloadCount
+                )
+            }
+            guard retainedCapacityBudget.reserve(
+                bytes: data.count,
+                payloadCount: 1,
+                startsNewBatch: true
+            ) else {
+                lock.unlock()
+                return ReplacingYieldResult(
+                    result: .overflow,
+                    replacedPayloadCount: replacedPayloadCount
+                )
+            }
+            bufferedPayloads.append(data)
+            bufferedBytes += data.count
+            waiter = nil
+        }
+        lock.unlock()
+
+        waiter?.resume(returning: data)
+        return ReplacingYieldResult(
+            result: .accepted,
+            replacedPayloadCount: replacedPayloadCount
+        )
     }
 
     func finish() {

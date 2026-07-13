@@ -8,6 +8,15 @@
 import Foundation
 import LoomNetworking
 
+#if canImport(Network)
+package protocol LoomConcurrentQueuedSendConnection: LoomNetworkConnection {
+    func sendQueued(
+        _ data: Data,
+        completion: @escaping @Sendable (Error?) -> Void
+    )
+}
+#endif
+
 /// Reliable datagram transport for Loom sessions over UDP.
 ///
 /// Provides ordered, reliable delivery of arbitrary-size messages on top of an
@@ -57,6 +66,8 @@ package actor LoomReliableChannel: LoomSessionTransport {
 
     private let priorityUnreliableDeliveryBuffer: LoomBoundedIncomingDataBuffer
     private let priorityUnreliableDeliveryStream: AsyncStream<Data>
+    private var droppedUnreliableDeliveryPayloadCount: UInt64 = 0
+    private var lastUnreliableDeliveryDropLogAt: CFAbsoluteTime?
 
     // MARK: - Ordered Delivery
 
@@ -475,6 +486,22 @@ package actor LoomReliableChannel: LoomSessionTransport {
         }
 
         let limits = LoomOrderedUnreliableSendQueue.limits(for: profile)
+        let sendOperation: @Sendable (Data, @escaping @Sendable (Error?) -> Void) -> Void
+        #if canImport(Network)
+        if let concurrentConnection = connection as? any LoomConcurrentQueuedSendConnection {
+            sendOperation = { [concurrentConnection] data, onComplete in
+                concurrentConnection.sendQueued(data, completion: onComplete)
+            }
+        } else {
+            sendOperation = { [serializedUnreliableSender] data, onComplete in
+                serializedUnreliableSender.enqueue(data, completion: onComplete)
+            }
+        }
+        #else
+        sendOperation = { [serializedUnreliableSender] data, onComplete in
+            serializedUnreliableSender.enqueue(data, completion: onComplete)
+        }
+        #endif
         let sender = LoomOrderedUnreliableSendQueue(
             queue: DispatchQueue(
                 label: "loom.reliable.unreliable.send.\(profile.rawValue)",
@@ -486,9 +513,7 @@ package actor LoomReliableChannel: LoomSessionTransport {
             replacesQueuedSends: limits.replacesQueuedSends,
             profile: profile,
             diagnosticsLabel: profile.rawValue,
-            sendOperation: { [serializedUnreliableSender] data, onComplete in
-                serializedUnreliableSender.enqueue(data, completion: onComplete)
-            }
+            sendOperation: sendOperation
         )
         queuedUnreliableSenders[profile] = sender
         return sender
@@ -775,17 +800,17 @@ package actor LoomReliableChannel: LoomSessionTransport {
             // pre-handshake traffic consume the authenticated session budget.
             guard !routesReliablePacketsToHandshake else { return }
             if payload.first == LoomSessionTrafficClass.priorityInput.rawValue {
-                guard deliver(
+                deliverUnreliable(
                     payload,
                     to: priorityUnreliableDeliveryBuffer,
                     lane: "priority unreliable"
-                ) else { return }
+                )
             } else {
-                guard deliver(
+                deliverUnreliable(
                     payload,
                     to: unreliableDeliveryBuffer,
                     lane: "unreliable"
-                ) else { return }
+                )
             }
             return
         }
@@ -1146,6 +1171,44 @@ package actor LoomReliableChannel: LoomSessionTransport {
             return false
         }
         return true
+    }
+
+    private func deliverUnreliable(
+        _ payload: Data,
+        to buffer: LoomBoundedIncomingDataBuffer,
+        lane: String
+    ) {
+        let yieldResult = buffer.yieldReplacingOldest(payload)
+        if yieldResult.replacedPayloadCount > 0 {
+            noteUnreliableDeliveryDrops(
+                lane: lane,
+                payloadBytes: payload.count,
+                count: yieldResult.replacedPayloadCount
+            )
+        }
+        switch yieldResult.result {
+        case .accepted:
+            return
+        case .overflow:
+            noteUnreliableDeliveryDrops(lane: lane, payloadBytes: payload.count, count: 1)
+        case .invalid, .terminated:
+            return
+        }
+    }
+
+    private func noteUnreliableDeliveryDrops(lane: String, payloadBytes: Int, count: Int) {
+        droppedUnreliableDeliveryPayloadCount &+= UInt64(count)
+        let now = CFAbsoluteTimeGetCurrent()
+        if droppedUnreliableDeliveryPayloadCount != 1,
+           let lastUnreliableDeliveryDropLogAt,
+           now - lastUnreliableDeliveryDropLogAt < 1.0 {
+            return
+        }
+        lastUnreliableDeliveryDropLogAt = now
+        LoomLogger.transport(
+            "Dropped saturated Reliable UDP \(lane) payload without closing the session " +
+                "payloadBytes=\(payloadBytes) totalDrops=\(droppedUnreliableDeliveryPayloadCount)"
+        )
     }
 
     private func closeForIncomingOverflow(_ storage: String) {

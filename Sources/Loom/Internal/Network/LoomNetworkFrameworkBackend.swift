@@ -99,7 +99,7 @@ package final class LoomNetworkFrameworkBackend: LoomNetworkBackend, Sendable {
     }
 }
 
-package actor LoomNetworkFrameworkConnection: LoomNetworkConnection {
+package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurrentQueuedSendConnection {
     nonisolated package let transportKind: LoomNetworking.LoomTransportKind
     nonisolated package let remoteEndpoint: LoomNetworkEndpoint
     nonisolated package let nativeConnection: NWConnection
@@ -176,6 +176,15 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection {
                 }
             })
         }
+    }
+
+    package nonisolated func sendQueued(
+        _ data: Data,
+        completion: @escaping @Sendable (Error?) -> Void
+    ) {
+        nativeConnection.send(content: data, completion: .contentProcessed { error in
+            completion(error.map(Self.networkError))
+        })
     }
 
     package func receive(maximumBytes: Int) async throws -> Data? {

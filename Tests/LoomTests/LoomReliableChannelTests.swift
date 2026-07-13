@@ -8,6 +8,7 @@
 @testable import Loom
 import Dispatch
 import Foundation
+import LoomNetworking
 import Network
 import Testing
 
@@ -164,6 +165,30 @@ struct LoomReliableChannelTests {
         #expect(ack.ackSequence >= 1)
 
         await server.close()
+    }
+
+    @Test("Native queued media sends preserve the profile concurrency window")
+    func nativeQueuedMediaSendsRemainConcurrent() async throws {
+        let connection = LoomConcurrentQueuedSendTestConnection()
+        let channel = LoomReliableChannel(connection: connection)
+        let completionCounter = LoomReliableChannelTestCounter()
+        defer {
+            Task { await channel.closeTransport() }
+        }
+
+        for value in 0 ..< 64 {
+            await channel.sendUnreliableQueued(
+                Data([UInt8(value)]),
+                profile: .interactiveMedia,
+                options: .none
+            ) { error in
+                #expect(error == nil)
+                completionCounter.increment()
+            }
+        }
+
+        try await waitForCount(completionCounter, expected: 64)
+        #expect(connection.maximumConcurrentSendCount > 1)
     }
 
     @Test("Multi-fragment handshake messages round-trip without leaking retained capacity")
@@ -427,6 +452,76 @@ struct LoomReliableChannelTests {
             try await channel.sendMessage(Data([3]))
         }
     }
+
+    @Test("Unreliable delivery lane saturation does not close the reliable UDP session")
+    func keepsSessionAliveWhenUnreliableDeliverySaturates() async throws {
+        let networkQueue = DispatchQueue(label: "loom.tests.reliable-channel.unreliable-saturation")
+        let serverBox = LoomReliableChannelTestBox()
+        let listener = try NWListener(using: .udp, on: .any)
+        listener.newConnectionHandler = { connection in
+            let channel = LoomReliableChannel(connection: connection)
+            serverBox.store(channel)
+            Task {
+                do {
+                    try await channel.startAndAwaitReady(queue: networkQueue)
+                } catch {
+                    serverBox.fail(error)
+                }
+            }
+        }
+        try await startAndAwaitReady(listener, queue: networkQueue)
+        let port = try #require(listener.port)
+        let client = NWConnection(host: "127.0.0.1", port: port, using: .udp)
+        try await startAndAwaitReady(client, queue: networkQueue)
+        defer {
+            client.cancel()
+            listener.cancel()
+            Task { await serverBox.channel?.close() }
+        }
+
+        try await sendReliableDatagram(
+            Data([0]),
+            sequence: 0,
+            flags: [.reliable, .hello],
+            over: client
+        )
+        let server = try await waitForServerChannel(serverBox)
+        #expect(try await server.receiveHandshakeMessage(maxBytes: 4) == Data([0]))
+        try await server.prepareUnreliableReceive(maxBytes: 64)
+
+        for value in 0 ..< (LoomMessageLimits.maxBufferedPayloadsPerStream + 64) {
+            let payload = Data([
+                LoomSessionTrafficClass.data.rawValue,
+                UInt8(truncatingIfNeeded: value),
+            ])
+            try await sendDatagram(
+                LoomReliablePacketHeader(payloadLength: UInt16(payload.count)).serialize() + payload,
+                over: client
+            )
+        }
+        for value in 0 ..< (LoomMessageLimits.maxBufferedPayloadsPerStream + 64) {
+            let payload = Data([
+                LoomSessionTrafficClass.priorityInput.rawValue,
+                UInt8(truncatingIfNeeded: value),
+            ])
+            try await sendDatagram(
+                LoomReliablePacketHeader(payloadLength: UInt16(payload.count)).serialize() + payload,
+                over: client
+            )
+        }
+
+        let reliableReceive = Task {
+            try await server.receiveMessage(maxBytes: 4)
+        }
+        try await sendReliableDatagram(
+            Data([1]),
+            sequence: 1,
+            flags: [.reliable],
+            over: client
+        )
+
+        #expect(try await awaitValue(from: reliableReceive, timeout: .seconds(1)) == Data([1]))
+    }
 }
 
 private enum LoomReliableChannelTestError: Error {
@@ -640,4 +735,95 @@ private final class LoomReliableChannelTestContinuationBox<Value: Sendable>: @un
             continuation?.resume(throwing: error)
         }
     }
+}
+
+private final class LoomReliableChannelTestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func increment() {
+        lock.lock()
+        storage += 1
+        lock.unlock()
+    }
+}
+
+private final class LoomConcurrentQueuedSendTestConnection: LoomConcurrentQueuedSendConnection, @unchecked Sendable {
+    let transportKind: LoomNetworking.LoomTransportKind = .udp
+    let remoteEndpoint = LoomNetworkEndpoint.opaque(description: "concurrent-send-test")
+    var localEndpoint: LoomNetworkEndpoint? { get async { nil } }
+    var currentPath: LoomNetworkPath? { get async { nil } }
+
+    private let lock = NSLock()
+    private var activeSendCount = 0
+    private var maximumConcurrentSendCountStorage = 0
+
+    var maximumConcurrentSendCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return maximumConcurrentSendCountStorage
+    }
+
+    func start() async throws {}
+
+    func send(_ data: Data) async throws {
+        _ = data
+    }
+
+    func sendQueued(
+        _ data: Data,
+        completion: @escaping @Sendable (Error?) -> Void
+    ) {
+        _ = data
+        lock.lock()
+        activeSendCount += 1
+        maximumConcurrentSendCountStorage = max(maximumConcurrentSendCountStorage, activeSendCount)
+        lock.unlock()
+
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(10))
+            self?.completeSend(completion)
+        }
+    }
+
+    private func completeSend(_ completion: @escaping @Sendable (Error?) -> Void) {
+        lock.lock()
+        activeSendCount -= 1
+        lock.unlock()
+        completion(nil)
+    }
+
+    func receive(maximumBytes: Int) async throws -> Data? {
+        _ = maximumBytes
+        return nil
+    }
+
+    func makeEventStream() async -> AsyncStream<LoomNetworkConnectionEvent> {
+        AsyncStream { continuation in
+            continuation.finish()
+        }
+    }
+
+    func cancel() async {}
+}
+
+private func waitForCount(
+    _ counter: LoomReliableChannelTestCounter,
+    expected: Int,
+    timeout: Duration = .seconds(1)
+) async throws {
+    let deadline = ContinuousClock.now + timeout
+    while ContinuousClock.now < deadline {
+        if counter.value >= expected {
+            return
+        }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    throw LoomReliableChannelTestError.timedOut
 }

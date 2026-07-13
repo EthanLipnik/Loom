@@ -161,6 +161,35 @@ struct LoomFramedAndPriorityInputBufferTests {
         #expect(await iterator.next() == nil)
     }
 
+    @Test("Lossy data buffering replaces the oldest payload and releases its reservation")
+    func lossyDataBufferKeepsFreshestPayloads() async {
+        let budget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: 4,
+            maximumPayloadCount: 2,
+            maximumBatchCount: 2
+        )
+        let buffer = LoomBoundedIncomingDataBuffer(
+            maximumBufferedBytes: 4,
+            maximumBufferedItems: 2,
+            retainedCapacityBudget: budget
+        )
+        let stream = buffer.makeStream()
+
+        #expect(buffer.yieldReplacingOldest(Data([1, 1])).result == .accepted)
+        #expect(buffer.yieldReplacingOldest(Data([2, 2])).result == .accepted)
+        let replacement = buffer.yieldReplacingOldest(Data([3, 3]))
+        #expect(replacement.result == .accepted)
+        #expect(replacement.replacedPayloadCount == 1)
+        #expect(budget.retainedBytesForTesting == 4)
+        buffer.finish()
+
+        var iterator = stream.makeAsyncIterator()
+        #expect(await iterator.next() == Data([2, 2]))
+        #expect(await iterator.next() == Data([3, 3]))
+        #expect(await iterator.next() == nil)
+        #expect(budget.retainedBytesForTesting == 0)
+    }
+
     @MainActor
     @Test("Priority endpoint terminates its producer and releases budget on output overflow")
     func priorityEndpointTerminatesOnOutputOverflow() async throws {
