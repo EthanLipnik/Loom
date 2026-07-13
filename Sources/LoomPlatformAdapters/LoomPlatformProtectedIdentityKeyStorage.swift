@@ -5,6 +5,7 @@
 //  Created by Ethan Lipnik on 7/10/26.
 //
 
+#if os(Windows)
 import CLoomPlatformSupport
 import Foundation
 import LoomNetworking
@@ -175,3 +176,4 @@ public final class LoomPlatformProtectedIdentityKeyStorage: LoomIdentityKeyStora
         return String(hash, radix: 16)
     }
 }
+#endif
