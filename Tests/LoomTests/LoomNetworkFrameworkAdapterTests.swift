@@ -144,4 +144,39 @@ struct LoomNetworkFrameworkAdapterTests {
         #expect(snapshot.localEndpoint.map(String.init(describing:)) == "192.0.2.4:50000")
         #expect(snapshot.remoteEndpoint.map(String.init(describing:)) == "192.0.2.8:38447")
     }
+
+    @Test("Datagram receive diagnostics separate callback, re-arm, and resume timing")
+    func datagramReceiveDiagnosticsSeparateTimingBoundaries() {
+        let diagnostics = LoomNetworkFrameworkDatagramReceiveDiagnostics()
+
+        diagnostics.recordRegistration(at: 10.000)
+        diagnostics.recordCallback(at: 10.008)
+        diagnostics.recordConsumerResume(
+            afterCallbackAt: 10.008,
+            strategy: .direct,
+            at: 10.009
+        )
+        diagnostics.recordRegistration(at: 10.011)
+        diagnostics.recordCallback(at: 10.020)
+        diagnostics.recordConsumerResume(
+            afterCallbackAt: 10.020,
+            strategy: .direct,
+            at: 10.024
+        )
+
+        let snapshot = diagnostics.snapshot()
+        #expect(snapshot.callbackCount == 2)
+        #expect(snapshot.callbackGapP99Ms == 16.7)
+        #expect(snapshot.callbackGapMaxMs >= 11.9)
+        #expect(snapshot.callbackGapMaxMs <= 12.1)
+        #expect(snapshot.rearmGapP99Ms == 4)
+        #expect(snapshot.rearmGapMaxMs >= 2.9)
+        #expect(snapshot.rearmGapMaxMs <= 3.1)
+        #expect(snapshot.armToCallbackP99Ms == 16.7)
+        #expect(snapshot.armToCallbackMaxMs >= 8.9)
+        #expect(snapshot.armToCallbackMaxMs <= 9.1)
+        #expect(snapshot.callbackToResumeP99Ms == 4)
+        #expect(snapshot.callbackToResumeMaxMs >= 3.9)
+        #expect(snapshot.callbackToResumeMaxMs <= 4.1)
+    }
 }

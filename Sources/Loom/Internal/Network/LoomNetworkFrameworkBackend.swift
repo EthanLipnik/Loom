@@ -99,10 +99,22 @@ package final class LoomNetworkFrameworkBackend: LoomNetworkBackend, Sendable {
     }
 }
 
+package enum LoomNetworkFrameworkDatagramReceiveStrategy: String, Sendable, CaseIterable {
+    case direct
+    case actorIsolated = "actor_isolated"
+}
+
+private struct LoomNetworkFrameworkDatagramReceiveResult: Sendable {
+    let data: Data?
+    let callbackAt: TimeInterval
+}
+
 package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurrentQueuedSendConnection {
     nonisolated package let transportKind: LoomNetworking.LoomTransportKind
     nonisolated package let remoteEndpoint: LoomNetworkEndpoint
     nonisolated package let nativeConnection: NWConnection
+    nonisolated package let datagramReceiveStrategy: LoomNetworkFrameworkDatagramReceiveStrategy
+    nonisolated private let datagramReceiveDiagnostics = LoomNetworkFrameworkDatagramReceiveDiagnostics()
 
     private var isStarting = false
     private var isReady = false
@@ -115,10 +127,12 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
     package init(
         connection: NWConnection,
         transportKind: LoomNetworking.LoomTransportKind,
-        remoteEndpoint: LoomNetworkEndpoint? = nil
+        remoteEndpoint: LoomNetworkEndpoint? = nil,
+        datagramReceiveStrategy: LoomNetworkFrameworkDatagramReceiveStrategy = .direct
     ) {
         nativeConnection = connection
         self.transportKind = transportKind
+        self.datagramReceiveStrategy = datagramReceiveStrategy
         self.remoteEndpoint = remoteEndpoint ??
             LoomNetworkEndpoint(connection.endpoint) ??
             .opaque(description: String(describing: connection.endpoint))
@@ -187,19 +201,25 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
         })
     }
 
-    package func receive(maximumBytes: Int) async throws -> Data? {
+    package nonisolated func receive(maximumBytes: Int) async throws -> Data? {
+        guard transportKind == .udp,
+              datagramReceiveStrategy == .direct else {
+            return try await receiveActorIsolated(maximumBytes: maximumBytes)
+        }
         guard maximumBytes > 0 else {
             throw LoomNetworkError(code: .invalidConfiguration, detail: "Receive limit must be positive.")
         }
         try Task.checkCancellation()
-        switch transportKind {
-        case .tcp:
-            return try await receiveStream(maximumBytes: maximumBytes)
-        case .udp:
-            return try await receiveDatagram(maximumBytes: maximumBytes)
-        case .quic:
-            throw LoomNetworkError(code: .unsupported, detail: "QUIC transport has been removed.")
-        }
+        let result = try await Self.receiveDatagram(
+            over: nativeConnection,
+            maximumBytes: maximumBytes,
+            diagnostics: datagramReceiveDiagnostics
+        )
+        datagramReceiveDiagnostics.recordConsumerResume(
+            afterCallbackAt: result.callbackAt,
+            strategy: datagramReceiveStrategy
+        )
+        return result.data
     }
 
     package func makeEventStream() -> AsyncStream<LoomNetworkConnectionEvent> {
@@ -261,14 +281,48 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
         }
     }
 
-    private func receiveDatagram(maximumBytes: Int) async throws -> Data? {
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Data?, any Error>) in
-            nativeConnection.receiveMessage { data, _, isComplete, error in
+    private func receiveActorIsolated(maximumBytes: Int) async throws -> Data? {
+        guard maximumBytes > 0 else {
+            throw LoomNetworkError(code: .invalidConfiguration, detail: "Receive limit must be positive.")
+        }
+        try Task.checkCancellation()
+        switch transportKind {
+        case .tcp:
+            return try await receiveStream(maximumBytes: maximumBytes)
+        case .udp:
+            let result = try await Self.receiveDatagram(
+                over: nativeConnection,
+                maximumBytes: maximumBytes,
+                diagnostics: datagramReceiveDiagnostics
+            )
+            datagramReceiveDiagnostics.recordConsumerResume(
+                afterCallbackAt: result.callbackAt,
+                strategy: datagramReceiveStrategy
+            )
+            return result.data
+        case .quic:
+            throw LoomNetworkError(code: .unsupported, detail: "QUIC transport has been removed.")
+        }
+    }
+
+    private nonisolated static func receiveDatagram(
+        over connection: NWConnection,
+        maximumBytes: Int,
+        diagnostics: LoomNetworkFrameworkDatagramReceiveDiagnostics
+    ) async throws -> LoomNetworkFrameworkDatagramReceiveResult {
+        diagnostics.recordRegistration()
+        return try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<LoomNetworkFrameworkDatagramReceiveResult, any Error>) in
+            connection.receiveMessage { data, _, isComplete, error in
+                let callbackAt = ProcessInfo.processInfo.systemUptime
+                diagnostics.recordCallback(at: callbackAt)
                 if let error {
                     continuation.resume(throwing: Self.networkError(error))
                 } else if let data, data.count <= maximumBytes {
-                    continuation.resume(returning: data)
+                    continuation.resume(returning: LoomNetworkFrameworkDatagramReceiveResult(
+                        data: data,
+                        callbackAt: callbackAt
+                    ))
                 } else if let data {
                     continuation.resume(
                         throwing: LoomNetworkError(
@@ -277,7 +331,10 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
                         )
                     )
                 } else if isComplete {
-                    continuation.resume(returning: nil)
+                    continuation.resume(returning: LoomNetworkFrameworkDatagramReceiveResult(
+                        data: nil,
+                        callbackAt: callbackAt
+                    ))
                 } else {
                     continuation.resume(
                         throwing: LoomNetworkError(code: .other, detail: "Connection produced no datagram result.")
@@ -557,12 +614,14 @@ package extension LoomReliableChannel {
         connection: NWConnection,
         retainedCapacityBudget: LoomIncomingRetainedCapacityBudget? = nil,
         maximumPendingReliablePackets: Int = 8_192,
-        maximumPendingReliableBytes: Int = 16 * 1024 * 1024
+        maximumPendingReliableBytes: Int = 16 * 1024 * 1024,
+        datagramReceiveStrategy: LoomNetworkFrameworkDatagramReceiveStrategy = .direct
     ) {
         self.init(
             connection: LoomNetworkFrameworkConnection(
                 connection: connection,
-                transportKind: .udp
+                transportKind: .udp,
+                datagramReceiveStrategy: datagramReceiveStrategy
             ),
             retainedCapacityBudget: retainedCapacityBudget,
             maximumPendingReliablePackets: maximumPendingReliablePackets,

@@ -508,13 +508,21 @@ struct LoomReliableChannelTests {
         }
     }
 
-    @Test("Unreliable delivery lane saturation does not close the reliable UDP session")
-    func keepsSessionAliveWhenUnreliableDeliverySaturates() async throws {
+    @Test(
+        "Unreliable delivery lane saturation does not close the reliable UDP session",
+        arguments: LoomNetworkFrameworkDatagramReceiveStrategy.allCases
+    )
+    func keepsSessionAliveWhenUnreliableDeliverySaturates(
+        strategy: LoomNetworkFrameworkDatagramReceiveStrategy
+    ) async throws {
         let networkQueue = DispatchQueue(label: "loom.tests.reliable-channel.unreliable-saturation")
         let serverBox = LoomReliableChannelTestBox()
         let listener = try NWListener(using: .udp, on: .any)
         listener.newConnectionHandler = { connection in
-            let channel = LoomReliableChannel(connection: connection)
+            let channel = LoomReliableChannel(
+                connection: connection,
+                datagramReceiveStrategy: strategy
+            )
             serverBox.store(channel)
             Task {
                 do {

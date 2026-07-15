@@ -1592,9 +1592,14 @@ struct LoomAuthenticatedSessionTests {
     }
 
     @MainActor
-    @Test("UDP authenticated sessions keep queued unreliable video payloads coherent on newly opened streams")
-    func udpSessionKeepsQueuedUnreliableVideoPayloadsCoherent() async throws {
-        let pair = try await makeStartedUDPLoopbackPair()
+    @Test(
+        "UDP authenticated sessions keep queued unreliable video payloads coherent on newly opened streams",
+        arguments: LoomNetworkFrameworkDatagramReceiveStrategy.allCases
+    )
+    func udpSessionKeepsQueuedUnreliableVideoPayloadsCoherent(
+        strategy: LoomNetworkFrameworkDatagramReceiveStrategy
+    ) async throws {
+        let pair = try await makeStartedUDPLoopbackPair(datagramReceiveStrategy: strategy)
         defer {
             Task {
                 await pair.stop()
@@ -2233,7 +2238,8 @@ private func makeLoopbackPair(
 @MainActor
 private func makeStartedUDPLoopbackPair(
     clientFeatures: [String] = LoomSessionHelloRequest.defaultFeatures,
-    serverFeatures: [String] = LoomSessionHelloRequest.defaultFeatures
+    serverFeatures: [String] = LoomSessionHelloRequest.defaultFeatures,
+    datagramReceiveStrategy: LoomNetworkFrameworkDatagramReceiveStrategy = .direct
 ) async throws -> LoopbackSessionPair {
     let clientIdentityManager = LoomIdentityManager(
         service: "com.ethanlipnik.loom.tests.auth-client-udp.\(UUID().uuidString)",
@@ -2271,7 +2277,11 @@ private func makeStartedUDPLoopbackPair(
         using: .udp
     )
     let client = LoomAuthenticatedSession(
-        connection: .udp(clientConnection),
+        backendConnection: LoomNetworkFrameworkConnection(
+            connection: clientConnection,
+            transportKind: .udp,
+            datagramReceiveStrategy: datagramReceiveStrategy
+        ),
         role: .initiator
     )
     let clientHello = LoomSessionHelloRequest(
@@ -2299,7 +2309,11 @@ private func makeStartedUDPLoopbackPair(
 
     let serverConnection = try #require(await acceptedConnection.take())
     let server = LoomAuthenticatedSession(
-        connection: .udp(serverConnection),
+        backendConnection: LoomNetworkFrameworkConnection(
+            connection: serverConnection,
+            transportKind: .udp,
+            datagramReceiveStrategy: datagramReceiveStrategy
+        ),
         role: .receiver
     )
     let serverStartTask = Task {
