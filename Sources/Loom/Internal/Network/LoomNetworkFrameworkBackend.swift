@@ -104,6 +104,29 @@ package enum LoomNetworkFrameworkDatagramReceiveStrategy: String, Sendable, Case
     case actorIsolated = "actor_isolated"
 }
 
+private struct LoomNativeDatagramReceiveDriver: LoomNetworkFrameworkDatagramReceiveDriver {
+    let connection: NWConnection
+
+    func receiveMessage(
+        completion: @escaping @Sendable (LoomNetworkFrameworkDatagramReceiveEvent) -> Void
+    ) {
+        connection.receiveMessage { data, _, isComplete, error in
+            if let error {
+                completion(.failed(LoomNetworkFrameworkConnection.networkError(error)))
+            } else if let data {
+                completion(.datagram(data))
+            } else if isComplete {
+                completion(.closed)
+            } else {
+                completion(.failed(LoomNetworkError(
+                    code: .other,
+                    detail: "Connection produced no datagram result."
+                )))
+            }
+        }
+    }
+}
+
 private struct LoomNetworkFrameworkDatagramReceiveResult: Sendable {
     let data: Data?
     let callbackAt: TimeInterval
@@ -114,7 +137,8 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
     nonisolated package let remoteEndpoint: LoomNetworkEndpoint
     nonisolated package let nativeConnection: NWConnection
     nonisolated package let datagramReceiveStrategy: LoomNetworkFrameworkDatagramReceiveStrategy
-    nonisolated private let datagramReceiveDiagnostics = LoomNetworkFrameworkDatagramReceiveDiagnostics()
+    nonisolated private let datagramReceiveDiagnostics: LoomNetworkFrameworkDatagramReceiveDiagnostics
+    nonisolated private let datagramReceivePump: LoomNetworkFrameworkDatagramReceivePump?
 
     private var isStarting = false
     private var isReady = false
@@ -133,6 +157,17 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
         nativeConnection = connection
         self.transportKind = transportKind
         self.datagramReceiveStrategy = datagramReceiveStrategy
+        let datagramReceiveDiagnostics = LoomNetworkFrameworkDatagramReceiveDiagnostics()
+        self.datagramReceiveDiagnostics = datagramReceiveDiagnostics
+        if transportKind == .udp, datagramReceiveStrategy == .direct {
+            datagramReceivePump = LoomNetworkFrameworkDatagramReceivePump(
+                driver: LoomNativeDatagramReceiveDriver(connection: connection),
+                diagnostics: datagramReceiveDiagnostics,
+                strategy: datagramReceiveStrategy
+            )
+        } else {
+            datagramReceivePump = nil
+        }
         self.remoteEndpoint = remoteEndpoint ??
             LoomNetworkEndpoint(connection.endpoint) ??
             .opaque(description: String(describing: connection.endpoint))
@@ -203,23 +238,11 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
 
     package nonisolated func receive(maximumBytes: Int) async throws -> Data? {
         guard transportKind == .udp,
-              datagramReceiveStrategy == .direct else {
+              datagramReceiveStrategy == .direct,
+              let datagramReceivePump else {
             return try await receiveActorIsolated(maximumBytes: maximumBytes)
         }
-        guard maximumBytes > 0 else {
-            throw LoomNetworkError(code: .invalidConfiguration, detail: "Receive limit must be positive.")
-        }
-        try Task.checkCancellation()
-        let result = try await Self.receiveDatagram(
-            over: nativeConnection,
-            maximumBytes: maximumBytes,
-            diagnostics: datagramReceiveDiagnostics
-        )
-        datagramReceiveDiagnostics.recordConsumerResume(
-            afterCallbackAt: result.callbackAt,
-            strategy: datagramReceiveStrategy
-        )
-        return result.data
+        return try await datagramReceivePump.receive(maximumBytes: maximumBytes)
     }
 
     package func makeEventStream() -> AsyncStream<LoomNetworkConnectionEvent> {
@@ -251,10 +274,10 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
     package func cancel() {
         guard !isCancelled else { return }
         isCancelled = true
+        let error = LoomNetworkError(code: .cancelled, detail: "Connection cancelled.")
+        datagramReceivePump?.cancel(with: error)
         nativeConnection.cancel()
-        resumeStartWaiters(
-            throwing: LoomNetworkError(code: .cancelled, detail: "Connection cancelled.")
-        )
+        resumeStartWaiters(throwing: error)
         publish(.cancelled)
         finishEvents()
     }
@@ -355,6 +378,7 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
         case .ready:
             isReady = true
             isStarting = false
+            datagramReceivePump?.start()
             if let path = nativeConnection.currentPath {
                 handlePath(path)
             }
@@ -364,9 +388,9 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
         case .cancelled:
             guard !isCancelled else { return }
             isCancelled = true
-            resumeStartWaiters(
-                throwing: LoomNetworkError(code: .cancelled, detail: "Connection cancelled.")
-            )
+            let error = LoomNetworkError(code: .cancelled, detail: "Connection cancelled.")
+            datagramReceivePump?.cancel(with: error)
+            resumeStartWaiters(throwing: error)
             publish(.cancelled)
             finishEvents()
         case let .waiting(error):
@@ -390,6 +414,7 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
         guard terminalError == nil, !isCancelled else { return }
         terminalError = error
         isStarting = false
+        datagramReceivePump?.finish(with: error)
         resumeStartWaiters(throwing: error)
         publish(.failed(error))
         finishEvents()
