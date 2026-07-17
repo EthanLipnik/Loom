@@ -165,6 +165,68 @@ public struct LoomQueuedUnreliableSendDrop: Error, LocalizedError, Sendable, Equ
     }
 }
 
+/// Authenticated-session preparation timings for queued-unreliable batches.
+///
+/// The phases distinguish time spent waiting to enter the session actor from
+/// envelope encoding, authenticated sealing, and transport queue admission.
+public struct LoomQueuedUnreliableBatchPhaseDiagnostics: Sendable, Codable, Equatable {
+    public let batchCount: UInt64
+    public let itemCount: UInt64
+    public let sessionWaitP50Ms: Double
+    public let sessionWaitP95Ms: Double
+    public let sessionWaitP99Ms: Double
+    public let envelopeEncodeP50Ms: Double
+    public let envelopeEncodeP95Ms: Double
+    public let envelopeEncodeP99Ms: Double
+    public let sealP50Ms: Double
+    public let sealP95Ms: Double
+    public let sealP99Ms: Double
+    public let transportAdmissionP50Ms: Double
+    public let transportAdmissionP95Ms: Double
+    public let transportAdmissionP99Ms: Double
+    public let totalAdmissionP50Ms: Double
+    public let totalAdmissionP95Ms: Double
+    public let totalAdmissionP99Ms: Double
+
+    public init(
+        batchCount: UInt64 = 0,
+        itemCount: UInt64 = 0,
+        sessionWaitP50Ms: Double = 0,
+        sessionWaitP95Ms: Double = 0,
+        sessionWaitP99Ms: Double = 0,
+        envelopeEncodeP50Ms: Double = 0,
+        envelopeEncodeP95Ms: Double = 0,
+        envelopeEncodeP99Ms: Double = 0,
+        sealP50Ms: Double = 0,
+        sealP95Ms: Double = 0,
+        sealP99Ms: Double = 0,
+        transportAdmissionP50Ms: Double = 0,
+        transportAdmissionP95Ms: Double = 0,
+        transportAdmissionP99Ms: Double = 0,
+        totalAdmissionP50Ms: Double = 0,
+        totalAdmissionP95Ms: Double = 0,
+        totalAdmissionP99Ms: Double = 0
+    ) {
+        self.batchCount = batchCount
+        self.itemCount = itemCount
+        self.sessionWaitP50Ms = sessionWaitP50Ms
+        self.sessionWaitP95Ms = sessionWaitP95Ms
+        self.sessionWaitP99Ms = sessionWaitP99Ms
+        self.envelopeEncodeP50Ms = envelopeEncodeP50Ms
+        self.envelopeEncodeP95Ms = envelopeEncodeP95Ms
+        self.envelopeEncodeP99Ms = envelopeEncodeP99Ms
+        self.sealP50Ms = sealP50Ms
+        self.sealP95Ms = sealP95Ms
+        self.sealP99Ms = sealP99Ms
+        self.transportAdmissionP50Ms = transportAdmissionP50Ms
+        self.transportAdmissionP95Ms = transportAdmissionP95Ms
+        self.transportAdmissionP99Ms = transportAdmissionP99Ms
+        self.totalAdmissionP50Ms = totalAdmissionP50Ms
+        self.totalAdmissionP95Ms = totalAdmissionP95Ms
+        self.totalAdmissionP99Ms = totalAdmissionP99Ms
+    }
+}
+
 /// Structured diagnostics sampled from one queued-unreliable send profile.
 public struct LoomQueuedUnreliableSendDiagnostics: Sendable, Codable, Equatable {
     public let profile: LoomQueuedUnreliableSendProfile?
@@ -191,6 +253,8 @@ public struct LoomQueuedUnreliableSendDiagnostics: Sendable, Codable, Equatable 
     public let contentProcessedP50Ms: Double
     public let contentProcessedP95Ms: Double
     public let contentProcessedP99Ms: Double
+    /// Batch preparation phases, when batch traffic crossed the authenticated session.
+    public let batchPhases: LoomQueuedUnreliableBatchPhaseDiagnostics?
 
     public init(
         profile: LoomQueuedUnreliableSendProfile?,
@@ -216,7 +280,8 @@ public struct LoomQueuedUnreliableSendDiagnostics: Sendable, Codable, Equatable 
         sendGapP99Ms: Double = 0,
         contentProcessedP50Ms: Double = 0,
         contentProcessedP95Ms: Double = 0,
-        contentProcessedP99Ms: Double = 0
+        contentProcessedP99Ms: Double = 0,
+        batchPhases: LoomQueuedUnreliableBatchPhaseDiagnostics? = nil
     ) {
         self.profile = profile
         self.pendingPackets = pendingPackets
@@ -242,6 +307,7 @@ public struct LoomQueuedUnreliableSendDiagnostics: Sendable, Codable, Equatable 
         self.contentProcessedP50Ms = contentProcessedP50Ms
         self.contentProcessedP95Ms = contentProcessedP95Ms
         self.contentProcessedP99Ms = contentProcessedP99Ms
+        self.batchPhases = batchPhases
     }
 
     public var hasActivity: Bool {
@@ -251,6 +317,39 @@ public struct LoomQueuedUnreliableSendDiagnostics: Sendable, Codable, Equatable 
             sentCount > 0 ||
             completedCount > 0 ||
             droppedCount > 0 ||
-            errorCount > 0
+            errorCount > 0 ||
+            (batchPhases?.batchCount ?? 0) > 0
+    }
+
+    package func replacingBatchPhases(
+        _ batchPhases: LoomQueuedUnreliableBatchPhaseDiagnostics?
+    ) -> LoomQueuedUnreliableSendDiagnostics {
+        LoomQueuedUnreliableSendDiagnostics(
+            profile: profile,
+            pendingPackets: pendingPackets,
+            outstandingPackets: outstandingPackets,
+            queuedBytes: queuedBytes,
+            pendingPacketMax: pendingPacketMax,
+            outstandingPacketMax: outstandingPacketMax,
+            queuedBytesMax: queuedBytesMax,
+            enqueuedCount: enqueuedCount,
+            sentCount: sentCount,
+            completedCount: completedCount,
+            droppedCount: droppedCount,
+            deadlineDropCount: deadlineDropCount,
+            queueLimitDropCount: queueLimitDropCount,
+            supersededDropCount: supersededDropCount,
+            errorCount: errorCount,
+            queueDwellP50Ms: queueDwellP50Ms,
+            queueDwellP95Ms: queueDwellP95Ms,
+            queueDwellP99Ms: queueDwellP99Ms,
+            sendGapP50Ms: sendGapP50Ms,
+            sendGapP95Ms: sendGapP95Ms,
+            sendGapP99Ms: sendGapP99Ms,
+            contentProcessedP50Ms: contentProcessedP50Ms,
+            contentProcessedP95Ms: contentProcessedP95Ms,
+            contentProcessedP99Ms: contentProcessedP99Ms,
+            batchPhases: batchPhases
+        )
     }
 }

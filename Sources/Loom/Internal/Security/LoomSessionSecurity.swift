@@ -56,14 +56,25 @@ private final class LoomSessionCipherState: @unchecked Sendable {
     private static let maximumReorderingWindow: UInt64 = 4_096
 
     func nextSendSequence(for trafficClass: LoomSessionTrafficClass) throws -> UInt64 {
-        lock.lock()
-        defer { lock.unlock() }
-        let sequence = nextSendSequenceByTrafficClass[trafficClass] ?? 0
-        guard sequence < UInt64.max else {
+        try reserveSendSequences(count: 1, for: trafficClass).lowerBound
+    }
+
+    func reserveSendSequences(
+        count: Int,
+        for trafficClass: LoomSessionTrafficClass
+    ) throws -> Range<UInt64> {
+        guard let sequenceCount = UInt64(exactly: count) else {
             throw LoomSessionSecurityError.sequenceExhausted
         }
-        nextSendSequenceByTrafficClass[trafficClass] = sequence + 1
-        return sequence
+        lock.lock()
+        defer { lock.unlock() }
+        let firstSequence = nextSendSequenceByTrafficClass[trafficClass] ?? 0
+        guard sequenceCount <= UInt64.max - firstSequence else {
+            throw LoomSessionSecurityError.sequenceExhausted
+        }
+        let endSequence = firstSequence + sequenceCount
+        nextSendSequenceByTrafficClass[trafficClass] = endSequence
+        return firstSequence ..< endSequence
     }
 
     func recordReceivedSequence(_ sequence: UInt64, for trafficClass: LoomSessionTrafficClass) -> Bool {
@@ -190,6 +201,7 @@ package struct LoomSessionSecurityContext: Sendable {
         trafficClass: LoomSessionTrafficClass
     ) throws -> Data {
         let key = sendKey(for: trafficClass)
+        let aad = Data([trafficClass.rawValue])
         let nonceData: Data
         let sequence: UInt64?
         switch cipherMode {
@@ -201,18 +213,75 @@ package struct LoomSessionSecurityContext: Sendable {
             nonceData = Self.nonce(for: nextSequence)
             sequence = nextSequence
         }
-        let nonce = try AES.GCM.Nonce(data: nonceData)
+        return try Self.seal(
+            plaintext,
+            using: key,
+            nonceData: nonceData,
+            sequence: sequence,
+            aad: aad
+        )
+    }
+
+    /// Encrypts a caller-ordered payload batch while reserving the sequenced-v2
+    /// nonce range in one cipher-state critical section.
+    package func sealBatch(
+        _ plaintexts: [Data],
+        trafficClass: LoomSessionTrafficClass
+    ) throws -> [Data] {
+        guard !plaintexts.isEmpty else { return [] }
+
+        let key = sendKey(for: trafficClass)
         let aad = Data([trafficClass.rawValue])
+        let firstSequence: UInt64?
+        switch cipherMode {
+        case .legacyRandomNonce:
+            firstSequence = nil
+        case .sequencedV2:
+            firstSequence = try cipherState.reserveSendSequences(
+                count: plaintexts.count,
+                for: trafficClass
+            ).lowerBound
+        }
+
+        var encryptedPayloads: [Data] = []
+        encryptedPayloads.reserveCapacity(plaintexts.count)
+        for (index, plaintext) in plaintexts.enumerated() {
+            let sequence = firstSequence.map { $0 + UInt64(index) }
+            let nonceData = sequence.map(Self.nonce(for:)) ?? Self.randomNonce()
+            encryptedPayloads.append(try Self.seal(
+                plaintext,
+                using: key,
+                nonceData: nonceData,
+                sequence: sequence,
+                aad: aad
+            ))
+        }
+        return encryptedPayloads
+    }
+
+    private static func seal(
+        _ plaintext: Data,
+        using key: SymmetricKey,
+        nonceData: Data,
+        sequence: UInt64?,
+        aad: Data
+    ) throws -> Data {
+        let nonce = try AES.GCM.Nonce(data: nonceData)
         let sealed = try AES.GCM.seal(
             plaintext,
             using: key,
             nonce: nonce,
             authenticating: aad
         )
+        var encryptedPayload = Data(capacity: nonceData.count + sealed.ciphertext.count + sealed.tag.count)
         if let sequence {
-            return Self.encode(sequence: sequence) + sealed.ciphertext + sealed.tag
+            encryptedPayload.append(Self.encode(sequence: sequence))
+        } else {
+            encryptedPayload.append(nonceData)
         }
-        return Data(nonce) + sealed.ciphertext + sealed.tag
+        encryptedPayload.append(sealed.ciphertext)
+        encryptedPayload.append(sealed.tag)
+        return encryptedPayload
     }
 
     /// Decrypt a payload in the negotiated cipher mode and reject sequenced-v2 replays.

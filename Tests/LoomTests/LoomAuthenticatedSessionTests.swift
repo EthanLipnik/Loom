@@ -782,7 +782,15 @@ struct LoomAuthenticatedSessionTests {
 
         let mediaStream = try await pair.client.openStream(label: "video/queued-batch")
         let serverMediaStream = try #require(await incomingStreamTask.value)
-        let expectedPayloads = (0 ..< 120).map { Data("queued-batch-\($0)".utf8) }
+        let expectedPayloads = (0 ..< 120).map { index in
+            var payload = Data(repeating: UInt8(truncatingIfNeeded: index), count: 1_196)
+            let value = UInt32(index)
+            payload.append(UInt8(truncatingIfNeeded: value))
+            payload.append(UInt8(truncatingIfNeeded: value >> 8))
+            payload.append(UInt8(truncatingIfNeeded: value >> 16))
+            payload.append(UInt8(truncatingIfNeeded: value >> 24))
+            return payload
+        }
         let completionCount = AsyncBox<Int>()
         let receivedPayloadsTask = Task {
             await collectPayloads(from: serverMediaStream, count: expectedPayloads.count)
@@ -807,6 +815,17 @@ struct LoomAuthenticatedSessionTests {
                 )
             }
         )
+
+        let sendDiagnostics = try #require(
+            await mediaStream.consumeQueuedUnreliableSendDiagnostics(profile: .interactiveMedia)
+        )
+        let batchPhases = try #require(sendDiagnostics.batchPhases)
+        #expect(batchPhases.batchCount == 1)
+        #expect(batchPhases.itemCount == UInt64(expectedPayloads.count))
+        #expect(batchPhases.totalAdmissionP99Ms >= batchPhases.sessionWaitP99Ms)
+        #expect(batchPhases.totalAdmissionP99Ms >= batchPhases.envelopeEncodeP99Ms)
+        #expect(batchPhases.totalAdmissionP99Ms >= batchPhases.sealP99Ms)
+        #expect(batchPhases.totalAdmissionP99Ms >= batchPhases.transportAdmissionP99Ms)
 
         #expect(await receivedPayloadsTask.value == expectedPayloads)
         let completed = try #require(

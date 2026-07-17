@@ -96,10 +96,45 @@ struct LoomSessionSecurityTests {
         #expect(try contexts.receiver.open(second, trafficClass: .data) == Data([2]))
         #expect(try contexts.receiver.open(first, trafficClass: .data) == Data([1]))
     }
+
+    @MainActor
+    @Test("Sequenced batch sealing preserves sequential wire bytes and nonce order")
+    func sequencedBatchSealingPreservesSequentialWireBytes() throws {
+        let contexts = try makeSessionSecurityContexts(cipherMode: .sequencedV2)
+        let plaintexts = (0 ..< 120).map { index in
+            var payload = Data(repeating: UInt8(truncatingIfNeeded: index), count: 1_200)
+            let value = UInt32(index)
+            payload.append(UInt8(truncatingIfNeeded: value))
+            payload.append(UInt8(truncatingIfNeeded: value >> 8))
+            payload.append(UInt8(truncatingIfNeeded: value >> 16))
+            payload.append(UInt8(truncatingIfNeeded: value >> 24))
+            return payload
+        }
+
+        let batchCiphertexts = try contexts.initiator.sealBatch(
+            plaintexts,
+            trafficClass: .data
+        )
+        let sequentialCiphertexts = try plaintexts.map {
+            try contexts.comparisonInitiator.seal($0, trafficClass: .data)
+        }
+
+        #expect(batchCiphertexts == sequentialCiphertexts)
+        #expect(batchCiphertexts.count == plaintexts.count)
+        #expect(batchCiphertexts.enumerated().allSatisfy { index, ciphertext in
+            decodedSequence(from: ciphertext) == UInt64(index)
+        })
+        for (ciphertext, plaintext) in zip(batchCiphertexts, plaintexts) {
+            #expect(try contexts.receiver.open(ciphertext, trafficClass: .data) == plaintext)
+        }
+        let nextCiphertext = try contexts.initiator.seal(Data([0xff]), trafficClass: .data)
+        #expect(decodedSequence(from: nextCiphertext) == UInt64(plaintexts.count))
+    }
 }
 
 private struct LoomSessionSecurityContextPair {
     let initiator: LoomSessionSecurityContext
+    let comparisonInitiator: LoomSessionSecurityContext
     let receiver: LoomSessionSecurityContext
 }
 
@@ -144,6 +179,13 @@ private func makeSessionSecurityContexts(
             localEphemeralPrivateKey: initiatorHello.ephemeralPrivateKey,
             cipherMode: cipherMode
         ),
+        comparisonInitiator: LoomSessionSecurityContext(
+            role: .initiator,
+            localHello: initiatorHello.hello,
+            remoteHello: receiverHello.hello,
+            localEphemeralPrivateKey: initiatorHello.ephemeralPrivateKey,
+            cipherMode: cipherMode
+        ),
         receiver: LoomSessionSecurityContext(
             role: .receiver,
             localHello: receiverHello.hello,
@@ -152,4 +194,11 @@ private func makeSessionSecurityContexts(
             cipherMode: cipherMode
         )
     )
+}
+
+private func decodedSequence(from ciphertext: Data) -> UInt64? {
+    guard ciphertext.count >= MemoryLayout<UInt64>.size else { return nil }
+    return ciphertext.prefix(MemoryLayout<UInt64>.size).reduce(UInt64(0)) { partial, byte in
+        (partial << 8) | UInt64(byte)
+    }
 }

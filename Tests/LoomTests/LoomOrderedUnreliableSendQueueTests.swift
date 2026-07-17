@@ -27,7 +27,7 @@ struct LoomOrderedUnreliableSendQueueTests {
                 singleIngressCount.increment()
                 onComplete(nil)
             },
-            queuedUnreliableBatchSendHandler: { items, profile in
+            queuedUnreliableBatchSendHandler: { items, profile, _ in
                 ingressRecorder.record(items: items, profile: profile)
                 for (index, item) in items.enumerated() {
                     item.onComplete(nil)
