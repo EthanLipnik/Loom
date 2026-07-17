@@ -60,6 +60,12 @@ package protocol LoomSessionTransport: Sendable {
         onComplete: @escaping @Sendable (Error?) -> Void
     ) async
 
+    /// Enqueue an ordered batch of unreliable messages in one transport admission.
+    func sendUnreliableQueuedBatch(
+        _ items: [LoomQueuedUnreliableBatchItem],
+        profile: LoomQueuedUnreliableSendProfile
+    ) async
+
     /// Cancel queued unreliable sends for one profile without disturbing the
     /// queues used by other traffic classes.
     func resetQueuedUnreliableSends(
@@ -101,6 +107,20 @@ package protocol LoomSessionTransport: Sendable {
 }
 
 extension LoomSessionTransport {
+    package func sendUnreliableQueuedBatch(
+        _ items: [LoomQueuedUnreliableBatchItem],
+        profile: LoomQueuedUnreliableSendProfile
+    ) async {
+        for item in items {
+            await sendUnreliableQueued(
+                item.data,
+                profile: profile,
+                options: item.options,
+                onComplete: item.onComplete
+            )
+        }
+    }
+
     package func sendUnreliableQueued(
         _ data: Data,
         profile: LoomQueuedUnreliableSendProfile,

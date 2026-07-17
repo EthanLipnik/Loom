@@ -753,6 +753,70 @@ struct LoomAuthenticatedSessionTests {
     }
 
     @MainActor
+    @Test("Authenticated queued-unreliable batch preserves encryption and payload order")
+    func authenticatedQueuedUnreliableBatchPreservesOrder() async throws {
+        let pair = try await makeLoopbackPair()
+        defer {
+            Task {
+                await pair.stop()
+            }
+        }
+
+        async let clientContext = pair.client.start(
+            localHello: pair.clientHello,
+            identityManager: pair.clientIdentityManager
+        )
+        async let serverContext = pair.server.start(
+            localHello: pair.serverHello,
+            identityManager: pair.serverIdentityManager,
+            trustProvider: pair.serverTrustProvider
+        )
+        _ = try await (clientContext, serverContext)
+
+        let incomingStreamTask = Task<LoomMultiplexedStream?, Never> {
+            for await stream in pair.server.incomingStreams {
+                return stream
+            }
+            return nil
+        }
+
+        let mediaStream = try await pair.client.openStream(label: "video/queued-batch")
+        let serverMediaStream = try #require(await incomingStreamTask.value)
+        let expectedPayloads = (0 ..< 120).map { Data("queued-batch-\($0)".utf8) }
+        let completionCount = AsyncBox<Int>()
+        let receivedPayloadsTask = Task {
+            await collectPayloads(from: serverMediaStream, count: expectedPayloads.count)
+        }
+
+        await mediaStream.sendUnreliableQueuedBatch(
+            expectedPayloads.enumerated().map { index, payload in
+                LoomQueuedUnreliableBatchItem(
+                    data: payload,
+                    options: .init(
+                        importance: .realtimeInterFrame,
+                        frameID: 123,
+                        fragmentIndex: index,
+                        fragmentCount: expectedPayloads.count
+                    ),
+                    onComplete: { error in
+                        #expect(error == nil)
+                        Task {
+                            await completionCount.increment()
+                        }
+                    }
+                )
+            }
+        )
+
+        #expect(await receivedPayloadsTask.value == expectedPayloads)
+        let completed = try #require(
+            await completionCount.takeCount(target: expectedPayloads.count, timeoutSeconds: 2.0)
+        )
+        #expect(completed == expectedPayloads.count)
+        try await mediaStream.close()
+    }
+
+    @MainActor
     @Test("TCP authenticated sessions reject proximity realtime display queued unreliable sends")
     func tcpSessionRejectsProximityRealtimeDisplayQueuedUnreliableSends() async throws {
         let pair = try await makeLoopbackPair()

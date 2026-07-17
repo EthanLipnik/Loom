@@ -288,6 +288,27 @@ public struct LoomQueuedUnreliableSendLimits: Sendable, Equatable, Codable {
     }
 }
 
+private final class LoomQueuedUnreliableCompletionGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var didComplete = false
+    private let completion: @Sendable (Error?) -> Void
+
+    init(completion: @escaping @Sendable (Error?) -> Void) {
+        self.completion = completion
+    }
+
+    func complete(_ error: Error?) {
+        lock.lock()
+        guard !didComplete else {
+            lock.unlock()
+            return
+        }
+        didComplete = true
+        lock.unlock()
+        completion(error)
+    }
+}
+
 /// A logical bidirectional stream multiplexed over an authenticated Loom session.
 public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
     public let id: UInt16
@@ -309,6 +330,11 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
             LoomQueuedUnreliableSendProfile,
             LoomQueuedUnreliableSendOptions,
             @escaping @Sendable (Error?) -> Void
+        ) async -> Void
+    private let queuedUnreliableBatchSendHandler:
+        @Sendable (
+            [LoomQueuedUnreliableBatchItem],
+            LoomQueuedUnreliableSendProfile
         ) async -> Void
     private let queuedUnreliableResetHandler:
         @Sendable (LoomQueuedUnreliableSendProfile) async -> Void
@@ -332,6 +358,11 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
                 LoomQueuedUnreliableSendOptions,
                 @escaping @Sendable (Error?) -> Void
             ) async -> Void,
+        queuedUnreliableBatchSendHandler:
+            (@Sendable (
+                [LoomQueuedUnreliableBatchItem],
+                LoomQueuedUnreliableSendProfile
+            ) async -> Void)? = nil,
         queuedUnreliableResetHandler:
             @escaping @Sendable (LoomQueuedUnreliableSendProfile) async -> Void,
         queuedUnreliableDiagnosticsHandler:
@@ -348,6 +379,20 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
         self.sendHandler = sendHandler
         self.unreliableSendHandler = unreliableSendHandler
         self.queuedUnreliableSendHandler = queuedUnreliableSendHandler
+        if let queuedUnreliableBatchSendHandler {
+            self.queuedUnreliableBatchSendHandler = queuedUnreliableBatchSendHandler
+        } else {
+            self.queuedUnreliableBatchSendHandler = { items, profile in
+                for item in items {
+                    await queuedUnreliableSendHandler(
+                        item.data,
+                        profile,
+                        item.options,
+                        item.onComplete
+                    )
+                }
+            }
+        }
         self.queuedUnreliableResetHandler = queuedUnreliableResetHandler
         self.queuedUnreliableDiagnosticsHandler = queuedUnreliableDiagnosticsHandler
         let maximumBufferedIncomingBytes = max(1, maximumBufferedIncomingBytes)
@@ -446,53 +491,126 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
         options: LoomQueuedUnreliableSendOptions,
         onComplete: @escaping @Sendable (Error?) -> Void = { _ in }
     ) {
-        guard !data.isEmpty else {
-            onComplete(LoomError.protocolError("Loom stream data payloads must not be empty."))
+        enqueueUnreliableQueuedBatch(
+            [LoomQueuedUnreliableBatchItem(data: data, options: options, onComplete: onComplete)],
+            profile: profile,
+            onAdmission: {}
+        )
+    }
+
+    /// Queues an ordered payload batch using one stream and authenticated-session admission.
+    ///
+    /// Loom preserves the input order through envelope encryption and transport
+    /// queue admission. The method returns after the batch has been admitted to
+    /// the transport-owned queue, without waiting for underlying socket sends.
+    /// Each item completion runs exactly once on transport
+    /// acceptance, failure, or an intentional nonfatal
+    /// ``LoomQueuedUnreliableSendDrop``. Empty payloads are rejected individually
+    /// and are not admitted with the rest of the batch.
+    public func sendUnreliableQueuedBatch(
+        _ items: [LoomQueuedUnreliableBatchItem],
+        profile: LoomQueuedUnreliableSendProfile = .interactiveMedia
+    ) async {
+        await withCheckedContinuation { continuation in
+            enqueueUnreliableQueuedBatch(
+                items,
+                profile: profile,
+                onAdmission: {
+                    continuation.resume()
+                }
+            )
+        }
+    }
+
+    private func enqueueUnreliableQueuedBatch(
+        _ items: [LoomQueuedUnreliableBatchItem],
+        profile: LoomQueuedUnreliableSendProfile,
+        onAdmission: @escaping @Sendable () -> Void
+    ) {
+        guard !items.isEmpty else {
+            onAdmission()
             return
         }
+
+        var admittedItems: [LoomQueuedUnreliableBatchItem] = []
+        admittedItems.reserveCapacity(items.count)
+        for item in items {
+            guard !item.data.isEmpty else {
+                item.onComplete(LoomError.protocolError("Loom stream data payloads must not be empty."))
+                continue
+            }
+            let completionGate = LoomQueuedUnreliableCompletionGate(completion: item.onComplete)
+            admittedItems.append(LoomQueuedUnreliableBatchItem(
+                data: item.data,
+                options: item.options,
+                onComplete: { error in
+                    completionGate.complete(error)
+                }
+            ))
+        }
+        guard !admittedItems.isEmpty else {
+            onAdmission()
+            return
+        }
+        let queuedItems = admittedItems
+
         let submitter = profile.usesRealtimeDisplaySendPolicy
             ? realtimeDisplayQueuedUnreliableSubmitter
             : queuedUnreliableSubmitter
+        let expirableDeadlines = queuedItems.compactMap { item -> TimeInterval? in
+            guard item.options.dropsWhenExpired else { return nil }
+            return item.options.deadlineUptime
+        }
+        let batchDropsWhenExpired = queuedItems.allSatisfy(\.options.dropsWhenExpired) &&
+            expirableDeadlines.count == queuedItems.count
+        let batchDropsWhenQueueFull = queuedItems.allSatisfy(\.options.dropsWhenQueueFull)
+        let queueFullDropPriority = queuedItems
+            .map(\.options.importance.queueFullDropPriority)
+            .max() ?? Int.max
         submitter.enqueue(
-            operation: { [queuedUnreliableSendHandler, profile, options] markQueued in
+            operation: { [queuedUnreliableBatchSendHandler, profile] markQueued in
                 Task {
-                    await queuedUnreliableSendHandler(data, profile, options, onComplete)
+                    await queuedUnreliableBatchSendHandler(queuedItems, profile)
+                    onAdmission()
                     markQueued()
                 }
             },
-            deadlineUptime: options.deadlineUptime,
-            dropsWhenExpired: options.dropsWhenExpired,
+            deadlineUptime: batchDropsWhenExpired ? expirableDeadlines.min() : nil,
+            dropsWhenExpired: batchDropsWhenExpired,
             maxPendingOperations: profile.recommendedLimits.maxQueuedPackets,
-            dropsWhenQueueFull: options.dropsWhenQueueFull,
-            queueFullDropPriority: options.importance.queueFullDropPriority,
+            dropsWhenQueueFull: batchDropsWhenQueueFull,
+            queueFullDropPriority: queueFullDropPriority,
             onExpired: {
-                onComplete(
-                    LoomQueuedUnreliableSendDrop(
+                for item in queuedItems {
+                    item.onComplete(LoomQueuedUnreliableSendDrop(
                         reason: .deadlineExpired,
                         profile: profile,
-                        frameID: options.frameID,
-                        fragmentIndex: options.fragmentIndex,
-                        fragmentCount: options.fragmentCount
-                    )
-                )
+                        frameID: item.options.frameID,
+                        fragmentIndex: item.options.fragmentIndex,
+                        fragmentCount: item.options.fragmentCount
+                    ))
+                }
+                onAdmission()
             },
             onQueueLimit: {
-                onComplete(
-                    LoomQueuedUnreliableSendDrop(
+                for item in queuedItems {
+                    item.onComplete(LoomQueuedUnreliableSendDrop(
                         reason: .queueLimit,
                         profile: profile,
-                        frameID: options.frameID,
-                        fragmentIndex: options.fragmentIndex,
-                        fragmentCount: options.fragmentCount
-                    )
-                )
+                        frameID: item.options.frameID,
+                        fragmentIndex: item.options.fragmentIndex,
+                        fragmentCount: item.options.fragmentCount
+                    ))
+                }
+                onAdmission()
             },
             onDropped: {
-                onComplete(
-                    LoomError.connectionFailed(
+                for item in queuedItems {
+                    item.onComplete(LoomError.connectionFailed(
                         LoomConnectionFailure(reason: .cancelled, detail: "Unreliable send queue cancelled.")
-                    )
-                )
+                    ))
+                }
+                onAdmission()
             }
         )
     }
@@ -1835,6 +1953,26 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                     onComplete: onComplete
                 )
             },
+            queuedUnreliableBatchSendHandler: { [weak self] items, profile in
+                guard let self else {
+                    let error = LoomError.protocolError("Authenticated Loom session no longer exists.")
+                    for item in items {
+                        item.onComplete(error)
+                    }
+                    return
+                }
+                await self.sendEnvelopeQueuedBatch(
+                    items.map { item in
+                        LoomQueuedUnreliableBatchItem(
+                            data: item.data,
+                            options: item.options,
+                            onComplete: item.onComplete
+                        )
+                    },
+                    streamID: id,
+                    profile: profile
+                )
+            },
             queuedUnreliableResetHandler: { [weak self] profile in
                 guard let self else { return }
                 await self.transport.resetQueuedUnreliableSends(profile: profile)
@@ -1919,6 +2057,52 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         } catch {
             onComplete(error)
         }
+    }
+
+    private func sendEnvelopeQueuedBatch(
+        _ items: [LoomQueuedUnreliableBatchItem],
+        streamID: UInt16,
+        profile: LoomQueuedUnreliableSendProfile
+    ) async {
+        guard !items.isEmpty else { return }
+        if profile.requiresIndependentUnreliableLane,
+           transport.receiveSemantics != .independentReliableAndUnreliable {
+            for item in items {
+                item.onComplete(LoomQueuedUnreliableSendDrop(
+                    reason: .unsupportedTransport,
+                    profile: profile,
+                    frameID: item.options.frameID,
+                    fragmentIndex: item.options.fragmentIndex,
+                    fragmentCount: item.options.fragmentCount
+                ))
+            }
+            return
+        }
+
+        var wireItems: [LoomQueuedUnreliableBatchItem] = []
+        wireItems.reserveCapacity(items.count)
+        do {
+            for item in items {
+                let envelope = LoomSessionStreamEnvelope(
+                    kind: .data,
+                    streamID: streamID,
+                    label: nil,
+                    payload: item.data
+                )
+                wireItems.append(LoomQueuedUnreliableBatchItem(
+                    data: try encodeWireFrame(for: envelope),
+                    options: item.options,
+                    onComplete: item.onComplete
+                ))
+            }
+        } catch {
+            for item in items {
+                item.onComplete(error)
+            }
+            return
+        }
+
+        await transport.sendUnreliableQueuedBatch(wireItems, profile: profile)
     }
 
     private func encodeWireFrame(for envelope: LoomSessionStreamEnvelope) throws -> Data {

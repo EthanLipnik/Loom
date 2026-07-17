@@ -5,6 +5,7 @@
 //  Created by Ethan Lipnik on 3/19/26.
 //
 
+@preconcurrency import Dispatch
 import Foundation
 import LoomNetworking
 
@@ -346,6 +347,61 @@ package actor LoomReliableChannel: LoomSessionTransport {
                 onComplete(LoomError.connectionFailed(LoomConnectionFailure.classify(error)))
             } else {
                 onComplete(nil)
+            }
+        }
+    }
+
+    package func sendUnreliableQueuedBatch(
+        _ items: [LoomQueuedUnreliableBatchItem],
+        profile: LoomQueuedUnreliableSendProfile
+    ) async {
+        guard !items.isEmpty else { return }
+        guard !isClosed else {
+            let error = LoomError.protocolError("Reliable channel is closed.")
+            for item in items {
+                item.onComplete(error)
+            }
+            return
+        }
+
+        let ackSequence = currentAckSequence()
+        let ackBitmap = currentAckBitmap()
+        var packets: [LoomQueuedUnreliableBatchItem] = []
+        packets.reserveCapacity(items.count)
+        for item in items {
+            guard let payloadLength = UInt16(exactly: item.data.count) else {
+                let error = LoomError.protocolError("Unreliable UDP payload exceeds the wire length limit.")
+                for item in items {
+                    item.onComplete(error)
+                }
+                return
+            }
+            let header = LoomReliablePacketHeader(
+                flags: [],
+                sequence: 0,
+                ackSequence: ackSequence,
+                ackBitmap: ackBitmap,
+                fragmentIndex: 0,
+                fragmentCount: 1,
+                payloadLength: payloadLength
+            )
+            packets.append(LoomQueuedUnreliableBatchItem(
+                data: header.serialize() + item.data,
+                options: item.options,
+                onComplete: { error in
+                    if let drop = error as? LoomQueuedUnreliableSendDrop {
+                        item.onComplete(drop)
+                    } else if let error {
+                        item.onComplete(LoomError.connectionFailed(LoomConnectionFailure.classify(error)))
+                    } else {
+                        item.onComplete(nil)
+                    }
+                }
+            ))
+        }
+        await withCheckedContinuation { continuation in
+            queuedUnreliableSender(for: profile).enqueueBatch(packets) {
+                continuation.resume()
             }
         }
     }

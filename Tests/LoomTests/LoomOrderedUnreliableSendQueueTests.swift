@@ -13,6 +13,124 @@ import Testing
 
 @Suite("Loom Ordered Unreliable Send Queue")
 struct LoomOrderedUnreliableSendQueueTests {
+    @Test("Stream batch uses one ingress and maps each completion exactly once")
+    func streamBatchUsesOneIngressAndMapsCompletionsExactlyOnce() async throws {
+        let ingressRecorder = LockedBatchIngressRecorder()
+        let singleIngressCount = LockedCounter()
+        let completionRecorder = LockedBatchCompletionRecorder()
+        let stream = LoomMultiplexedStream(
+            id: 9,
+            label: "batch/ingress",
+            sendHandler: { _ in },
+            unreliableSendHandler: { _ in },
+            queuedUnreliableSendHandler: { _, _, _, onComplete in
+                singleIngressCount.increment()
+                onComplete(nil)
+            },
+            queuedUnreliableBatchSendHandler: { items, profile in
+                ingressRecorder.record(items: items, profile: profile)
+                for (index, item) in items.enumerated() {
+                    item.onComplete(nil)
+                    item.onComplete(LoomError.protocolError("duplicate completion \(index)"))
+                }
+            },
+            queuedUnreliableResetHandler: { _ in },
+            closeHandler: {}
+        )
+        let payloads = (0 ..< 4).map { Data([UInt8($0)]) }
+
+        await stream.sendUnreliableQueuedBatch(
+            payloads.enumerated().map { index, payload in
+                LoomQueuedUnreliableBatchItem(
+                    data: payload,
+                    options: .init(frameID: 77, fragmentIndex: index, fragmentCount: payloads.count),
+                    onComplete: { error in
+                        completionRecorder.record(index: index, error: error)
+                    }
+                )
+            },
+            profile: .interactiveMedia
+        )
+
+        try await waitForCounter(completionRecorder.totalCount, expected: payloads.count)
+        #expect(ingressRecorder.ingressCount == 1)
+        #expect(ingressRecorder.payloads == payloads)
+        #expect(ingressRecorder.profile == .interactiveMedia)
+        #expect(singleIngressCount.value == 0)
+        #expect(completionRecorder.counts == [1, 1, 1, 1])
+        #expect(completionRecorder.results == ["success", "success", "success", "success"])
+    }
+
+    @Test("Queue batch close preserves callback indices and exactly-once completion")
+    func queueBatchClosePreservesCallbackIndices() async throws {
+        let sendRecorder = LockedSendRecorder()
+        let completionRecorder = LockedBatchCompletionRecorder()
+        let queue = LoomOrderedUnreliableSendQueue(
+            queue: DispatchQueue(label: "loom.tests.queue.batch-close"),
+            maxOutstandingPackets: 1,
+            maxOutstandingBytes: 1_024,
+            profile: .interactiveMedia,
+            sendOperation: { data, completion in
+                sendRecorder.record(data: data, completion: completion)
+            }
+        )
+        let payloads = (0 ..< 3).map { Data([UInt8($0)]) }
+
+        queue.enqueueBatch(payloads.enumerated().map { index, payload in
+            LoomQueuedUnreliableBatchItem(
+                data: payload,
+                options: .init(frameID: 88, fragmentIndex: index, fragmentCount: payloads.count),
+                onComplete: { error in
+                    completionRecorder.record(index: index, error: error)
+                }
+            )
+        })
+
+        try await waitForRecordedPayloads(sendRecorder, expected: [payloads[0]])
+        queue.close()
+        try await waitForCounter(completionRecorder.totalCount, expected: 2)
+        #expect(completionRecorder.counts == [0, 1, 1])
+        #expect(completionRecorder.results == ["closed", "closed"])
+
+        sendRecorder.completeNext(error: nil)
+        try await waitForCounter(completionRecorder.totalCount, expected: 3)
+        #expect(completionRecorder.counts == [1, 1, 1])
+        #expect(completionRecorder.results == ["closed", "closed", "success"])
+    }
+
+    @Test("Queue batch applies per-item send priority after atomic admission")
+    func queueBatchAppliesPerItemSendPriority() async throws {
+        let sendRecorder = LockedSendRecorder()
+        let queue = LoomOrderedUnreliableSendQueue(
+            queue: DispatchQueue(label: "loom.tests.queue.batch-priority"),
+            maxOutstandingPackets: 1,
+            maxOutstandingBytes: 1_024,
+            profile: .proximityRealtimeDisplay,
+            sendOperation: { data, completion in
+                sendRecorder.record(data: data, completion: completion)
+            }
+        )
+
+        queue.enqueueBatch([
+            LoomQueuedUnreliableBatchItem(
+                data: Data([1]),
+                options: .init(importance: .realtimeInterFrame, frameID: 1)
+            ),
+            LoomQueuedUnreliableBatchItem(
+                data: Data([2]),
+                options: .init(importance: .realtimeKeyframe, frameID: 2)
+            ),
+            LoomQueuedUnreliableBatchItem(
+                data: Data([3]),
+                options: .init(importance: .realtimeInterFrame, frameID: 3)
+            )
+        ])
+
+        try await waitForRecordedPayloads(sendRecorder, expected: [Data([2])])
+        queue.close()
+        sendRecorder.completeNext(error: nil)
+    }
+
     @Test("Throughput probe queue accepts more outstanding packets before backpressure")
     func throughputProbeQueueAcceptsDeeperBurst() async throws {
         let packetSize = 1024
@@ -1197,6 +1315,78 @@ private final class LockedCounter: @unchecked Sendable {
         lock.lock()
         storage += 1
         lock.unlock()
+    }
+}
+
+private final class LockedBatchIngressRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var ingressCountStorage = 0
+    private var payloadStorage: [Data] = []
+    private var profileStorage: LoomQueuedUnreliableSendProfile?
+
+    var ingressCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return ingressCountStorage
+    }
+
+    var payloads: [Data] {
+        lock.lock()
+        defer { lock.unlock() }
+        return payloadStorage
+    }
+
+    var profile: LoomQueuedUnreliableSendProfile? {
+        lock.lock()
+        defer { lock.unlock() }
+        return profileStorage
+    }
+
+    func record(
+        items: [LoomQueuedUnreliableBatchItem],
+        profile: LoomQueuedUnreliableSendProfile
+    ) {
+        lock.lock()
+        ingressCountStorage += 1
+        payloadStorage = items.map(\.data)
+        profileStorage = profile
+        lock.unlock()
+    }
+}
+
+private final class LockedBatchCompletionRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var countStorage: [Int] = []
+    private var resultStorage: [String] = []
+    let totalCount = LockedCounter()
+
+    var counts: [Int] {
+        lock.lock()
+        defer { lock.unlock() }
+        return countStorage
+    }
+
+    var results: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return resultStorage
+    }
+
+    func record(index: Int, error: Error?) {
+        lock.lock()
+        if countStorage.count <= index {
+            countStorage.append(contentsOf: repeatElement(0, count: index - countStorage.count + 1))
+        }
+        countStorage[index] += 1
+        if let drop = error as? LoomQueuedUnreliableSendDrop {
+            resultStorage.append(drop.reason.rawValue)
+        } else if error != nil {
+            resultStorage.append("error")
+        } else {
+            resultStorage.append("success")
+        }
+        lock.unlock()
+        totalCount.increment()
     }
 }
 

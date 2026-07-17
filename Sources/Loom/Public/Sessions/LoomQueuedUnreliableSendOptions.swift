@@ -7,6 +7,33 @@
 
 import Foundation
 
+/// One payload in an ordered queued-unreliable batch.
+///
+/// A batch preserves item order while crossing Loom's stream, authenticated
+/// session, and transport admission boundaries once. Each item retains its own
+/// scheduling metadata and completion so callers can correlate transport
+/// acceptance or failure without imposing a product-specific frame model.
+public struct LoomQueuedUnreliableBatchItem: Sendable {
+    /// Payload submitted on the multiplexed stream.
+    public let data: Data
+    /// Scheduling metadata applied to this payload.
+    public let options: LoomQueuedUnreliableSendOptions
+    /// Completion invoked exactly once when the payload is accepted, rejected,
+    /// or intentionally discarded by the queued-send path.
+    public let onComplete: @Sendable (Error?) -> Void
+
+    /// Creates one queued-unreliable batch item.
+    public init(
+        data: Data,
+        options: LoomQueuedUnreliableSendOptions = .none,
+        onComplete: @escaping @Sendable (Error?) -> Void = { _ in }
+    ) {
+        self.data = data
+        self.options = options
+        self.onComplete = onComplete
+    }
+}
+
 /// Per-payload scheduling metadata for queued unreliable sends.
 ///
 /// These options keep Loom product-agnostic while allowing high-rate media

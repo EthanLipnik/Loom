@@ -75,6 +75,42 @@ package actor LoomFramedConnection: LoomSessionTransport {
         }
     }
 
+    package func sendUnreliableQueuedBatch(
+        _ items: [LoomQueuedUnreliableBatchItem],
+        profile: LoomQueuedUnreliableSendProfile
+    ) async {
+        guard !items.isEmpty else { return }
+        var frames: [LoomQueuedUnreliableBatchItem] = []
+        frames.reserveCapacity(items.count)
+        do {
+            for item in items {
+                frames.append(LoomQueuedUnreliableBatchItem(
+                    data: try framedData(for: item.data),
+                    options: item.options,
+                    onComplete: { error in
+                        if let drop = error as? LoomQueuedUnreliableSendDrop {
+                            item.onComplete(drop)
+                        } else if let error {
+                            item.onComplete(LoomError.connectionFailed(LoomConnectionFailure.classify(error)))
+                        } else {
+                            item.onComplete(nil)
+                        }
+                    }
+                ))
+            }
+        } catch {
+            for item in items {
+                item.onComplete(error)
+            }
+            return
+        }
+        await withCheckedContinuation { continuation in
+            queuedUnreliableSender(for: profile).enqueueBatch(frames) {
+                continuation.resume()
+            }
+        }
+    }
+
     package func resetQueuedUnreliableSends(
         profile: LoomQueuedUnreliableSendProfile
     ) async {

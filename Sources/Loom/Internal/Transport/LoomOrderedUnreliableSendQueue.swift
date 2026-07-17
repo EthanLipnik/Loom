@@ -224,29 +224,63 @@ package final class LoomOrderedUnreliableSendQueue: @unchecked Sendable {
         options: LoomQueuedUnreliableSendOptions = .none,
         onComplete: @escaping @Sendable (Error?) -> Void
     ) {
+        enqueueBatch([
+            LoomQueuedUnreliableBatchItem(
+                data: data,
+                options: options,
+                onComplete: onComplete
+            )
+        ])
+    }
+
+    /// Admits a caller-ordered payload batch in one queue critical section.
+    package func enqueueBatch(
+        _ items: [LoomQueuedUnreliableBatchItem],
+        onAdmission: @escaping @Sendable () -> Void = {}
+    ) {
+        guard !items.isEmpty else {
+            onAdmission()
+            return
+        }
         queue.async { [self] in
+            defer {
+                onAdmission()
+            }
             let now = ProcessInfo.processInfo.systemUptime
             guard !isClosed else {
-                onComplete(makeDrop(reason: .closed, options: options))
+                for item in items {
+                    item.onComplete(makeDrop(reason: .closed, options: item.options))
+                }
                 return
             }
-            guard !isExpired(options, now: now) else {
-                recordDrop(reason: .deadlineExpired)
-                onComplete(makeDrop(reason: .deadlineExpired, options: options))
+
+            var admittedSends: [PendingSend] = []
+            admittedSends.reserveCapacity(items.count)
+            for item in items {
+                if isExpired(item.options, now: now) {
+                    recordDrop(reason: .deadlineExpired)
+                    item.onComplete(makeDrop(reason: .deadlineExpired, options: item.options))
+                    continue
+                }
+                admittedSends.append(PendingSend(
+                    data: item.data,
+                    options: item.options,
+                    enqueuedAt: now,
+                    onComplete: item.onComplete
+                ))
+            }
+            guard !admittedSends.isEmpty else {
+                logDiagnosticsIfNeeded(now: now)
                 return
             }
+
             if replacesQueuedSends {
                 let droppedSends = pendingSends
                 pendingSends.removeAll(keepingCapacity: true)
                 droppedSends.forEach { drop($0, reason: .superseded) }
             }
-            pendingSends.append(PendingSend(
-                data: data,
-                options: options,
-                enqueuedAt: now,
-                onComplete: onComplete
-            ))
-            diagnosticEnqueuedCount &+= 1
+            pendingSends.append(contentsOf: admittedSends)
+            diagnosticEnqueuedCount &+= UInt64(admittedSends.count)
             updateDiagnosticMaxima()
             trimQueuedSendsIfNeeded(now: now)
             drainIfPossible()
