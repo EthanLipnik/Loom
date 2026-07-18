@@ -9,15 +9,18 @@ import Foundation
 
 /// Retained-capacity accounting for one framed stream receive in progress.
 ///
-/// `LoomFramedConnection` requests exactly the missing bytes for one frame, so a
-/// completed frame consumes the entire buffer. Resetting the `Data` value after
-/// each frame prevents a maximum-sized frame from permanently pinning its capacity.
+/// The buffer may contain several complete frames plus a partial trailing frame.
+/// Consuming bytes replaces the `Data` value so a maximum-sized receive does not
+/// permanently pin its backing allocation.
 package final class LoomFramedReceiveBuffer: @unchecked Sendable {
-    package static let maximumRetainedBytes = LoomMessageLimits.maxFrameBytes + MemoryLayout<UInt32>.size
+    package static let maximumReadAheadBytes = 256 * 1024
+    package static let maximumRetainedBytes = LoomMessageLimits.maxFrameBytes
+        + MemoryLayout<UInt32>.size
+        + maximumReadAheadBytes
 
     private var storage = Data()
     private let retainedCapacityBudget: LoomIncomingRetainedCapacityBudget
-    private var retainedChunkCount = 0
+    private var retainedFrameCount = 0
 
     package init(
         retainedCapacityBudget: LoomIncomingRetainedCapacityBudget? = nil
@@ -46,18 +49,22 @@ package final class LoomFramedReceiveBuffer: @unchecked Sendable {
                 "Incoming Loom frame exceeds the framed transport receive-buffer limit."
             )
         }
+        var candidate = storage
+        candidate.append(chunk)
+        let candidateFrameCount = Self.logicalFrameCount(in: candidate)
+        let addedFrameCount = candidateFrameCount - retainedFrameCount
         guard retainedCapacityBudget.reserve(
             bytes: chunk.count,
-            payloadCount: 1,
-            startsNewBatch: true
+            payloadCount: addedFrameCount,
+            startsNewBatch: addedFrameCount > 0
         ) else {
             throw LoomError.protocolError(
                 "Incoming Loom frame exceeds the aggregate retained-capacity budget."
             )
         }
 
-        storage.append(chunk)
-        retainedChunkCount += 1
+        storage = candidate
+        retainedFrameCount = candidateFrameCount
     }
 
     package func declaredPayloadLength() throws -> Int {
@@ -74,17 +81,24 @@ package final class LoomFramedReceiveBuffer: @unchecked Sendable {
 
     package func consumeCompleteFrame(requiredBytes: Int) throws -> Data {
         guard requiredBytes >= MemoryLayout<UInt32>.size,
-              storage.count == requiredBytes else {
+              storage.count >= requiredBytes else {
             throw LoomError.protocolError("Attempted to consume an incomplete Loom frame.")
         }
 
         let payload = Data(storage[MemoryLayout<UInt32>.size ..< requiredBytes])
-        releaseReservationAndResetStorage()
+        let surplus = Data(storage.dropFirst(requiredBytes))
+        storage = surplus
+        retainedCapacityBudget.release(
+            bytes: requiredBytes,
+            payloadCount: 1,
+            batchCount: 1
+        )
+        retainedFrameCount -= 1
         return payload
     }
 
     package func discard() {
-        guard !storage.isEmpty || retainedChunkCount > 0 else { return }
+        guard !storage.isEmpty || retainedFrameCount > 0 else { return }
         releaseReservationAndResetStorage()
     }
 
@@ -94,18 +108,39 @@ package final class LoomFramedReceiveBuffer: @unchecked Sendable {
 
     private func releaseReservationAndResetStorage() {
         let retainedBytes = storage.count
-        let retainedChunkCount = retainedChunkCount
+        let retainedFrameCount = retainedFrameCount
 
         // Assigning a fresh value releases the old allocation instead of retaining
         // a maximum-sized frame's backing capacity for the lifetime of the session.
         storage = Data()
-        self.retainedChunkCount = 0
+        self.retainedFrameCount = 0
 
-        guard retainedBytes > 0, retainedChunkCount > 0 else { return }
+        guard retainedBytes > 0 || retainedFrameCount > 0 else { return }
         retainedCapacityBudget.release(
             bytes: retainedBytes,
-            payloadCount: retainedChunkCount,
-            batchCount: retainedChunkCount
+            payloadCount: retainedFrameCount,
+            batchCount: retainedFrameCount
         )
+    }
+
+    private static func logicalFrameCount(in data: Data) -> Int {
+        var frameCount = 0
+        var offset = data.startIndex
+        while offset < data.endIndex {
+            frameCount += 1
+            let remainingBytes = data.distance(from: offset, to: data.endIndex)
+            guard remainingBytes >= MemoryLayout<UInt32>.size else { break }
+            let length = Int(
+                (UInt32(data[offset]) << 24) |
+                    (UInt32(data[data.index(offset, offsetBy: 1)]) << 16) |
+                    (UInt32(data[data.index(offset, offsetBy: 2)]) << 8) |
+                    UInt32(data[data.index(offset, offsetBy: 3)])
+            )
+            guard length <= LoomMessageLimits.maxFrameBytes else { break }
+            let framedLength = MemoryLayout<UInt32>.size + length
+            guard remainingBytes >= framedLength else { break }
+            offset = data.index(offset, offsetBy: framedLength)
+        }
+        return frameCount
     }
 }

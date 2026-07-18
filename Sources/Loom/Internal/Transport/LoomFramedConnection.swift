@@ -16,6 +16,7 @@ package actor LoomFramedConnection: LoomSessionTransport {
     private var observationTask: Task<Void, Never>?
     private let receiveBuffer: LoomFramedReceiveBuffer
     private let incompleteFrameTimeout: Duration
+    private var incompleteFrameDeadline: ContinuousClock.Instant?
     package let receiveSemantics: LoomSessionReceiveSemantics = .singleLane
 
     package init(
@@ -37,6 +38,13 @@ package actor LoomFramedConnection: LoomSessionTransport {
 
     package func receiveMessage(maxBytes: Int) async throws -> Data {
         try await readFrame(maxBytes: maxBytes)
+    }
+
+    package func receiveMessageBatch(
+        maxBytes: Int,
+        maximumMessages: Int
+    ) async throws -> [Data] {
+        try await readFrames(maxBytes: maxBytes, maximumFrames: maximumMessages)
     }
 
     package func sendHandshakeMessage(_ data: Data) async throws {
@@ -127,6 +135,13 @@ package actor LoomFramedConnection: LoomSessionTransport {
         try await readFrame(maxBytes: maxBytes)
     }
 
+    package func receiveUnreliableBatch(
+        maxBytes: Int,
+        maximumMessages: Int
+    ) async throws -> [Data] {
+        try await readFrames(maxBytes: maxBytes, maximumFrames: maximumMessages)
+    }
+
     package func receivePriorityUnreliable(maxBytes: Int) async throws -> Data {
         throw LoomError.protocolError("Priority unreliable receive is only available on UDP transports.")
     }
@@ -145,6 +160,7 @@ package actor LoomFramedConnection: LoomSessionTransport {
         observationTask?.cancel()
         observationTask = nil
         receiveBuffer.discard()
+        incompleteFrameDeadline = nil
         await connection.cancel()
     }
 
@@ -209,16 +225,50 @@ package actor LoomFramedConnection: LoomSessionTransport {
     }
 
     package func readFrame(maxBytes: Int = 1_048_576) async throws -> Data {
+        guard let frame = try await readFrames(maxBytes: maxBytes, maximumFrames: 1).first else {
+            throw LoomError.protocolError("Framed receive returned an empty batch.")
+        }
+        return frame
+    }
+
+    package func readFrames(
+        maxBytes: Int = 1_048_576,
+        maximumFrames: Int
+    ) async throws -> [Data] {
         guard maxBytes >= 0 else {
             throw LoomError.protocolError("Loom frame receive limit must not be negative.")
         }
+        guard maximumFrames > 0 else {
+            throw LoomError.protocolError("Loom frame receive batch size must be positive.")
+        }
         let effectiveMaximumBytes = min(maxBytes, LoomMessageLimits.maxFrameBytes)
-        var incompleteFrameDeadline: ContinuousClock.Instant?
+        var frames: [Data] = []
+        frames.reserveCapacity(min(maximumFrames, 64))
 
         do {
-            while receiveBuffer.count < MemoryLayout<UInt32>.size {
+            while frames.isEmpty {
+                while receiveBuffer.count >= MemoryLayout<UInt32>.size,
+                      frames.count < maximumFrames {
+                    let length = try receiveBuffer.declaredPayloadLength()
+                    guard length <= effectiveMaximumBytes else {
+                        throw LoomError.protocolError(
+                            "Received Loom frame larger than \(effectiveMaximumBytes) bytes."
+                        )
+                    }
+                    let requiredBytes = MemoryLayout<UInt32>.size + length
+                    guard receiveBuffer.count >= requiredBytes else { break }
+                    frames.append(try receiveBuffer.consumeCompleteFrame(requiredBytes: requiredBytes))
+                    if receiveBuffer.count == 0 {
+                        incompleteFrameDeadline = nil
+                    }
+                }
+
+                guard frames.isEmpty else { break }
                 try await appendChunk(
-                    maximumBytes: MemoryLayout<UInt32>.size - receiveBuffer.count,
+                    maximumBytes: min(
+                        LoomFramedReceiveBuffer.maximumReadAheadBytes,
+                        LoomFramedReceiveBuffer.maximumRetainedBytes - receiveBuffer.count
+                    ),
                     deadline: incompleteFrameDeadline
                 )
                 if incompleteFrameDeadline == nil {
@@ -226,23 +276,10 @@ package actor LoomFramedConnection: LoomSessionTransport {
                 }
             }
 
-            let length = try receiveBuffer.declaredPayloadLength()
-            guard length <= effectiveMaximumBytes else {
-                throw LoomError.protocolError(
-                    "Received Loom frame larger than \(effectiveMaximumBytes) bytes."
-                )
-            }
-            let requiredBytes = MemoryLayout<UInt32>.size + length
-            while receiveBuffer.count < requiredBytes {
-                try await appendChunk(
-                    maximumBytes: min(65_536, requiredBytes - receiveBuffer.count),
-                    deadline: incompleteFrameDeadline
-                )
-            }
-
-            return try receiveBuffer.consumeCompleteFrame(requiredBytes: requiredBytes)
+            return frames
         } catch {
             receiveBuffer.discard()
+            incompleteFrameDeadline = nil
             await connection.cancel()
             throw error
         }

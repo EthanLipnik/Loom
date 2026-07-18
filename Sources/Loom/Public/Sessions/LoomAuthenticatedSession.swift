@@ -1617,11 +1617,14 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
     private func runReadLoop() async {
         do {
             while !Task.isCancelled {
-                let data = try await transport.receiveMessage(
-                    maxBytes: LoomMessageLimits.maxFrameBytes
+                let batch = try await transport.receiveMessageBatch(
+                    maxBytes: LoomMessageLimits.maxFrameBytes,
+                    maximumMessages: 64
                 )
-                let envelope = try decryptEnvelope(data)
-                try await handleEnvelope(envelope, lane: .reliable)
+                for data in batch {
+                    let envelope = try decryptEnvelope(data)
+                    try await handleEnvelope(envelope, lane: .reliable)
+                }
             }
         } catch {
             if case .cancelled = state {

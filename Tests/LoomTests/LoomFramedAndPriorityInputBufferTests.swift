@@ -8,6 +8,7 @@
 @testable import Loom
 import Dispatch
 import Foundation
+import LoomNetworking
 import Network
 import Testing
 
@@ -70,6 +71,140 @@ struct LoomFramedAndPriorityInputBufferTests {
         #expect(budget.retainedBytesForTesting == 0)
     }
 
+    @Test("Framed receive storage retains surplus with exact budget accounting")
+    func framedReceiveStorageRetainsSurplus() throws {
+        let firstPayload = Data([1, 2])
+        let secondPayload = Data([3, 4, 5])
+        let firstFrame = framedTCPBytes(firstPayload)
+        let secondFrame = framedTCPBytes(secondPayload)
+        let budget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: firstFrame.count + secondFrame.count,
+            maximumPayloadCount: 2,
+            maximumBatchCount: 2
+        )
+        let buffer = LoomFramedReceiveBuffer(retainedCapacityBudget: budget)
+
+        try buffer.append(firstFrame + secondFrame)
+        #expect(try buffer.consumeCompleteFrame(requiredBytes: firstFrame.count) == firstPayload)
+        #expect(buffer.retainedStorageBytesForTesting == secondFrame.count)
+        #expect(budget.retainedBytesForTesting == secondFrame.count)
+
+        #expect(try buffer.consumeCompleteFrame(requiredBytes: secondFrame.count) == secondPayload)
+        #expect(buffer.retainedStorageBytesForTesting == 0)
+        #expect(budget.retainedBytesForTesting == 0)
+    }
+
+    @Test("Framed receive storage counts coalesced logical frames against payload budget")
+    func framedReceiveStorageCountsCoalescedFrames() throws {
+        let budget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: 64,
+            maximumPayloadCount: 1,
+            maximumBatchCount: 1
+        )
+        let buffer = LoomFramedReceiveBuffer(retainedCapacityBudget: budget)
+
+        #expect(throws: LoomError.self) {
+            try buffer.append(framedTCPBytes(Data([1])) + framedTCPBytes(Data([2])))
+        }
+        #expect(buffer.retainedStorageBytesForTesting == 0)
+        #expect(budget.retainedBytesForTesting == 0)
+    }
+
+    @Test("Framed TCP drains coalesced frames in one bounded batch")
+    func framedTCPDrainsCoalescedFrames() async throws {
+        let payloads = [Data([1]), Data([2, 2]), Data([3, 3, 3])]
+        let connection = LoomFramedChunkConnection(chunks: [
+            payloads.reduce(into: Data()) { bytes, payload in
+                bytes.append(framedTCPBytes(payload))
+            }
+        ])
+        let framedConnection = LoomFramedConnection(connection: connection)
+
+        let batch = try await framedConnection.readFrames(maxBytes: 16, maximumFrames: 3)
+
+        #expect(batch == payloads)
+        #expect(await connection.receiveCallCount == 1)
+    }
+
+    @Test("Framed TCP reassembles split frames and preserves order")
+    func framedTCPReassemblesSplitFrames() async throws {
+        let firstPayload = Data([0x11, 0x12, 0x13])
+        let secondPayload = Data([0x21, 0x22])
+        let bytes = framedTCPBytes(firstPayload) + framedTCPBytes(secondPayload)
+        let connection = LoomFramedChunkConnection(chunks: [
+            Data(bytes.prefix(2)),
+            Data(bytes.dropFirst(2).prefix(4)),
+            Data(bytes.dropFirst(6).prefix(3)),
+            Data(bytes.dropFirst(9))
+        ])
+        let framedConnection = LoomFramedConnection(connection: connection)
+
+        #expect(try await framedConnection.readFrame(maxBytes: 16) == firstPayload)
+        #expect(try await framedConnection.readFrame(maxBytes: 16) == secondPayload)
+        #expect(await connection.receiveCallCount == 4)
+    }
+
+    @Test("Framed TCP retains coalesced surplus across bounded batch calls")
+    func framedTCPRetainsSurplusAcrossBatchCalls() async throws {
+        let payloads = [Data([1]), Data([2]), Data([3])]
+        let coalesced = payloads.reduce(into: Data()) { bytes, payload in
+            bytes.append(framedTCPBytes(payload))
+        }
+        let budget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: coalesced.count,
+            maximumPayloadCount: payloads.count,
+            maximumBatchCount: payloads.count
+        )
+        let connection = LoomFramedChunkConnection(chunks: [coalesced])
+        let framedConnection = LoomFramedConnection(
+            connection: connection,
+            retainedCapacityBudget: budget
+        )
+
+        #expect(try await framedConnection.readFrames(maxBytes: 16, maximumFrames: 2) == Array(payloads.prefix(2)))
+        #expect(await connection.receiveCallCount == 1)
+        #expect(budget.retainedBytesForTesting == framedTCPBytes(payloads[2]).count)
+
+        #expect(try await framedConnection.readFrames(maxBytes: 16, maximumFrames: 2) == [payloads[2]])
+        #expect(await connection.receiveCallCount == 1)
+        #expect(budget.retainedBytesForTesting == 0)
+    }
+
+    @Test("Framed TCP rejects oversized declared lengths before reading payload")
+    func framedTCPRejectsOversizedDeclaredLength() async {
+        let connection = LoomFramedChunkConnection(chunks: [frameHeader(payloadLength: 17)])
+        let framedConnection = LoomFramedConnection(connection: connection)
+
+        await #expect(throws: LoomError.self) {
+            try await framedConnection.readFrames(maxBytes: 16, maximumFrames: 4)
+        }
+        #expect(await connection.receiveCallCount == 1)
+        #expect(await connection.cancelCount == 1)
+    }
+
+    @Test("Framed TCP rejects malicious wire lengths and releases retained budget")
+    func framedTCPRejectsMaliciousWireLength() async {
+        let budget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: 64,
+            maximumPayloadCount: 1,
+            maximumBatchCount: 1
+        )
+        let connection = LoomFramedChunkConnection(chunks: [Data(repeating: 0xFF, count: 4)])
+        let framedConnection = LoomFramedConnection(
+            connection: connection,
+            retainedCapacityBudget: budget
+        )
+
+        await #expect(throws: LoomError.self) {
+            try await framedConnection.readFrames(
+                maxBytes: LoomMessageLimits.maxFrameBytes,
+                maximumFrames: 4
+            )
+        }
+        #expect(budget.retainedBytesForTesting == 0)
+        #expect(await connection.cancelCount == 1)
+    }
+
     @Test("Framed receive deadline starts after the first byte, not while idle")
     func framedReceiveDeadlineDoesNotExpireWhileIdle() async throws {
         let pair = try await makeFramedTCPPair(incompleteFrameTimeout: .milliseconds(100))
@@ -107,6 +242,34 @@ struct LoomFramedAndPriorityInputBufferTests {
             }
         }
 
+        #expect(budget.retainedBytesForTesting == 0)
+    }
+
+    @Test("Incomplete surplus keeps its original framed receive deadline")
+    func incompleteSurplusKeepsOriginalDeadline() async throws {
+        let budget = LoomIncomingRetainedCapacityBudget(
+            maximumBytes: 1024,
+            maximumPayloadCount: 2,
+            maximumBatchCount: 2
+        )
+        let pair = try await makeFramedTCPPair(
+            retainedCapacityBudget: budget,
+            incompleteFrameTimeout: .milliseconds(100)
+        )
+        defer { pair.cancel() }
+
+        try await sendTCPBytes(
+            framedTCPBytes(Data([0x2A])) + Data([0]),
+            over: pair.serverConnection
+        )
+        #expect(try await pair.framedConnection.readFrame(maxBytes: 16) == Data([0x2A]))
+        try await Task.sleep(for: .milliseconds(150))
+
+        await #expect(throws: LoomError.self) {
+            try await withLoomThrowingDeadline(.now + .seconds(2)) {
+                try await pair.framedConnection.readFrame(maxBytes: 16)
+            }
+        }
         #expect(budget.retainedBytesForTesting == 0)
     }
 
@@ -357,6 +520,46 @@ private func makePriorityInputSecurityContexts() throws -> LoomPriorityInputSecu
 private func frameHeader(payloadLength: Int) -> Data {
     var length = UInt32(payloadLength).bigEndian
     return withUnsafeBytes(of: &length) { Data($0) }
+}
+
+private func framedTCPBytes(_ payload: Data) -> Data {
+    frameHeader(payloadLength: payload.count) + payload
+}
+
+private actor LoomFramedChunkConnection: LoomNetworkConnection {
+    nonisolated let transportKind = LoomNetworking.LoomTransportKind.tcp
+    nonisolated let remoteEndpoint = LoomNetworkEndpoint.opaque(description: "framed-chunk-test")
+    var localEndpoint: LoomNetworkEndpoint? { get async { nil } }
+    var currentPath: LoomNetworkPath? { get async { nil } }
+
+    private var chunks: [Data]
+    private(set) var receiveCallCount = 0
+    private(set) var cancelCount = 0
+
+    init(chunks: [Data]) {
+        self.chunks = chunks
+    }
+
+    func start() async throws {}
+    func send(_ data: Data) async throws { _ = data }
+
+    func receive(maximumBytes: Int) async throws -> Data? {
+        receiveCallCount += 1
+        guard !chunks.isEmpty else { return nil }
+        let chunk = chunks.removeFirst()
+        guard chunk.count > maximumBytes else { return chunk }
+        let prefix = Data(chunk.prefix(maximumBytes))
+        chunks.insert(Data(chunk.dropFirst(maximumBytes)), at: 0)
+        return prefix
+    }
+
+    func makeEventStream() async -> AsyncStream<LoomNetworkConnectionEvent> {
+        AsyncStream { $0.finish() }
+    }
+
+    func cancel() async {
+        cancelCount += 1
+    }
 }
 
 private func makeFramedTCPPair(

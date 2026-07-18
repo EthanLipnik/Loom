@@ -39,6 +39,10 @@ package protocol LoomSessionTransport: Sendable {
     /// Receive the next complete reliable message.
     func receiveMessage(maxBytes: Int) async throws -> Data
 
+    /// Receive a bounded batch of reliable messages when the transport can
+    /// drain an ordered byte stream without an extra suspension per message.
+    func receiveMessageBatch(maxBytes: Int, maximumMessages: Int) async throws -> [Data]
+
     /// Send a pre-encryption handshake message.
     func sendHandshakeMessage(_ data: Data) async throws
 
@@ -107,6 +111,16 @@ package protocol LoomSessionTransport: Sendable {
 }
 
 extension LoomSessionTransport {
+    package func receiveMessageBatch(
+        maxBytes: Int,
+        maximumMessages: Int
+    ) async throws -> [Data] {
+        guard maximumMessages > 0 else {
+            throw LoomError.protocolError("Invalid reliable receive batch size.")
+        }
+        return [try await receiveMessage(maxBytes: maxBytes)]
+    }
+
     package func sendUnreliableQueuedBatch(
         _ items: [LoomQueuedUnreliableBatchItem],
         profile: LoomQueuedUnreliableSendProfile
