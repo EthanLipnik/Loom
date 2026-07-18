@@ -140,6 +140,8 @@ public struct LoomTransportDiagnostics: Sendable, Codable, Equatable {
 ///
 /// Use ``interactiveMedia`` for latency-sensitive media where small transport
 /// buffers help prevent stale packets from accumulating. Use
+/// ``highThroughputMedia`` for large independent media frames on fast local
+/// paths where multiple complete frames must fit in the transport window. Use
 /// ``proximityRealtimeDisplay`` for deadline-paced display/video traffic on
 /// bursty peer-to-peer proximity links with independent media receive lanes,
 /// and ``proximityRealtimeDisplaySingleLane`` when the transport shares one
@@ -153,6 +155,8 @@ public struct LoomTransportDiagnostics: Sendable, Codable, Equatable {
 public enum LoomQueuedUnreliableSendProfile: String, Sendable, Codable, CaseIterable {
     /// Keeps the underlying ordered unreliable queue shallow to favor latency.
     case interactiveMedia
+    /// Fits several large independent media frames in the transport window without probe-sized buffering.
+    case highThroughputMedia
     /// Bounds media backlog more aggressively for bursty proximity links such as AWDL.
     case proximityInteractiveMedia
     /// Keeps realtime display/video backlog below a short playout window on bursty proximity links.
@@ -185,6 +189,12 @@ public enum LoomQueuedUnreliableSendProfile: String, Sendable, Codable, CaseIter
             LoomQueuedUnreliableSendLimits(
                 maxOutstandingPackets: 1024,
                 maxOutstandingBytes: 2 * 1024 * 1024
+            )
+        case .highThroughputMedia:
+            LoomQueuedUnreliableSendLimits(
+                maxOutstandingPackets: 4096,
+                maxOutstandingBytes: 8 * 1024 * 1024,
+                maxQueuedPackets: 256
             )
         case .proximityInteractiveMedia:
             LoomQueuedUnreliableSendLimits(
@@ -245,7 +255,8 @@ public enum LoomQueuedUnreliableSendProfile: String, Sendable, Codable, CaseIter
         case .proximityRealtimeDisplay:
             true
         case .proximityRealtimeDisplaySingleLane,
-             .interactiveMedia, .proximityInteractiveMedia, .interactiveAudio, .proximityInteractiveAudio,
+             .interactiveMedia, .highThroughputMedia, .proximityInteractiveMedia,
+             .interactiveAudio, .proximityInteractiveAudio,
              .priorityInputRealtime, .priorityInputRealtimeSequenced, .priorityInputContinuous,
              .priorityInputProtected, .throughputProbe:
             false
@@ -258,6 +269,7 @@ public enum LoomQueuedUnreliableSendProfile: String, Sendable, Codable, CaseIter
              .proximityRealtimeDisplaySingleLane:
             true
         case .interactiveMedia,
+             .highThroughputMedia,
              .proximityInteractiveMedia,
              .interactiveAudio,
              .proximityInteractiveAudio,

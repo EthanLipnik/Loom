@@ -177,6 +177,8 @@ package final class LoomOrderedUnreliableSendQueue: @unchecked Sendable {
         case .interactiveMedia,
              .proximityInteractiveMedia:
             return (maxPackets: 32, intervalSeconds: 0.001)
+        case .highThroughputMedia:
+            return (maxPackets: 64, intervalSeconds: 0.001)
         case .interactiveAudio,
              .proximityInteractiveAudio:
             return (maxPackets: 8, intervalSeconds: 0.001)

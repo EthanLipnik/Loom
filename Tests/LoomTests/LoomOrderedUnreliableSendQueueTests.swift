@@ -183,6 +183,54 @@ struct LoomOrderedUnreliableSendQueueTests {
         throughputQueue.close()
     }
 
+    @Test("High-throughput media admits two large frames before backpressure")
+    func highThroughputMediaAdmitsTwoLargeFramesBeforeBackpressure() async throws {
+        let fragmentSize = 128 * 1024
+        let fragmentsPerFrame = 10
+        let payload = Data(repeating: 0xAB, count: fragmentSize)
+        let interactiveLimits = LoomOrderedUnreliableSendQueue.limits(for: .interactiveMedia)
+        let highThroughputLimits = LoomOrderedUnreliableSendQueue.limits(for: .highThroughputMedia)
+        let interactiveCounter = LockedCounter()
+        let highThroughputCounter = LockedCounter()
+
+        let interactiveQueue = LoomOrderedUnreliableSendQueue(
+            queue: DispatchQueue(label: "loom.tests.queue.interactive-large-frames"),
+            maxOutstandingPackets: interactiveLimits.maxOutstandingPackets,
+            maxOutstandingBytes: interactiveLimits.maxOutstandingBytes,
+            sendOperation: { _, _ in
+                interactiveCounter.increment()
+            }
+        )
+        let highThroughputQueue = LoomOrderedUnreliableSendQueue(
+            queue: DispatchQueue(label: "loom.tests.queue.high-throughput-media"),
+            maxOutstandingPackets: highThroughputLimits.maxOutstandingPackets,
+            maxOutstandingBytes: highThroughputLimits.maxOutstandingBytes,
+            sendOperation: { _, _ in
+                highThroughputCounter.increment()
+            }
+        )
+
+        for _ in 0 ..< fragmentsPerFrame * 2 {
+            interactiveQueue.enqueue(payload) { _ in }
+            highThroughputQueue.enqueue(payload) { _ in }
+        }
+
+        try await waitForCounter(
+            interactiveCounter,
+            expected: interactiveLimits.maxOutstandingBytes / fragmentSize
+        )
+        try await waitForCounter(
+            highThroughputCounter,
+            expected: fragmentsPerFrame * 2
+        )
+
+        #expect(interactiveCounter.value < fragmentsPerFrame * 2)
+        #expect(highThroughputCounter.value == fragmentsPerFrame * 2)
+
+        interactiveQueue.close()
+        highThroughputQueue.close()
+    }
+
     @Test("Stream reset forwards only the selected queued-unreliable profile")
     func streamResetForwardsOnlySelectedQueuedUnreliableProfile() async {
         let recorder = ResetProfileRecorder()
@@ -459,12 +507,15 @@ struct LoomOrderedUnreliableSendQueueTests {
     @Test("Interactive media profiles reserve send gaps for control traffic")
     func interactiveMediaProfilesReserveSendGapsForControlTraffic() {
         let mediaQueueLimits = LoomOrderedUnreliableSendQueue.limits(for: .interactiveMedia)
+        let highThroughputMediaQueueLimits = LoomOrderedUnreliableSendQueue.limits(for: .highThroughputMedia)
         let proximityMediaQueueLimits = LoomOrderedUnreliableSendQueue.limits(for: .proximityInteractiveMedia)
         let audioQueueLimits = LoomOrderedUnreliableSendQueue.limits(for: .interactiveAudio)
         let probeQueueLimits = LoomOrderedUnreliableSendQueue.limits(for: .throughputProbe)
 
         #expect(mediaQueueLimits.maxDrainBurstPackets == 32)
         #expect(mediaQueueLimits.drainBurstIntervalSeconds > 0)
+        #expect(highThroughputMediaQueueLimits.maxDrainBurstPackets == 64)
+        #expect(highThroughputMediaQueueLimits.drainBurstIntervalSeconds > 0)
         #expect(proximityMediaQueueLimits.maxDrainBurstPackets == mediaQueueLimits.maxDrainBurstPackets)
         #expect(audioQueueLimits.maxDrainBurstPackets == 8)
         #expect(probeQueueLimits.maxDrainBurstPackets == nil)
