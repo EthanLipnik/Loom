@@ -425,6 +425,61 @@ struct LoomReliableChannelTests {
         }
     }
 
+    @Test("Retransmitted accepted hello is acknowledged and ignored after handshake")
+    func ignoresRetransmittedAcceptedHelloAfterHandshake() async throws {
+        let networkQueue = DispatchQueue(label: "loom.tests.reliable-channel.retransmitted-hello")
+        let serverBox = LoomReliableChannelTestBox()
+        let listener = try NWListener(using: .udp, on: .any)
+        listener.newConnectionHandler = { connection in
+            let channel = LoomReliableChannel(connection: connection)
+            serverBox.store(channel)
+            Task {
+                do {
+                    try await channel.startAndAwaitReady(queue: networkQueue)
+                } catch {
+                    serverBox.fail(error)
+                }
+            }
+        }
+        try await startAndAwaitReady(listener, queue: networkQueue)
+        let port = try #require(listener.port)
+        let client = NWConnection(host: "127.0.0.1", port: port, using: .udp)
+        try await startAndAwaitReady(client, queue: networkQueue)
+        defer {
+            client.cancel()
+            listener.cancel()
+            Task { await serverBox.channel?.close() }
+        }
+
+        try await sendReliableDatagram(
+            Data([0]),
+            sequence: 0,
+            flags: [.reliable, .hello],
+            over: client
+        )
+        let server = try await waitForServerChannel(serverBox)
+        #expect(try await server.receiveHandshakeMessage(maxBytes: 4) == Data([0]))
+
+        let receiveTask = Task {
+            try await server.receiveMessage(maxBytes: 4)
+        }
+        await Task.yield()
+        try await sendReliableDatagram(
+            Data([0]),
+            sequence: 0,
+            flags: [.reliable, .hello],
+            over: client
+        )
+        try await sendReliableDatagram(
+            Data([1]),
+            sequence: 1,
+            flags: [.reliable],
+            over: client
+        )
+
+        #expect(try await awaitValue(from: receiveTask, timeout: .seconds(1)) == Data([1]))
+    }
+
     @Test("Post-handshake ordering starts after the accepted hello sequence")
     func preservesFirstPostHandshakeSequenceAcrossEarlyArrival() async throws {
         let networkQueue = DispatchQueue(label: "loom.tests.reliable-channel.handshake-transition")

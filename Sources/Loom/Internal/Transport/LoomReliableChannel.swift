@@ -918,6 +918,11 @@ package actor LoomReliableChannel: LoomSessionTransport {
         }
 
         if header.flags.contains(.hello) {
+            // Re-ack an already accepted hello sequence without routing it into
+            // application delivery. A new hello remains a terminal protocol error.
+            guard recordAndAcknowledgeNewSequence(header.sequence, now: now) else {
+                return
+            }
             close(
                 with: LoomConnectionFailure(
                     reason: .other,
