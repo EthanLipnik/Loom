@@ -160,7 +160,7 @@ private extension LoomDefaultSSHBootstrapClient {
         let serverAuthDelegate = HostKeyValidationDelegate(trustValidator: trustValidator)
 
         do {
-            let bootstrap = ClientBootstrap(group: eventLoopGroup)
+            let baseBootstrap = ClientBootstrap(group: eventLoopGroup)
                 .channelInitializer { channel in
                     channel.eventLoop.makeCompletedFuture {
                         let sshHandler = NIOSSHHandler(
@@ -177,6 +177,10 @@ private extension LoomDefaultSSHBootstrapClient {
                     }
                 }
                 .channelOption(ChannelOptions.connectTimeout, value: .seconds(10))
+#if os(Windows)
+            let bootstrap = baseBootstrap
+#else
+            let bootstrap = baseBootstrap
                 .channelOption(ChannelOptions.socket(
                     SocketOptionLevel(SOL_SOCKET),
                     SO_REUSEADDR
@@ -185,6 +189,7 @@ private extension LoomDefaultSSHBootstrapClient {
                     SocketOptionLevel(IPPROTO_TCP),
                     TCP_NODELAY
                 ), value: 1)
+#endif
 
             let channel = try await bootstrap.connect(host: host, port: port).get()
             defer {
@@ -311,6 +316,9 @@ private extension LoomDefaultSSHBootstrapClient {
     }
 
     static func isAuthenticationPOSIXError(_ code: CInt) -> Bool {
+#if os(Windows)
+        return code == 10013
+#else
         guard let posix = POSIXErrorCode(rawValue: code) else { return false }
         switch posix {
         case .EACCES, .EPERM:
@@ -318,13 +326,18 @@ private extension LoomDefaultSSHBootstrapClient {
         default:
             return false
         }
+#endif
     }
 
     static func isTimeoutPOSIXError(_ code: CInt) -> Bool {
+#if os(Windows)
+        return code == 10060
+#else
         if let posix = POSIXErrorCode(rawValue: code), posix == .ETIMEDOUT {
             return true
         }
         return false
+#endif
     }
 }
 

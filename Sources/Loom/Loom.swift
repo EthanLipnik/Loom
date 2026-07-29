@@ -8,6 +8,15 @@
 @_exported import Foundation
 @_exported import LoomNetworking
 
+#if os(Windows)
+// CoreFoundation's absolute-time aliases are not exported by Foundation on Windows.
+package typealias CFAbsoluteTime = TimeInterval
+
+package func CFAbsoluteTimeGetCurrent() -> CFAbsoluteTime {
+    Date.timeIntervalSinceReferenceDate
+}
+#endif
+
 package typealias WindowID = UInt32
 package typealias StreamID = UInt16
 package typealias StreamSessionID = UUID

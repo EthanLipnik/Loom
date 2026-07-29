@@ -75,6 +75,12 @@ public enum LoomDiagnosticsActionability {
         4865, // Coder value not found (protocol/version mismatch payloads)
     ]
 
+#if os(Windows)
+    // Winsock error values preserve the same user-actionability categories on Windows.
+    private static let userDependentPOSIXErrorCodes: Set<Int> = [
+        995, 10050, 10051, 10052, 10053, 10054, 10057, 10060, 10065,
+    ]
+#else
     private static let userDependentPOSIXErrorCodes: Set<Int> = [
         Int(POSIXErrorCode.ECONNABORTED.rawValue),
         Int(POSIXErrorCode.ECONNRESET.rawValue),
@@ -87,6 +93,7 @@ public enum LoomDiagnosticsActionability {
         Int(POSIXErrorCode.EHOSTUNREACH.rawValue),
         Int(POSIXErrorCode.EPIPE.rawValue),
     ]
+#endif
 
     private static let userDependentRuntimeConditionErrorCodes: Set<Int> = [
         LoomRuntimeConditionError.credentialsRequired.rawValue,

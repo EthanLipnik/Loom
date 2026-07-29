@@ -131,6 +131,23 @@ public struct LoomConnectionFailure: Error, LocalizedError, Sendable {
         _ code: POSIXErrorCode,
         detail: String? = nil
     ) -> LoomConnectionFailure {
+#if os(Windows)
+        // Foundation's Windows POSIXErrorCode omits Winsock-only network cases.
+        let reason: LoomConnectionFailureReason = switch code.rawValue {
+        case 10060:
+            .timedOut
+        case 10061:
+            .connectionRefused
+        case 10049:
+            .addressUnavailable
+        case 10050, 10051, 10052, 10053, 10054, 10057, 10064, 10065:
+            .transportLoss
+        case 995:
+            .cancelled
+        default:
+            .other
+        }
+#else
         let reason: LoomConnectionFailureReason = switch code {
         case .ETIMEDOUT:
             .timedOut
@@ -153,6 +170,7 @@ public struct LoomConnectionFailure: Error, LocalizedError, Sendable {
         default:
             .other
         }
+#endif
 
         return LoomConnectionFailure(
             reason: reason,

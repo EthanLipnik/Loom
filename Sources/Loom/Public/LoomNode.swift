@@ -1261,7 +1261,12 @@ public final class LoomNode {
         guard case .connectionFailed(let underlying) = error else { return false }
         let failure = LoomConnectionFailure.classify(underlying)
         guard let code = failure.posixCode else { return false }
+#if os(Windows)
+        // Winsock reports the network-down family with WSA-prefixed numeric values.
+        return [10050, 10051, 10065].contains(Int(code.rawValue))
+#else
         return ([.ENETDOWN, .EHOSTUNREACH, .ENETUNREACH] as [POSIXErrorCode]).contains(code)
+#endif
     }
 
     nonisolated static func advertisement(
