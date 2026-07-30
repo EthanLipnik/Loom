@@ -25,3 +25,6 @@ Recent commits use short, imperative subjects such as `Rewrite README and fix Pa
 
 ## Architecture Boundary
 Read [Architecture.md](/Users/ethan/Developer/Loom/Architecture.md) before widening scope. Loom is intentionally product-agnostic: transport, trust, diagnostics, and remote reachability belong here; app-level schemas and naming do not.
+
+## Repository Isolation
+Keep Loom self-contained. Never mention consuming projects in Loom code comments, commit messages, documentation, tags, or release notes. Describe compatibility changes solely in Loom terms (for example, `Update Swift Crypto to 4.5.1`, not `Align Swift Crypto with a consumer's dependencies`).
