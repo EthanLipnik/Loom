@@ -104,6 +104,10 @@ package protocol LoomSessionTransport: Sendable {
     /// Close transport-owned tasks and queues during authenticated-session teardown.
     func closeTransport() async
 
+    /// Closes transport after an ordered reliable write crosses its deadline. Shared backends may
+    /// need a wider socket cut because allowing one late write is less safe than collateral closure.
+    func hardCloseTransport() async
+
     /// Installs a transport-owned observation hook for path and lifecycle updates.
     func setObservationHandler(
         _ handler: (@Sendable (LoomSessionTransportObservation) -> Void)?
@@ -150,6 +154,10 @@ extension LoomSessionTransport {
 
     package func closeTransport() async {
         await cancelPendingUnreliableSends()
+    }
+
+    package func hardCloseTransport() async {
+        await closeTransport()
     }
 
     package func consumeQueuedUnreliableSendDiagnostics(

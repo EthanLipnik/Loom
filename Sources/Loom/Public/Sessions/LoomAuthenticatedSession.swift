@@ -337,6 +337,8 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
     private let onIncomingBufferOverflow: @Sendable () -> Void
     private var incomingByteBatchDispatcher: LoomIncomingByteBatchDispatcher?
     private let sendHandler: @Sendable (Data) async throws -> Void
+    private let hardDeadlineSendHandler:
+        @Sendable (Data, ContinuousClock.Instant) async throws -> Void
     private let unreliableSendHandler: @Sendable (Data) async throws -> Void
     private let queuedUnreliableSendHandler:
         @Sendable (
@@ -365,6 +367,8 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
         id: UInt16,
         label: String?,
         sendHandler: @escaping @Sendable (Data) async throws -> Void,
+        hardDeadlineSendHandler:
+            @escaping @Sendable (Data, ContinuousClock.Instant) async throws -> Void,
         unreliableSendHandler: @escaping @Sendable (Data) async throws -> Void,
         queuedUnreliableSendHandler:
             @escaping @Sendable (
@@ -393,6 +397,7 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
         self.id = id
         self.label = label
         self.sendHandler = sendHandler
+        self.hardDeadlineSendHandler = hardDeadlineSendHandler
         self.unreliableSendHandler = unreliableSendHandler
         self.queuedUnreliableSendHandler = queuedUnreliableSendHandler
         if let queuedUnreliableBatchSendHandler {
@@ -442,6 +447,8 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
         id: UInt16,
         label: String?,
         sendHandler: @escaping @Sendable (Data) async throws -> Void,
+        hardDeadlineSendHandler:
+            @escaping @Sendable (Data, ContinuousClock.Instant) async throws -> Void,
         unreliableSendHandler: @escaping @Sendable (Data) async throws -> Void,
         queuedUnreliableSendHandler:
             @escaping @Sendable (
@@ -458,6 +465,7 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
             id: id,
             label: label,
             sendHandler: sendHandler,
+            hardDeadlineSendHandler: hardDeadlineSendHandler,
             unreliableSendHandler: unreliableSendHandler,
             queuedUnreliableSendHandler: queuedUnreliableSendHandler,
             queuedUnreliableResetHandler: queuedUnreliableResetHandler,
@@ -471,6 +479,23 @@ public final class LoomMultiplexedStream: @unchecked Sendable, Hashable {
             throw LoomError.protocolError("Loom stream data payloads must not be empty.")
         }
         try await sendHandler(data)
+    }
+
+    /// Sends reliable ordered bytes with a destructive monotonic deadline.
+    ///
+    /// A deadline that is already expired before send admission returns a timeout
+    /// without changing the session. Once admission begins, expiration closes the
+    /// authenticated session and waits for the attempted write to terminate before
+    /// returning. A partially accepted reliable write is never skipped or retried
+    /// independently because doing so would violate stream ordering.
+    public func send(
+        _ data: Data,
+        hardDeadline: ContinuousClock.Instant
+    ) async throws {
+        guard !data.isEmpty else {
+            throw LoomError.protocolError("Loom stream data payloads must not be empty.")
+        }
+        try await hardDeadlineSendHandler(data, hardDeadline)
     }
 
     public func sendUnreliable(_ data: Data) async throws {
@@ -1038,6 +1063,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
 
     private let backendConnection: any LoomNetworkConnection
     private let transport: any LoomSessionTransport
+    private let reliableSendAdmission = LoomReliableSendAdmission()
     private let incomingStreamContinuation: AsyncStream<LoomMultiplexedStream>.Continuation
     private let incomingStreamObservers: LoomAsyncBroadcaster<LoomMultiplexedStream>
     private let stateObservers = LoomAsyncBroadcaster<LoomAuthenticatedSessionState>(
@@ -1626,6 +1652,19 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         finishSession(state: .cancelled, cancelUnderlyingConnection: true)
     }
 
+    /// Destructively closes transport admission for an owner that can no longer service this
+    /// session, such as a broker IPC socket disappearing while a reliable request is suspended.
+    package func hardCancelReliableSends(reason: String) async {
+        reliableSendAdmission.close()
+        finishSession(
+            state: .failed(reason),
+            cancelUnderlyingConnection: true,
+            schedulesTransportCleanup: false
+        )
+        await transport.hardCloseTransport()
+        await reliableSendAdmission.waitForQuiescence()
+    }
+
     private func runReadLoop() async {
         do {
             while !Task.isCancelled {
@@ -2030,6 +2069,15 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
                 }
                 try await self.sendEnvelope(envelopeForData(data), reliable: true)
             },
+            hardDeadlineSendHandler: { [weak self] data, deadline in
+                guard let self else {
+                    throw LoomError.protocolError("Authenticated Loom session no longer exists.")
+                }
+                try await self.sendEnvelope(
+                    envelopeForData(data),
+                    reliableHardDeadline: deadline
+                )
+            },
             unreliableSendHandler: { [weak self] data in
                 guard let self else {
                     throw LoomError.protocolError("Authenticated Loom session no longer exists.")
@@ -2107,15 +2155,80 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
 
     private func sendEnvelope(
         _ envelope: LoomSessionStreamEnvelope,
-        reliable: Bool = true
+        reliable: Bool = true,
+        reliableHardDeadline: ContinuousClock.Instant? = nil
     ) async throws {
+        try Task.checkCancellation()
+        let ordinaryReliableLease: LoomReliableSendAdmission.Lease?
+        let deadlineLeaseTransfer: LoomReliableSendLeaseTransfer?
+        if reliable, let reliableHardDeadline {
+            switch reliableSendAdmission.acquire(before: reliableHardDeadline) {
+            case let .admitted(lease):
+                // The transfer bridges synchronous sealing and asynchronous task startup without
+                // allowing an untracked authenticated nonce to outlive a deadline race.
+                deadlineLeaseTransfer = LoomReliableSendLeaseTransfer(lease)
+            case .expired:
+                // No lease or nonce exists, so a pre-admission timeout is non-destructive.
+                throw LoomError.timeout
+            case .closed:
+                throw LoomError.protocolError("Authenticated Loom session is closed to reliable sends.")
+            }
+            ordinaryReliableLease = nil
+        } else if reliable {
+            guard let lease = reliableSendAdmission.acquire() else {
+                throw LoomError.protocolError("Authenticated Loom session is closed to reliable sends.")
+            }
+            ordinaryReliableLease = lease
+            deadlineLeaseTransfer = nil
+        } else {
+            ordinaryReliableLease = nil
+            deadlineLeaseTransfer = nil
+        }
+        defer {
+            ordinaryReliableLease?.release()
+            deadlineLeaseTransfer?.releaseIfOperationHasNotStarted()
+        }
         let wireFrame = try encodeWireFrame(for: envelope)
 
         if reliable {
-            try await transport.sendMessage(wireFrame)
+            if let reliableHardDeadline {
+                try await withLoomQuiescingHardDeadline(
+                    reliableHardDeadline,
+                    closeAdmission: { [reliableSendAdmission] in
+                        reliableSendAdmission.close()
+                    },
+                    releaseUnstartedOperation: {
+                        deadlineLeaseTransfer?.releaseIfOperationHasNotStarted()
+                    },
+                    quiesce: { [self] in
+                        await terminateForReliableSendHardCut()
+                    },
+                    operation: { [transport] in
+                        guard let lease = deadlineLeaseTransfer?.takeForOperation() else {
+                            // The hard-cut winner released a task that had not entered transport.
+                            throw CancellationError()
+                        }
+                        defer { lease.release() }
+                        try await transport.sendMessage(wireFrame)
+                    }
+                )
+            } else {
+                try await transport.sendMessage(wireFrame)
+            }
         } else {
             try await transport.sendUnreliable(wireFrame)
         }
+    }
+
+    private func terminateForReliableSendHardCut() async {
+        reliableSendAdmission.close()
+        finishSession(
+            state: .failed("Reliable Loom stream send was hard-cut before completion."),
+            cancelUnderlyingConnection: true,
+            schedulesTransportCleanup: false
+        )
+        await transport.hardCloseTransport()
+        await reliableSendAdmission.waitForQuiescence()
     }
 
     private func sendEnvelopeQueued(
@@ -2623,7 +2736,8 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
 
     private func finishSession(
         state newState: LoomAuthenticatedSessionState,
-        cancelUnderlyingConnection: Bool
+        cancelUnderlyingConnection: Bool,
+        schedulesTransportCleanup: Bool = true
     ) {
         switch state {
         case .cancelled, .failed:
@@ -2632,6 +2746,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
             break
         }
 
+        reliableSendAdmission.close()
         updateState(newState)
         readTask?.cancel()
         unreliableReadTask?.cancel()
@@ -2656,6 +2771,7 @@ public actor LoomAuthenticatedSession: LoomSessionProtocol {
         stateObservers.finish()
         bootstrapProgressObservers.finish()
         pathObservers.finish()
+        guard schedulesTransportCleanup else { return }
         if cancelUnderlyingConnection {
             Task {
                 await transport.closeTransport()

@@ -26,6 +26,9 @@ public actor LoomHostBroker {
     private var clientIDBySocketID: [UUID: UUID] = [:]
     private var socketIDByClientID: [UUID: UUID] = [:]
     private var appByClientID: [UUID: LoomHostAppDescriptor] = [:]
+    private var runtimeRegistrationByClientID: [UUID: LoomHostRuntimeAppRegistration] = [:]
+    private var nextRuntimeRegistrationGeneration: UInt64 = 1
+    private var retiringClientIDs: Set<UUID> = []
     private var brokerConnections: [UUID: LoomHostBrokerConnectionState] = [:]
 
     package init(
@@ -103,6 +106,7 @@ public actor LoomHostBroker {
         clientIDBySocketID.removeAll()
         socketIDByClientID.removeAll()
         appByClientID.removeAll()
+        runtimeRegistrationByClientID.removeAll()
 
         let liveBrokerConnections = Array(brokerConnections.values)
         brokerConnections.removeAll()
@@ -183,21 +187,38 @@ public actor LoomHostBroker {
     }
 
     private func handle(frame: LoomHostIPCFrame, socketID: UUID) async {
+        guard socketConnections[socketID] != nil else { return }
         do {
             switch frame.message {
             case let .register(clientID, app):
-                try register(clientID: clientID, app: app, socketID: socketID)
+                let registration = try register(clientID: clientID, app: app, socketID: socketID)
                 let runtime = try await sharedRuntime()
-                try await runtime.register(app: app)
+                // Socket IDs are connection generations. A handler resumed after EOF must never
+                // attach its work to a later connection that reused the logical client ID.
+                guard socketOwns(clientID: clientID, socketID: socketID) else { return }
+                let didRegister = try await runtime.register(
+                    app: app,
+                    registration: registration
+                )
+                guard didRegister else {
+                    throw LoomHostError.brokerUnavailable
+                }
+                guard socketOwns(clientID: clientID, socketID: socketID) else {
+                    // Runtime registration can suspend, so compensate work completed after its
+                    // originating IPC owner disappeared.
+                    await runtime.unregister(registration: registration)
+                    return
+                }
                 try await reply(
                     .registered(snapshot: await runtime.stateSnapshot()),
                     to: clientID,
-                    requestID: frame.requestID
+                    requestID: frame.requestID,
+                    socketID: socketID
                 )
 
             case let .unregister(clientID):
                 try requireRegisteredClient(clientID, socketID: socketID)
-                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
+                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID, socketID: socketID)
                 await unregister(clientID: clientID)
 
             case let .refreshPeers(clientID):
@@ -205,56 +226,86 @@ public actor LoomHostBroker {
                 if let runtime {
                     await runtime.refreshPeers()
                 }
-                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
+                guard socketOwns(clientID: clientID, socketID: socketID) else { return }
+                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID, socketID: socketID)
 
             case let .startRemoteHosting(clientID, sessionID, publicHostForTCP):
                 try requireRegisteredClient(clientID, socketID: socketID)
                 let runtime = try await sharedRuntime()
+                guard socketOwns(clientID: clientID, socketID: socketID) else { return }
                 try await runtime.startRemoteHosting(
                     sessionID: sessionID,
                     publicHostForTCP: publicHostForTCP
                 )
-                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
+                guard socketOwns(clientID: clientID, socketID: socketID) else { return }
+                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID, socketID: socketID)
 
             case let .stopRemoteHosting(clientID):
                 try requireRegisteredClient(clientID, socketID: socketID)
                 if let runtime {
                     await runtime.stopRemoteHosting()
                 }
-                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
+                guard socketOwns(clientID: clientID, socketID: socketID) else { return }
+                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID, socketID: socketID)
 
             case let .connect(clientID, peerID):
                 try requireRegisteredClient(clientID, socketID: socketID)
                 let runtime = try await sharedRuntime()
+                guard socketOwns(clientID: clientID, socketID: socketID) else { return }
                 let established = try await runtime.connect(
                     to: peerID,
                     sourceAppID: try sourceAppID(for: clientID)
                 )
-                let descriptor = await registerBrokerConnection(
+                guard socketOwns(clientID: clientID, socketID: socketID) else {
+                    await established.session.hardCancelReliableSends(
+                        reason: "Shared-host IPC ownership ended while connecting."
+                    )
+                    return
+                }
+                guard let descriptor = await registerBrokerConnection(
                     for: clientID,
                     session: established.session,
-                    peer: established.peer
-                )
-                try await reply(.connected(descriptor), to: clientID, requestID: frame.requestID)
+                    peer: established.peer,
+                    socketID: socketID
+                ) else {
+                    await established.session.hardCancelReliableSends(
+                        reason: "Shared-host IPC ownership ended while connecting."
+                    )
+                    return
+                }
+                try await reply(.connected(descriptor), to: clientID, requestID: frame.requestID, socketID: socketID)
 
             case let .connectRemote(clientID, sessionID):
                 try requireRegisteredClient(clientID, socketID: socketID)
                 let runtime = try await sharedRuntime()
+                guard socketOwns(clientID: clientID, socketID: socketID) else { return }
                 let established = try await runtime.connect(
                     remoteSessionID: sessionID,
                     sourceAppID: try sourceAppID(for: clientID)
                 )
-                let descriptor = await registerBrokerConnection(
+                guard socketOwns(clientID: clientID, socketID: socketID) else {
+                    await established.session.hardCancelReliableSends(
+                        reason: "Shared-host IPC ownership ended while connecting."
+                    )
+                    return
+                }
+                guard let descriptor = await registerBrokerConnection(
                     for: clientID,
                     session: established.session,
-                    peer: established.peer
-                )
-                try await reply(.connected(descriptor), to: clientID, requestID: frame.requestID)
+                    peer: established.peer,
+                    socketID: socketID
+                ) else {
+                    await established.session.hardCancelReliableSends(
+                        reason: "Shared-host IPC ownership ended while connecting."
+                    )
+                    return
+                }
+                try await reply(.connected(descriptor), to: clientID, requestID: frame.requestID, socketID: socketID)
 
             case let .disconnect(clientID, connectionID):
                 try requireRegisteredClient(clientID, socketID: socketID)
                 try await disconnect(connectionID: connectionID, expectedClientID: clientID)
-                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
+                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID, socketID: socketID)
 
             case let .openStream(clientID, connectionID, streamID, label):
                 try requireRegisteredClient(clientID, socketID: socketID)
@@ -262,9 +313,10 @@ public actor LoomHostBroker {
                     clientID: clientID,
                     connectionID: connectionID,
                     streamID: streamID,
-                    label: label
+                    label: label,
+                    socketID: socketID
                 )
-                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
+                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID, socketID: socketID)
 
             case let .streamData(clientID, connectionID, streamID, payloadBase64):
                 try requireRegisteredClient(clientID, socketID: socketID)
@@ -277,7 +329,7 @@ public actor LoomHostBroker {
                     streamID: streamID,
                     payload: payload
                 )
-                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
+                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID, socketID: socketID)
 
             case let .closeStream(clientID, connectionID, streamID):
                 try requireRegisteredClient(clientID, socketID: socketID)
@@ -286,7 +338,7 @@ public actor LoomHostBroker {
                     connectionID: connectionID,
                     streamID: streamID
                 )
-                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID)
+                try await reply(.reply(status: .ok), to: clientID, requestID: frame.requestID, socketID: socketID)
 
             case .reply,
                  .registered,
@@ -304,9 +356,15 @@ public actor LoomHostBroker {
                 try? await reply(
                     .reply(status: .failed(error.localizedDescription)),
                     to: clientID,
-                    requestID: frame.requestID
+                    requestID: frame.requestID,
+                    socketID: socketID
                 )
             }
+        }
+        if socketConnections[socketID] == nil {
+            // EOF may hard-cut a suspended handler. Reconcile again after it resumes so work that
+            // crossed that boundary cannot recreate orphan app or session ownership.
+            await handleSocketClosed(socketID)
         }
     }
 
@@ -314,7 +372,12 @@ public actor LoomHostBroker {
         clientID: UUID,
         app: LoomHostAppDescriptor,
         socketID: UUID
-    ) throws {
+    ) throws -> LoomHostRuntimeAppRegistration {
+        guard !retiringClientIDs.contains(clientID) else {
+            // Runtime app teardown is still in flight. A new socket retries registration after the
+            // old ownership has fully retired instead of racing an unregister for the same app ID.
+            throw LoomHostError.brokerUnavailable
+        }
         if let registeredClientID = clientIDBySocketID[socketID],
            registeredClientID != clientID {
             throw LoomHostError.protocolViolation("Shared-host socket is already registered to another client.")
@@ -323,16 +386,33 @@ public actor LoomHostBroker {
            registeredSocketID != socketID {
             throw LoomHostError.protocolViolation("Shared-host client is already registered on another socket.")
         }
+        guard nextRuntimeRegistrationGeneration < UInt64.max else {
+            // Runtime registration generations must never wrap because ordering distinguishes a
+            // delayed process from the replacement that now owns the same stable app ID.
+            throw LoomHostError.brokerUnavailable
+        }
+        let registration = LoomHostRuntimeAppRegistration(
+            appID: app.appID,
+            generation: nextRuntimeRegistrationGeneration
+        )
+        nextRuntimeRegistrationGeneration &+= 1
         clientIDBySocketID[socketID] = clientID
         socketIDByClientID[clientID] = socketID
         appByClientID[clientID] = app
+        runtimeRegistrationByClientID[clientID] = registration
+        return registration
     }
 
     private func requireRegisteredClient(_ clientID: UUID, socketID: UUID) throws {
-        guard clientIDBySocketID[socketID] == clientID,
-              socketIDByClientID[clientID] == socketID else {
+        guard socketOwns(clientID: clientID, socketID: socketID) else {
             throw LoomHostError.protocolViolation("Shared-host client is not registered on this socket.")
         }
+    }
+
+    private func socketOwns(clientID: UUID, socketID: UUID) -> Bool {
+        clientIDBySocketID[socketID] == clientID
+            && socketIDByClientID[clientID] == socketID
+            && socketConnections[socketID] != nil
     }
 
     private func sharedRuntime() async throws -> LoomHostRuntime {
@@ -380,6 +460,10 @@ public actor LoomHostBroker {
                 session: session,
                 peer: peer
             )
+            guard let descriptor else {
+                await session.cancel()
+                return
+            }
             try await send(.incomingConnection(descriptor), to: targetClientID)
         } catch {
             await session.cancel()
@@ -389,13 +473,25 @@ public actor LoomHostBroker {
     private func registerBrokerConnection(
         for clientID: UUID,
         session: LoomAuthenticatedSession,
-        peer: LoomHostPeerRecord
-    ) async -> LoomHostConnectionDescriptor {
+        peer: LoomHostPeerRecord,
+        socketID: UUID? = nil
+    ) async -> LoomHostConnectionDescriptor? {
+        if let socketID, !socketOwns(clientID: clientID, socketID: socketID) {
+            return nil
+        }
+        guard let context = await session.context else {
+            return nil
+        }
+        // Context lookup crosses an actor boundary. Revalidate after it so a new client socket
+        // cannot accidentally acquire the dead socket's just-established session.
+        if let socketID, !socketOwns(clientID: clientID, socketID: socketID) {
+            return nil
+        }
         let connectionID = UUID()
         let descriptor = LoomHostConnectionDescriptor(
             connectionID: connectionID,
             peer: peer,
-            context: await session.context!
+            context: context
         )
         let state = LoomHostBrokerConnectionState(
             clientID: clientID,
@@ -443,7 +539,8 @@ public actor LoomHostBroker {
         clientID: UUID,
         connectionID: UUID,
         streamID: UInt16,
-        label: String?
+        label: String?,
+        socketID: UUID
     ) async throws {
         guard let state = brokerConnections[connectionID] else {
             throw LoomHostError.connectionNotFound(connectionID)
@@ -452,6 +549,13 @@ public actor LoomHostBroker {
             throw LoomHostError.protocolViolation("Shared-host connection ownership mismatch.")
         }
         let stream = try await state.session.openStream(label: label)
+        guard socketOwns(clientID: clientID, socketID: socketID),
+              brokerConnections[connectionID] === state else {
+            // The underlying stream was opened remotely, but its broker owner disappeared during
+            // that await. Close it before it can retain a detached forwarding graph.
+            try? await stream.close()
+            throw LoomHostError.brokerUnavailable
+        }
         state.streamsByClientStreamID[streamID] = stream
         state.startForwarding(stream: stream, streamID: streamID, broker: self, connectionID: connectionID)
     }
@@ -560,40 +664,69 @@ public actor LoomHostBroker {
         }
     }
 
-    private func unregister(clientID: UUID) async {
-        if let appID = appByClientID[clientID]?.appID,
-           let runtime {
-            await runtime.unregister(appID: appID)
-        }
+    private func unregister(clientID: UUID, hardCutSessions: Bool = false) async {
+        // Retire all actor-owned reachability before the first await. That makes EOF an immediate
+        // generation fence even while runtime or transport cancellation is still unwinding.
         appByClientID.removeValue(forKey: clientID)
+        let runtimeRegistration = runtimeRegistrationByClientID.removeValue(forKey: clientID)
+        retiringClientIDs.insert(clientID)
         if let socketID = socketIDByClientID.removeValue(forKey: clientID) {
             clientIDBySocketID.removeValue(forKey: socketID)
         }
 
-        let ownedConnections = brokerConnections
+        let ownedConnectionIDs = brokerConnections
             .filter { $0.value.clientID == clientID }
             .map(\.key)
-        for connectionID in ownedConnections {
-            if let state = brokerConnections.removeValue(forKey: connectionID) {
-                state.invalidate()
+        let ownedConnections = ownedConnectionIDs.compactMap { connectionID -> LoomHostBrokerConnectionState? in
+            guard let state = brokerConnections.removeValue(forKey: connectionID) else {
+                return nil
+            }
+            state.invalidate()
+            return state
+        }
+
+        if let runtimeRegistration, let runtime {
+            await runtime.unregister(registration: runtimeRegistration)
+        }
+        for state in ownedConnections {
+            if hardCutSessions {
+                await state.session.hardCancelReliableSends(
+                    reason: "Shared-host broker IPC closed during a reliable send."
+                )
+            } else {
                 await state.session.cancel()
             }
         }
+        retiringClientIDs.remove(clientID)
     }
 
     private func handleSocketClosed(_ socketID: UUID) async {
-        if let clientID = clientIDBySocketID[socketID] {
-            await unregister(clientID: clientID)
-        }
+        // Remove the descriptor before any cleanup await. Queued frames still holding socketID
+        // then fail their ownership check instead of beginning a new broker operation.
         socketConnections.removeValue(forKey: socketID)
+        if let clientID = clientIDBySocketID[socketID] {
+            // Socket loss is the broker's out-of-band hard-cut signal. It must interrupt a request
+            // currently suspended in stream transport rather than enqueue behind that request.
+            await unregister(clientID: clientID, hardCutSessions: true)
+        }
     }
 
     private func reply(
         _ message: LoomHostIPCMessage,
         to clientID: UUID,
-        requestID: UUID?
+        requestID: UUID?,
+        socketID: UUID
     ) async throws {
-        try await send(message, to: clientID, requestID: requestID)
+        guard socketOwns(clientID: clientID, socketID: socketID),
+              let connection = socketConnections[socketID] else {
+            throw LoomHostError.brokerUnavailable
+        }
+        try await connection.send(
+            LoomHostIPCFrame(
+                requestID: requestID,
+                message: message
+            )
+        )
     }
 
     private func send(

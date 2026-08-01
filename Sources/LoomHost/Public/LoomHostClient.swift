@@ -16,6 +16,30 @@ package struct LoomHostClientConnection: Sendable {
     package let session: LoomVirtualAppSession
 }
 
+private struct LoomHostPendingReply {
+    let continuation: CheckedContinuation<LoomHostIPCMessage, Error>
+    let socketGeneration: UInt64
+    let cancellation: LoomHostRequestCancellation
+    let submissionTask: Task<Void, Never>
+}
+
+private final class LoomHostRequestCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isCancelledStorage = false
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return isCancelledStorage
+    }
+
+    func cancel() {
+        lock.lock()
+        isCancelledStorage = true
+        lock.unlock()
+    }
+}
+
 /// Client for the App Group-scoped shared-host broker.
 public actor LoomHostClient {
     public let configuration: LoomSharedHostConfiguration
@@ -34,7 +58,10 @@ public actor LoomHostClient {
         lastErrorMessage: nil
     )
     private var isStarted = false
-    private var pendingReplies: [UUID: CheckedContinuation<LoomHostIPCMessage, Error>] = [:]
+    private var activeSocketGeneration: UInt64 = 0
+    private var reconnectTask: Task<Void, Never>?
+    private var reconnectToken: UUID?
+    private var pendingReplies: [UUID: LoomHostPendingReply] = [:]
     private var sessionsByConnectionID: [UUID: LoomVirtualAppSession] = [:]
 
     public init(configuration: LoomSharedHostConfiguration) {
@@ -70,18 +97,23 @@ public actor LoomHostClient {
 
     package func stop() async {
         isStarted = false
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectToken = nil
+        let closingSocket = socket
         if socket != nil {
             _ = try? await request(.unregister(clientID: clientID))
         }
+        // Invalidate callbacks before closing so a late EOF from this descriptor cannot tear down
+        // a connection opened by a subsequent start.
+        advanceSocketGeneration()
+        socket = nil
         let liveSessions = Array(sessionsByConnectionID.values)
         sessionsByConnectionID.removeAll()
         for session in liveSessions {
             await session.handleStateChanged(.cancelled)
         }
-        if let socket {
-            await socket.close()
-        }
-        socket = nil
+        await closingSocket?.close()
     }
 
     package func refreshPeers() async throws {
@@ -137,7 +169,15 @@ public actor LoomHostClient {
 
     private func connectAndRegister() async throws {
         if socket == nil {
-            socket = try await connectTransport()
+            let generation = advanceSocketGeneration()
+            let connection = try await connectTransport(socketGeneration: generation)
+            guard isStarted,
+                  socket == nil,
+                  activeSocketGeneration == generation else {
+                await connection.close()
+                throw LoomHostError.brokerUnavailable
+            }
+            socket = connection
         }
 
         let reply = try await request(
@@ -153,7 +193,7 @@ public actor LoomHostClient {
         stateBroadcaster.yield(snapshot)
     }
 
-    private func connectTransport() async throws -> LoomHostSocketConnection {
+    private func connectTransport(socketGeneration: UInt64) async throws -> LoomHostSocketConnection {
         let layout = try Self.socketLayout(for: configuration)
         try FileManager.default.createDirectory(
             at: layout.directoryURL,
@@ -164,11 +204,11 @@ public actor LoomHostClient {
             to: layout.socketURL.path,
             onFrame: { [weak self] frame in
                 guard let self else { return }
-                await self.handle(frame: frame)
+                await self.handle(frame: frame, socketGeneration: socketGeneration)
             },
             onClosed: { [weak self] in
                 guard let self else { return }
-                await self.handleSocketClosed()
+                await self.handleSocketClosed(socketGeneration: socketGeneration)
             }
         ) {
             return connection
@@ -181,11 +221,11 @@ public actor LoomHostClient {
                 to: layout.socketURL.path,
                 onFrame: { [weak self] frame in
                     guard let self else { return }
-                    await self.handle(frame: frame)
+                    await self.handle(frame: frame, socketGeneration: socketGeneration)
                 },
                 onClosed: { [weak self] in
                     guard let self else { return }
-                    await self.handleSocketClosed()
+                    await self.handleSocketClosed(socketGeneration: socketGeneration)
                 }
             ) {
                 return connection
@@ -223,52 +263,137 @@ public actor LoomHostClient {
         self.broker = broker
     }
 
-    private func request(_ message: LoomHostIPCMessage) async throws -> LoomHostIPCMessage {
+    private func request(
+        _ message: LoomHostIPCMessage,
+        expectedSocketGeneration: UInt64? = nil
+    ) async throws -> LoomHostIPCMessage {
+        try Task.checkCancellation()
+        if let expectedSocketGeneration {
+            guard socket != nil,
+                  activeSocketGeneration == expectedSocketGeneration else {
+                // A virtual session belongs to the IPC generation that created it. Retained
+                // streams from a retired session may fail, but cannot reconnect through a new one.
+                throw LoomHostError.brokerUnavailable
+            }
+        }
         if socket == nil {
+            try Task.checkCancellation()
             try await connectAndRegister()
         }
+        try Task.checkCancellation()
         guard let socket else {
+            throw LoomHostError.brokerUnavailable
+        }
+        let socketGeneration = activeSocketGeneration
+        if let expectedSocketGeneration,
+           expectedSocketGeneration != socketGeneration {
             throw LoomHostError.brokerUnavailable
         }
 
         let requestID = UUID()
-        return try await withCheckedThrowingContinuation { continuation in
-            pendingReplies[requestID] = continuation
-            Task { [weak self] in
-                do {
-                    try await socket.send(
-                        LoomHostIPCFrame(
-                            requestID: requestID,
-                            message: message
-                        )
-                    )
-                } catch {
-                    guard let self else {
-                        continuation.resume(throwing: LoomHostError.brokerUnavailable)
-                        return
-                    }
-                    await self.failPendingReply(
+        let cancellation = LoomHostRequestCancellation()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                guard !Task.isCancelled, !cancellation.isCancelled else {
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                guard self.socket != nil,
+                      self.activeSocketGeneration == socketGeneration else {
+                    continuation.resume(throwing: LoomHostError.brokerUnavailable)
+                    return
+                }
+                let submissionTask = Task { [weak self] in
+                    guard let self else { return }
+                    await self.submitPendingRequest(
                         requestID: requestID,
-                        error: error
+                        message: message,
+                        socket: socket,
+                        socketGeneration: socketGeneration,
+                        cancellation: cancellation
                     )
                 }
+                pendingReplies[requestID] = LoomHostPendingReply(
+                    continuation: continuation,
+                    socketGeneration: socketGeneration,
+                    cancellation: cancellation,
+                    submissionTask: submissionTask
+                )
+            }
+        } onCancel: { [weak self] in
+            // Set the shared flag synchronously so submission cannot win actor scheduling against
+            // the cancellation cleanup task below.
+            cancellation.cancel()
+            Task {
+                await self?.cancelPendingReply(requestID: requestID)
             }
         }
     }
 
-    private func handle(frame: LoomHostIPCFrame) async {
+    private func submitPendingRequest(
+        requestID: UUID,
+        message: LoomHostIPCMessage,
+        socket: LoomHostSocketConnection,
+        socketGeneration: UInt64,
+        cancellation: LoomHostRequestCancellation
+    ) async {
+        guard !Task.isCancelled,
+              !cancellation.isCancelled,
+              let pendingReply = pendingReplies[requestID],
+              !pendingReply.cancellation.isCancelled,
+              pendingReply.socketGeneration == socketGeneration,
+              activeSocketGeneration == socketGeneration,
+              self.socket === socket else {
+            failPendingReply(requestID: requestID, error: CancellationError())
+            return
+        }
+        do {
+            // Submission is a separate task because the checked-continuation installation is
+            // synchronous. Recheck cancellation here so a retired request cannot reach the socket.
+            try Task.checkCancellation()
+            guard !cancellation.isCancelled else {
+                throw CancellationError()
+            }
+            try await socket.send(
+                LoomHostIPCFrame(
+                    requestID: requestID,
+                    message: message
+                )
+            )
+        } catch {
+            failPendingReply(requestID: requestID, error: error)
+        }
+    }
+
+    private func cancelPendingReply(requestID: UUID) {
+        guard let pendingReply = pendingReplies.removeValue(forKey: requestID) else {
+            return
+        }
+        pendingReply.cancellation.cancel()
+        pendingReply.submissionTask.cancel()
+        pendingReply.continuation.resume(throwing: CancellationError())
+    }
+
+    private func handle(frame: LoomHostIPCFrame, socketGeneration: UInt64) async {
+        // A late reader task from a closed descriptor must not deliver replies or stream state
+        // into the client after a newer broker connection has been installed.
+        guard socketGeneration == activeSocketGeneration, socket != nil else {
+            return
+        }
         if let requestID = frame.requestID,
-           let continuation = pendingReplies.removeValue(forKey: requestID) {
+           let pendingReply = pendingReplies.removeValue(forKey: requestID) {
+            pendingReply.submissionTask.cancel()
             switch frame.message {
             case let .reply(status):
                 switch status {
                 case .ok:
-                    continuation.resume(returning: frame.message)
+                    pendingReply.continuation.resume(returning: frame.message)
                 case let .failed(message):
-                    continuation.resume(throwing: LoomHostError.remoteFailure(message))
+                    pendingReply.continuation.resume(throwing: LoomHostError.remoteFailure(message))
                 }
             default:
-                continuation.resume(returning: frame.message)
+                pendingReply.continuation.resume(returning: frame.message)
             }
             return
         }
@@ -280,7 +405,10 @@ public actor LoomHostClient {
             stateBroadcaster.yield(snapshot)
 
         case let .incomingConnection(descriptor):
-            let connection = makeConnection(from: descriptor)
+            let connection = makeConnection(
+                from: descriptor,
+                socketGeneration: socketGeneration
+            )
             incomingConnectionBroadcaster.yield(connection)
 
         case let .connectionStateChanged(connectionID, state, _):
@@ -331,8 +459,14 @@ public actor LoomHostClient {
         }
     }
 
-    private func handleSocketClosed() async {
+    private func handleSocketClosed(socketGeneration: UInt64) async {
+        // Each descriptor has a distinct generation. Ignore an old close callback after the
+        // replacement socket has become authoritative.
+        guard socketGeneration == activeSocketGeneration else {
+            return
+        }
         socket = nil
+        advanceSocketGeneration()
         failAllPendingReplies(error: LoomHostError.brokerUnavailable)
 
         let liveSessions = Array(sessionsByConnectionID.values)
@@ -341,17 +475,51 @@ public actor LoomHostClient {
             await session.handleStateChanged(.failed("shared-host-broker-disconnected"))
         }
 
-        if !isStarted {
+        guard isStarted else {
             return
+        }
+        scheduleReconnect()
+    }
+
+    private func scheduleReconnect() {
+        guard reconnectTask == nil else {
+            return
+        }
+        let token = UUID()
+        reconnectToken = token
+        // Reconnection is intentionally detached from the hard-cut call path: an expired stream
+        // send fails immediately instead of waiting for broker discovery or registration.
+        reconnectTask = Task { [weak self] in
+            guard let self else { return }
+            await self.reconnect(token: token)
+        }
+    }
+
+    private func reconnect(token: UUID) async {
+        defer {
+            if reconnectToken == token {
+                reconnectToken = nil
+                reconnectTask = nil
+            }
         }
 
         for _ in 0..<10 {
+            guard !Task.isCancelled,
+                  isStarted,
+                  reconnectToken == token,
+                  socket == nil else {
+                return
+            }
             do {
                 try await connectAndRegister()
                 return
             } catch {
                 try? await Task.sleep(for: .milliseconds(250))
             }
+        }
+
+        guard isStarted, reconnectToken == token else {
+            return
         }
         currentSnapshot = LoomHostStateSnapshot(
             peers: [],
@@ -366,24 +534,32 @@ public actor LoomHostClient {
         requestID: UUID,
         error: Error
     ) {
-        guard let continuation = pendingReplies.removeValue(forKey: requestID) else {
+        guard let pendingReply = pendingReplies.removeValue(forKey: requestID) else {
             return
         }
-        continuation.resume(throwing: error)
+        pendingReply.cancellation.cancel()
+        pendingReply.submissionTask.cancel()
+        pendingReply.continuation.resume(throwing: error)
     }
 
     private func failAllPendingReplies(error: Error) {
-        let continuations = Array(pendingReplies.values)
+        let liveReplies = Array(pendingReplies.values)
         pendingReplies.removeAll()
-        for continuation in continuations {
-            continuation.resume(throwing: error)
+        for pendingReply in liveReplies {
+            pendingReply.cancellation.cancel()
+            pendingReply.submissionTask.cancel()
+            pendingReply.continuation.resume(throwing: error)
         }
     }
 
-    private func makeConnection(from descriptor: LoomHostConnectionDescriptor) -> LoomHostClientConnection {
+    private func makeConnection(
+        from descriptor: LoomHostConnectionDescriptor,
+        socketGeneration: UInt64? = nil
+    ) -> LoomHostClientConnection {
         if let existing = sessionsByConnectionID[descriptor.connectionID] {
             return LoomHostClientConnection(descriptor: descriptor, session: existing)
         }
+        let sessionSocketGeneration = socketGeneration ?? activeSocketGeneration
         let session = LoomVirtualAppSession(
             connectionID: descriptor.connectionID,
             transportKind: descriptor.context.transportKind,
@@ -396,7 +572,8 @@ public actor LoomHostClient {
                         connectionID: connectionID,
                         streamID: streamID,
                         label: label
-                    )
+                    ),
+                    expectedSocketGeneration: sessionSocketGeneration
                 )
             },
             sendHandler: { [weak self] connectionID, streamID, payload in
@@ -407,7 +584,8 @@ public actor LoomHostClient {
                         connectionID: connectionID,
                         streamID: streamID,
                         payloadBase64: payload.base64EncodedString()
-                    )
+                    ),
+                    expectedSocketGeneration: sessionSocketGeneration
                 )
             },
             closeHandler: { [weak self] connectionID, streamID in
@@ -417,16 +595,55 @@ public actor LoomHostClient {
                         clientID: self.clientID,
                         connectionID: connectionID,
                         streamID: streamID
-                    )
+                    ),
+                    expectedSocketGeneration: sessionSocketGeneration
                 )
             },
             cancelHandler: { [weak self] connectionID in
                 guard let self else { return }
-                try? await self.disconnect(connectionID: connectionID)
+                _ = try? await self.request(
+                    .disconnect(
+                        clientID: self.clientID,
+                        connectionID: connectionID
+                    ),
+                    expectedSocketGeneration: sessionSocketGeneration
+                )
+            },
+            hardCutHandler: { [weak self] _ in
+                guard let self else { return }
+                await self.hardCutSharedIPCSocket(
+                    expectedSocketGeneration: sessionSocketGeneration
+                )
             }
         )
         sessionsByConnectionID[descriptor.connectionID] = session
         return LoomHostClientConnection(descriptor: descriptor, session: session)
+    }
+
+    @discardableResult
+    private func advanceSocketGeneration() -> UInt64 {
+        // Change the token before every descriptor install or retirement so stale callbacks can
+        // never mutate the active connection, even if an OS descriptor number is reused.
+        activeSocketGeneration = activeSocketGeneration == UInt64.max
+            ? 1
+            : activeSocketGeneration &+ 1
+        return activeSocketGeneration
+    }
+
+    private func hardCutSharedIPCSocket(expectedSocketGeneration: UInt64) async {
+        // A broker request may itself be suspended in the expired stream send. Closing the shared
+        // IPC socket is the only existing out-of-band signal and also fails every pending reply.
+        guard activeSocketGeneration == expectedSocketGeneration else {
+            return
+        }
+        failAllPendingReplies(error: LoomHostError.brokerUnavailable)
+        guard let socket else {
+            return
+        }
+        // This synchronous fence is intentionally nonisolated from the socket actor so it can
+        // interrupt that actor while `Darwin.write` is backpressured.
+        socket.hardCloseNow()
+        await socket.close()
     }
 
     private static func socketLayout(for configuration: LoomSharedHostConfiguration) throws -> LoomHostSocketLayout {

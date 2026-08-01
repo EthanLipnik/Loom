@@ -332,6 +332,9 @@ struct LoomAuthenticatedSessionTests {
         let pair = try await makeLoopbackPair()
         defer { Task { await pair.stop() } }
         let trustProvider = CancellationAwareTrustProvider()
+        // Keep first-use Keychain/P-256 work outside the trust-provider deadline assertion.
+        _ = try pair.clientIdentityManager.currentIdentity()
+        _ = try pair.serverIdentityManager.currentIdentity()
         let startedAt = ContinuousClock.now
 
         let clientTask = Task {
@@ -438,6 +441,7 @@ struct LoomAuthenticatedSessionTests {
             id: 1,
             label: "throwing-close",
             sendHandler: { _ in },
+            hardDeadlineSendHandler: { _, _ in },
             unreliableSendHandler: { _ in },
             queuedUnreliableSendHandler: { _, _, _, onComplete in
                 onComplete(nil)
@@ -590,6 +594,52 @@ struct LoomAuthenticatedSessionTests {
         let incomingStream = try #require(await incomingStreamTask.value)
         let receivedPayload = await firstPayload(from: incomingStream)
         #expect(receivedPayload == payload)
+    }
+
+    @MainActor
+    @Test("An expired encrypted send leaves the session usable before nonce admission")
+    func expiredEncryptedSendIsNonDestructive() async throws {
+        let pair = try await makeLoopbackPair()
+        defer {
+            Task {
+                await pair.stop()
+            }
+        }
+
+        async let clientContext = pair.client.start(
+            localHello: pair.clientHello,
+            identityManager: pair.clientIdentityManager
+        )
+        async let serverContext = pair.server.start(
+            localHello: pair.serverHello,
+            identityManager: pair.serverIdentityManager,
+            trustProvider: pair.serverTrustProvider
+        )
+        _ = try await (clientContext, serverContext)
+
+        let incomingStreamTask = Task<LoomMultiplexedStream?, Never> {
+            for await stream in pair.server.incomingStreams {
+                return stream
+            }
+            return nil
+        }
+        let outgoingStream = try await pair.client.openStream(label: "expired-then-live")
+        let incomingStream = try #require(await incomingStreamTask.value)
+
+        await #expect(throws: LoomError.self) {
+            try await outgoingStream.send(
+                Data("must-not-enter-wire".utf8),
+                hardDeadline: ContinuousClock.now - .milliseconds(1)
+            )
+        }
+        #expect(await pair.client.state == .ready)
+        #expect(await pair.server.state == .ready)
+
+        let payload = Data("ordinary-send-after-expiry".utf8)
+        try await outgoingStream.send(payload)
+        #expect(await firstPayload(from: incomingStream) == payload)
+        #expect(await pair.client.state == .ready)
+        #expect(await pair.server.state == .ready)
     }
 
     @MainActor
@@ -1652,6 +1702,7 @@ struct LoomAuthenticatedSessionTests {
             id: 41,
             label: "pre-retained-batch",
             sendHandler: { _ in },
+            hardDeadlineSendHandler: { _, _ in },
             unreliableSendHandler: { _ in },
             queuedUnreliableSendHandler: { _, _, _, onComplete in onComplete(nil) },
             queuedUnreliableResetHandler: { _ in },
@@ -2430,6 +2481,7 @@ private func makeTestMultiplexedStream(
         id: 1,
         label: "test",
         sendHandler: { _ in },
+        hardDeadlineSendHandler: { _, _ in },
         unreliableSendHandler: { _ in },
         queuedUnreliableSendHandler: { _, _, _, onComplete in
             onComplete(nil)

@@ -5,6 +5,67 @@ import Testing
 
 @Suite("LoomSharedRuntime Client", .serialized)
 struct LoomSharedRuntimeClientTests {
+    @Test("A cancelled client request does not begin broker reconnection")
+    func cancelledRequestDoesNotReconnect() async {
+        let temporaryDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("lh-cancel-\(UUID().uuidString.prefix(8))", isDirectory: true)
+        let configuration = LoomSharedHostConfiguration(
+            appGroupIdentifier: "group.loom.tests",
+            app: LoomHostAppDescriptor(
+                appID: "com.example.cancelled",
+                displayName: "Cancelled"
+            ),
+            socketName: "lh",
+            directoryURLOverride: temporaryDirectory
+        )
+        let gate = LoomHostClientTestGate()
+        let client = LoomHostClient(configuration: configuration)
+        let operation = Task<Bool, Never> {
+            await gate.wait()
+            do {
+                try await client.refreshPeers()
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                return false
+            }
+        }
+        operation.cancel()
+        await gate.open()
+
+        #expect(await operation.value)
+        let socketURL = temporaryDirectory.appendingPathComponent("lh.sock")
+        #expect(!FileManager.default.fileExists(atPath: socketURL.path))
+        await client.stop()
+    }
+
+    @Test("Runtime cleanup cannot retire a replacement app-ID generation")
+    func runtimeRegistrationCleanupIsGenerationOwned() async throws {
+        let dependencies = await makeSimulatedRuntimeDependencies()
+        let runtime = LoomHostRuntime(
+            dependencies: dependencies,
+            onStateChanged: { _ in },
+            onIncomingSession: { _ in }
+        )
+        let app = LoomHostAppDescriptor(
+            appID: "com.example.shared",
+            displayName: "Shared"
+        )
+        let retired = LoomHostRuntimeAppRegistration(appID: app.appID, generation: 1)
+        let replacement = LoomHostRuntimeAppRegistration(appID: app.appID, generation: 2)
+
+        #expect(try await runtime.register(app: app, registration: retired))
+        #expect(try await runtime.register(app: app, registration: replacement))
+        await runtime.unregister(registration: retired)
+        let replacementSnapshot = await runtime.stateSnapshot()
+        #expect(replacementSnapshot.isRunning)
+
+        await runtime.unregister(registration: replacement)
+        let retiredSnapshot = await runtime.stateSnapshot()
+        #expect(!retiredSnapshot.isRunning)
+    }
+
     @Test("Client registers against a running broker over a shared Unix socket")
     func clientRegistersAgainstRunningBroker() async throws {
         let temporaryDirectory = FileManager.default.temporaryDirectory
@@ -107,6 +168,40 @@ struct LoomSharedRuntimeClientTests {
     }
 }
 
+private func makeSimulatedRuntimeDependencies() async -> LoomHostRuntimeDependencies {
+    let serviceType = "_lh\(UUID().uuidString.prefix(6).lowercased())._tcp"
+    let node = await MainActor.run {
+        LoomNode(
+            configuration: LoomNetworkConfiguration(
+                serviceType: serviceType,
+                enablePeerToPeer: false,
+                enabledDirectTransports: [.tcp]
+            ),
+            // Simulated runtime ownership tests must not depend on a signed test host or Keychain
+            // entitlement; process-local identity preserves the runtime behavior under test.
+            identityManager: LoomIdentityManager.inMemory()
+        )
+    }
+    let connectionCoordinator = await MainActor.run {
+        LoomConnectionCoordinator(node: node)
+    }
+    return LoomHostRuntimeDependencies(
+        serviceName: "Shared Host",
+        deviceID: UUID(),
+        node: node,
+        cloudKitManager: nil,
+        peerProvider: nil,
+        peerManager: nil,
+        signalingClient: nil,
+        overlayDirectoryConfiguration: nil,
+        connectionCoordinator: connectionCoordinator,
+        bootstrapMetadataProvider: nil,
+        hostAdvertisementMetadata: [:],
+        hostSupportedFeatures: [],
+        startupMode: .simulated
+    )
+}
+
 private func firstValue<Element: Sendable>(
     from stream: AsyncStream<Element>,
     timeout: Duration
@@ -154,5 +249,23 @@ private struct TimeoutError: Error, CustomStringConvertible {
 
     var description: String {
         "Timed out waiting for \(operation)"
+    }
+}
+
+private actor LoomHostClientTestGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var isOpen = false
+
+    func wait() async {
+        guard !isOpen else { return }
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func open() {
+        isOpen = true
+        continuation?.resume()
+        continuation = nil
     }
 }

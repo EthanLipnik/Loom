@@ -69,6 +69,23 @@ package struct LoomHostEstablishedSession: Sendable {
     package let session: LoomAuthenticatedSession
 }
 
+/// Identifies one broker-ordered claim on an app ID. App IDs are stable across process launches,
+/// so teardown must match this generation before it can remove the runtime's current claim.
+package struct LoomHostRuntimeAppRegistration: Sendable, Hashable {
+    package let appID: String
+    package let generation: UInt64
+
+    package init(appID: String, generation: UInt64) {
+        self.appID = appID
+        self.generation = generation
+    }
+}
+
+private struct LoomHostRuntimeRegisteredApp {
+    let descriptor: LoomHostAppDescriptor
+    let registration: LoomHostRuntimeAppRegistration
+}
+
 package actor LoomHostRuntime {
     private let dependencies: LoomHostRuntimeDependencies
     private let onStateChanged: @Sendable (LoomHostStateSnapshot) async -> Void
@@ -89,7 +106,7 @@ package actor LoomHostRuntime {
     private var signalingHeartbeatTask: Task<Void, Never>?
     private var currentRemoteSessionID: String?
     private var currentPublicHostForTCP: String?
-    private var registeredApps: [String: LoomHostAppDescriptor] = [:]
+    private var registeredApps: [String: LoomHostRuntimeRegisteredApp] = [:]
 
     package init(
         dependencies: LoomHostRuntimeDependencies,
@@ -101,18 +118,35 @@ package actor LoomHostRuntime {
         self.onIncomingSession = onIncomingSession
     }
 
-    package func register(app: LoomHostAppDescriptor) async throws {
-        registeredApps[app.appID] = app
+    package func register(
+        app: LoomHostAppDescriptor,
+        registration: LoomHostRuntimeAppRegistration
+    ) async throws -> Bool {
+        guard registration.appID == app.appID else {
+            throw LoomHostError.protocolViolation("Shared-host app registration identity mismatch.")
+        }
+        if let current = registeredApps[app.appID],
+           current.registration.generation > registration.generation {
+            return false
+        }
+        registeredApps[app.appID] = LoomHostRuntimeRegisteredApp(
+            descriptor: app,
+            registration: registration
+        )
         if isRunning {
             try await republishHostStateIfNeeded()
             await notifyStateChanged()
-            return
+            return registeredApps[app.appID]?.registration == registration
         }
         try await startIfNeeded()
+        return registeredApps[app.appID]?.registration == registration
     }
 
-    package func unregister(appID: String) async {
-        registeredApps.removeValue(forKey: appID)
+    package func unregister(registration: LoomHostRuntimeAppRegistration) async {
+        guard registeredApps[registration.appID]?.registration == registration else {
+            return
+        }
+        registeredApps.removeValue(forKey: registration.appID)
         if registeredApps.isEmpty {
             await stop()
             return
@@ -748,7 +782,7 @@ package actor LoomHostRuntime {
     }
 
     private func makeDeviceProfile(for appID: String?) async -> LoomDeviceProfile {
-        let appFeatures = appID.flatMap { registeredApps[$0]?.supportedFeatures } ?? []
+        let appFeatures = appID.flatMap { registeredApps[$0]?.descriptor.supportedFeatures } ?? []
         return LoomDeviceProfile(
             deviceID: dependencies.deviceID,
             deviceName: dependencies.serviceName,
@@ -779,7 +813,7 @@ package actor LoomHostRuntime {
     }
 
     private func hostCatalog() -> LoomHostCatalog? {
-        let entries = registeredApps.values.map(\.catalogEntry)
+        let entries = registeredApps.values.map(\.descriptor.catalogEntry)
         guard !entries.isEmpty else {
             return nil
         }

@@ -146,6 +146,62 @@ struct LoomNIONetworkBackendTests {
         await listener.cancel()
     }
 
+    @Test("Hard-cutting one shared UDP peer retires every listener peer")
+    func sharedUDPHardCutIsListenerWide() async throws {
+        let backend = LoomNIONetworkBackend()
+        let listener = try backend.makeListener(
+            using: .udp,
+            configuration: LoomNetworkListenerConfiguration()
+        )
+        let connections = await listener.makeConnectionStream()
+        let port = try await listener.start(port: 0)
+        let firstClient = try backend.makeConnection(
+            to: .hostPort(host: "::1", port: port),
+            using: .udp,
+            configuration: LoomNetworkConnectionConfiguration()
+        )
+        let secondClient = try backend.makeConnection(
+            to: .hostPort(host: "::1", port: port),
+            using: .udp,
+            configuration: LoomNetworkConnectionConfiguration()
+        )
+        defer {
+            Task {
+                await firstClient.cancel()
+                await secondClient.cancel()
+                await listener.cancel()
+            }
+        }
+
+        try await firstClient.start()
+        try await secondClient.start()
+        try await firstClient.send(Data("first-peer".utf8))
+        let firstServer = try await nextConnection(from: connections)
+        try await firstServer.start()
+        #expect(try await firstServer.receive(maximumBytes: 64) == Data("first-peer".utf8))
+
+        try await secondClient.send(Data("second-peer".utf8))
+        let secondServer = try await nextConnection(from: connections)
+        try await secondServer.start()
+        #expect(try await secondServer.receive(maximumBytes: 64) == Data("second-peer".utf8))
+
+        let secondPeerReceive = Task {
+            try await secondServer.receive(maximumBytes: 64)
+        }
+        try await Task.sleep(for: .milliseconds(10))
+        await firstServer.hardCancel()
+
+        do {
+            _ = try await secondPeerReceive.value
+            Issue.record("The second listener peer remained readable after a shared-socket hard cut.")
+        } catch let error as LoomNetworkError {
+            #expect(error.code == .cancelled)
+        }
+        await #expect(throws: LoomNetworkError.self) {
+            try await secondServer.send(Data("late-write".utf8))
+        }
+    }
+
     @Test("Connection faults fail without leaving a live receive")
     func connectionFault() async throws {
         let backend = LoomNIONetworkBackend()

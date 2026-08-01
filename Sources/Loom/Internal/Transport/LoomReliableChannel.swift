@@ -507,6 +507,15 @@ package actor LoomReliableChannel: LoomSessionTransport {
         await connection.cancel()
     }
 
+    package func hardCloseTransport() async {
+        await cancelPendingUnreliableSends()
+        serializedUnreliableSender.close()
+        observationTask?.cancel()
+        observationTask = nil
+        close()
+        await connection.hardCancel()
+    }
+
     package func close(with failure: LoomConnectionFailure? = nil) {
         guard !isClosed else { return }
         isClosed = true

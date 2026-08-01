@@ -159,6 +159,54 @@ private struct LoomNetworkFrameworkDatagramReceiveResult: Sendable {
     let callbackAt: TimeInterval
 }
 
+/// A native send completion can arrive after cancellation. Resolve through one lock-protected
+/// operation so teardown can release the awaiting task and late callbacks become harmless.
+package final class LoomNetworkFrameworkSendOperation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, any Error>?
+    private var result: Result<Void, any Error>?
+
+    package init() {}
+
+    package func wait(
+        submit: (@escaping @Sendable (Error?) -> Void) -> Void
+    ) async throws {
+        try await withCheckedThrowingContinuation { continuation in
+            lock.lock()
+            if let result {
+                lock.unlock()
+                continuation.resume(with: result)
+                return
+            }
+            self.continuation = continuation
+            lock.unlock()
+
+            submit { [weak self] error in
+                if let error {
+                    self?.resolve(.failure(error))
+                } else {
+                    self?.resolve(.success(()))
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    package func resolve(_ result: Result<Void, any Error>) -> Bool {
+        lock.lock()
+        guard self.result == nil else {
+            lock.unlock()
+            return false
+        }
+        self.result = result
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(with: result)
+        return true
+    }
+}
+
 package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurrentQueuedSendConnection {
     nonisolated package let transportKind: LoomNetworking.LoomTransportKind
     nonisolated package let remoteEndpoint: LoomNetworkEndpoint
@@ -173,6 +221,7 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
     private var terminalError: LoomNetworkError?
     private var isCancelled = false
     private var startWaiters: [CheckedContinuation<Void, any Error>] = []
+    private var pendingSendOperations: [UUID: LoomNetworkFrameworkSendOperation] = [:]
     private var eventContinuations: [UUID: AsyncStream<LoomNetworkConnectionEvent>.Continuation] = [:]
     package var currentPath: LoomNetworkPath?
 
@@ -250,14 +299,19 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
 
     package func send(_ data: Data) async throws {
         try Task.checkCancellation()
-        try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Void, any Error>) in
+        if let terminalError { throw terminalError }
+        guard !isCancelled else {
+            throw LoomNetworkError(code: .cancelled, detail: "Connection cancelled.")
+        }
+        let operationID = UUID()
+        let operation = LoomNetworkFrameworkSendOperation()
+        pendingSendOperations[operationID] = operation
+        defer {
+            pendingSendOperations.removeValue(forKey: operationID)
+        }
+        try await operation.wait { [nativeConnection] completion in
             nativeConnection.send(content: data, completion: .contentProcessed { error in
-                if let error {
-                    continuation.resume(throwing: Self.networkError(error))
-                } else {
-                    continuation.resume()
-                }
+                completion(error.map(Self.networkError))
             })
         }
     }
@@ -313,6 +367,7 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
         guard !isCancelled else { return }
         isCancelled = true
         let error = LoomNetworkError(code: .cancelled, detail: "Connection cancelled.")
+        resolvePendingSendOperations(throwing: error)
         datagramReceivePump?.cancel(with: error)
         streamReceivePump?.cancel(with: error)
         nativeConnection.cancel()
@@ -410,6 +465,7 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
             guard !isCancelled else { return }
             isCancelled = true
             let error = LoomNetworkError(code: .cancelled, detail: "Connection cancelled.")
+            resolvePendingSendOperations(throwing: error)
             datagramReceivePump?.cancel(with: error)
             streamReceivePump?.cancel(with: error)
             resumeStartWaiters(throwing: error)
@@ -436,6 +492,7 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
         guard terminalError == nil, !isCancelled else { return }
         terminalError = error
         isStarting = false
+        resolvePendingSendOperations(throwing: error)
         datagramReceivePump?.finish(with: error)
         streamReceivePump?.finish(with: error)
         resumeStartWaiters(throwing: error)
@@ -452,6 +509,14 @@ package actor LoomNetworkFrameworkConnection: LoomNetworkConnection, LoomConcurr
             } else {
                 waiter.resume()
             }
+        }
+    }
+
+    private func resolvePendingSendOperations(throwing error: any Error) {
+        let operations = pendingSendOperations.values
+        pendingSendOperations.removeAll(keepingCapacity: false)
+        for operation in operations {
+            operation.resolve(.failure(error))
         }
     }
 

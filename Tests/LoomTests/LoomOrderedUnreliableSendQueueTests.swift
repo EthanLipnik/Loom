@@ -22,6 +22,7 @@ struct LoomOrderedUnreliableSendQueueTests {
             id: 9,
             label: "batch/ingress",
             sendHandler: { _ in },
+            hardDeadlineSendHandler: { _, _ in },
             unreliableSendHandler: { _ in },
             queuedUnreliableSendHandler: { _, _, _, onComplete in
                 singleIngressCount.increment()
@@ -238,6 +239,7 @@ struct LoomOrderedUnreliableSendQueueTests {
             id: 7,
             label: "quality-test/reset",
             sendHandler: { _ in },
+            hardDeadlineSendHandler: { _, _ in },
             unreliableSendHandler: { _ in },
             queuedUnreliableSendHandler: { _, _, _, onComplete in
                 onComplete(nil)
@@ -260,6 +262,7 @@ struct LoomOrderedUnreliableSendQueueTests {
             id: 8,
             label: "quality-test/diagnostics",
             sendHandler: { _ in },
+            hardDeadlineSendHandler: { _, _ in },
             unreliableSendHandler: { _ in },
             queuedUnreliableSendHandler: { _, _, _, onComplete in
                 onComplete(nil)

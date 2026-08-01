@@ -278,9 +278,13 @@ private actor LoomNIODatagramHub {
                 remoteAddress: remoteAddress,
                 remoteEndpoint: remoteEndpoint,
                 localEndpoint: localEndpoint,
-                onCancel: { [weak self] address in
+                onCancel: { [weak self] address, identity in
                     guard let self else { return }
-                    await self.remove(address)
+                    await self.remove(address, identity: identity)
+                },
+                onHardCancel: { [weak self] address, identity in
+                    guard let self else { return }
+                    await self.hardCancel(address, identity: identity)
                 }
             )
             connections[remoteAddress] = newConnection
@@ -309,8 +313,34 @@ private actor LoomNIODatagramHub {
         channel = nil
     }
 
-    private func remove(_ address: SocketAddress) {
+    private func remove(_ address: SocketAddress, identity: UUID) {
+        guard connections[address]?.identity == identity else { return }
         connections.removeValue(forKey: address)
+    }
+
+    private func hardCancel(_ address: SocketAddress, identity: UUID) async {
+        guard terminalError == nil else { return }
+        if let currentConnection = connections[address],
+           currentConnection.identity != identity {
+            return
+        }
+        // NIO cannot retract one datagram after it enters a shared channel. A listener-wide close is
+        // the smallest hard boundary that proves no late ordered write survives, so every peer is
+        // intentionally retired rather than claiming false per-peer quiescence.
+        terminalError = LoomNetworkError(
+            code: .cancelled,
+            detail: "Shared datagram channel hard-cut after an ordered send deadline."
+        )
+        let sharedChannel = channel
+        channel = nil
+        let currentConnections = connections.values
+        connections.removeAll(keepingCapacity: false)
+        for connection in currentConnections {
+            await connection.cancelFromListener()
+        }
+        if let sharedChannel {
+            try? await sharedChannel.close().get()
+        }
     }
 }
 
@@ -322,16 +352,19 @@ private actor LoomNIOSharedDatagramConnection: LoomNetworkConnection {
 
     nonisolated let transportKind: LoomTransportKind = .udp
     nonisolated let remoteEndpoint: LoomNetworkEndpoint
+    nonisolated let identity = UUID()
 
     private let channel: any Channel
     private let remoteAddress: SocketAddress
     private let localEndpointValue: LoomNetworkEndpoint
-    private let onCancel: @Sendable (SocketAddress) async -> Void
+    private let onCancel: @Sendable (SocketAddress, UUID) async -> Void
+    private let onHardCancel: @Sendable (SocketAddress, UUID) async -> Void
     private var queuedDatagrams: [Data] = []
     private var queuedBytes = 0
     private var receiveWaiter: ReceiveWaiter?
     private var terminalError: LoomNetworkError?
     private var isCancelled = false
+    private var hasIssuedHardCancel = false
     private var eventContinuations: [UUID: AsyncStream<LoomNetworkConnectionEvent>.Continuation] = [:]
     private var didStart = false
 
@@ -343,13 +376,15 @@ private actor LoomNIOSharedDatagramConnection: LoomNetworkConnection {
         remoteAddress: SocketAddress,
         remoteEndpoint: LoomNetworkEndpoint,
         localEndpoint: LoomNetworkEndpoint,
-        onCancel: @escaping @Sendable (SocketAddress) async -> Void
+        onCancel: @escaping @Sendable (SocketAddress, UUID) async -> Void,
+        onHardCancel: @escaping @Sendable (SocketAddress, UUID) async -> Void
     ) {
         self.channel = channel
         self.remoteAddress = remoteAddress
         self.remoteEndpoint = remoteEndpoint
         localEndpointValue = localEndpoint
         self.onCancel = onCancel
+        self.onHardCancel = onHardCancel
     }
 
     var localEndpoint: LoomNetworkEndpoint? {
@@ -461,7 +496,28 @@ private actor LoomNIOSharedDatagramConnection: LoomNetworkConnection {
         )
         publish(.cancelled)
         finishEvents()
-        await onCancel(remoteAddress)
+        await onCancel(remoteAddress, identity)
+    }
+
+    func hardCancel() async {
+        guard !hasIssuedHardCancel else { return }
+        hasIssuedHardCancel = true
+        if !isCancelled {
+            isCancelled = true
+            queuedDatagrams.removeAll(keepingCapacity: false)
+            queuedBytes = 0
+            finishWaiter(
+                throwing: LoomNetworkError(code: .cancelled, detail: "Datagram connection hard-cut.")
+            )
+            publish(.cancelled)
+            finishEvents()
+        }
+        // A prior logical cancel may have removed this peer from the hub, but it cannot prove that
+        // an already-submitted write stopped. The hard cut therefore still closes the shared socket.
+        await onHardCancel(remoteAddress, identity)
+        // Retain a direct channel fence as well: hub ownership can disappear during listener
+        // cancellation, but completion still requires the shared socket itself to be closed.
+        try? await channel.close().get()
     }
 
     func cancelFromListener() {

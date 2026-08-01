@@ -164,6 +164,16 @@ package actor LoomFramedConnection: LoomSessionTransport {
         await connection.cancel()
     }
 
+    package func hardCloseTransport() async {
+        await cancelPendingUnreliableSends()
+        serializedUnreliableSender.close()
+        observationTask?.cancel()
+        observationTask = nil
+        receiveBuffer.discard()
+        incompleteFrameDeadline = nil
+        await connection.hardCancel()
+    }
+
     private func queuedUnreliableSender(
         for profile: LoomQueuedUnreliableSendProfile
     ) -> LoomOrderedUnreliableSendQueue {

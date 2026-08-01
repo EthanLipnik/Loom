@@ -103,6 +103,9 @@ public protocol LoomNetworkConnection: Sendable {
     func receive(maximumBytes: Int) async throws -> Data?
     func makeEventStream() async -> AsyncStream<LoomNetworkConnectionEvent>
     func cancel() async
+    /// Destructively cancels transport when an ordered write has unknown acceptance. Backends with
+    /// shared socket ownership must override this to prevent a late write from surviving the cut.
+    func hardCancel() async
 }
 
 public extension LoomNetworkConnection {
@@ -110,6 +113,10 @@ public extension LoomNetworkConnection {
     /// can rely on lifecycle events alone.
     var currentPath: LoomNetworkPath? {
         get async { nil }
+    }
+
+    func hardCancel() async {
+        await cancel()
     }
 }
 
